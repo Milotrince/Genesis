@@ -1,6 +1,5 @@
 from genesis.options import Options
 
-
 class SensorOptions(Options):
     """
     Base class for all sensor options.

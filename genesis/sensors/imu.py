@@ -4,7 +4,6 @@ import numpy as np
 import taichi as ti
 import torch
 
-from genesis.options.sensors import SensorOptions
 from genesis.utils.geom import (
     euler_to_quat,
     inv_transform_by_trans_quat,
@@ -12,7 +11,6 @@ from genesis.utils.geom import (
 )
 
 from .base_sensor import Sensor
-from .sensor_manager import register_sensor
 
 
 @ti.data_oriented
@@ -80,31 +78,3 @@ class IMU(Sensor):
         if self._options.return_gyroscope:
             ret.append(self._cache[envs_idx, self._cache_idx, 1, :].squeeze())
         return tuple(ret)
-
-
-@register_sensor(IMU)
-class IMUOptions(SensorOptions):
-    """
-    IMU sensor returns the linear acceleration (accelerometer) and angular velocity (gyroscope)
-    of the associated entity link.
-
-    Parameters
-    ----------
-    link_idx : int
-        The global index of the RigidLink to which this IMU sensor is attached.
-    pos_offset : tuple[float, float, float]
-        The offset of the IMU sensor from the RigidLink.
-    euler_offset : tuple[float, float, float]
-        The offset of the IMU sensor from the RigidLink in euler angles.
-    return_accelerometer : bool
-        Whether to return the linear acceleration (accelerometer).
-    return_gyroscope : bool
-        Whether to return the angular velocity (gyroscope).
-    """
-
-    link_idx: int
-    pos_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    euler_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
-
-    return_accelerometer: bool = True
-    return_gyroscope: bool = True

@@ -1,9 +1,8 @@
 import torch
 
 import genesis as gs
-from genesis.sensors.imu import IMUOptions
-
-from .utils import assert_allclose
+from genesis.options.sensors import IMUOptions
+from utils import assert_allclose
 
 
 def test_imu_sensor(show_viewer):
