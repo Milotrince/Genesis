@@ -1,7 +1,7 @@
 import torch
 
 import genesis as gs
-from genesis.options.sensors import IMUOptions
+from genesis.sensors.imu import IMUOptions
 from utils import assert_allclose
 
 
@@ -34,6 +34,11 @@ def test_imu_sensor(show_viewer):
     for _ in range(100):
         scene.step()
 
-    acc, ang = imu.read()
-    assert_allclose(acc, torch.tensor([0.0, 0.0, -GRAVITY]), tol=1e-7)
-    assert_allclose(ang, torch.tensor([0.0, 0.0, 0.0]), tol=1e-7)
+    imu_data = imu.read()
+    assert_allclose(imu_data["lin_acc"], torch.tensor([0.0, 0.0, -GRAVITY]), tol=1e-7)
+    assert_allclose(imu_data["ang_vel"], torch.tensor([0.0, 0.0, 0.0]), tol=1e-7)
+
+
+if __name__ == "__main__":
+    gs.init(backend=gs.cpu)
+    test_imu_sensor(show_viewer=False)
