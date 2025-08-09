@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 
 import genesis as gs
@@ -8,10 +9,11 @@ from utils import assert_allclose
 def test_imu_sensor(show_viewer):
     """Test if the IMU sensor returns the correct data."""
     GRAVITY = -10.0
+    DT = 1e-2
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=1e-2,
+            dt=DT,
             substeps=1,
             gravity=(0.0, 0.0, GRAVITY),
         ),
@@ -28,10 +30,19 @@ def test_imu_sensor(show_viewer):
     )
 
     imu = scene.add_sensor(IMUOptions(link_idx=box.base_link_idx))
+    imu_delayed = scene.add_sensor(IMUOptions(link_idx=box.base_link_idx, read_delay=DT))
 
     scene.build()
 
-    for _ in range(100):
+    for _ in range(40):
+        scene.step()
+
+    imu_data = imu.read()
+    imu_delayed_data = imu_delayed.read()
+    with np.testing.assert_raises(AssertionError):
+        assert_allclose(imu_data["lin_acc"] - imu_delayed_data["lin_acc"], [0.0, 0.0, 0.0], tol=1e-7)
+
+    for _ in range(60):
         scene.step()
 
     imu_data = imu.read()

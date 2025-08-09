@@ -43,7 +43,7 @@ class IMU(Sensor):
             "ang_vel": (3, 6),
         }
 
-    def _update_shared_cache(self):
+    def _update_shared_gt_cache(self):
         gravity = self._solver.get_gravity()
         quats = self._solver.get_links_quat(links_idx=self._shared_metadata["links_idx"])
         acc = self._solver.get_links_acc(links_idx=self._shared_metadata["links_idx"])
@@ -64,7 +64,10 @@ class IMU(Sensor):
         local_acc = local_acc - gravity.unsqueeze(1).repeat(1, local_acc.shape[1], 1)
 
         # cache shape: (B, n_links, 6)
-        self._cache.copy_(torch.cat([local_acc, local_ang], dim=2))
+        self._gt_cache.copy_(torch.cat([local_acc, local_ang], dim=2))
+
+    def _update_shared_cache(self):
+        self._cache.append(self._gt_cache)
 
     def _get_cache_length(self) -> int:
         return 1
