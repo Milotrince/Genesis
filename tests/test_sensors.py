@@ -53,12 +53,10 @@ def test_imu_sensor(show_viewer):
     imu_data = imu.read()
     imu_delayed_data = imu_delayed.read()
 
-    # angular velocity should not be zero due to COM shift
-    with np.testing.assert_raises(AssertionError):
+    with np.testing.assert_raises(AssertionError, msg="Angular velocity should not be zero due to COM shift"):
         assert_allclose(imu_data["ang_vel"], torch.tensor([0.0, 0.0, 0.0]), tol=1e-3)
 
-    # delayed data should not be equal to the ground truthdata
-    with np.testing.assert_raises(AssertionError):
+    with np.testing.assert_raises(AssertionError, msg="Delayed data should not be equal to the ground truth data"):
         assert_allclose(imu_data["lin_acc"] - imu_delayed_data["lin_acc"], [0.0, 0.0, 0.0], tol=1e-3)
 
     box.set_COM_shift(torch.tensor([[0.0, 0.0, 0.0]]))

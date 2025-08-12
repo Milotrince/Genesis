@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING, Any
+
 import taichi as ti
 import torch
 
@@ -12,12 +14,14 @@ from genesis.utils.geom import (
 from .base_sensor import Sensor
 from .sensor_manager import register_sensor
 
+if TYPE_CHECKING:
+    from genesis.utils.ring_buffer import TensorRingBuffer
+
 
 @ti.data_oriented
 class IMU(Sensor):
 
     def build(self):
-        super().build()
         self._solver = self._manager._sim.rigid_solver
         assert self._options.link_idx >= 0 and self._options.link_idx < self._solver.n_links, "Invalid RigidLink index."
         self._link_idx = self._options.link_idx
@@ -25,6 +29,7 @@ class IMU(Sensor):
         quat_offset = euler_to_quat(self._options.euler_offset)
 
         if len(self._shared_metadata) == 0:
+            self._shared_metadata["solver"] = self._solver
             self._shared_metadata["links_idx"] = []
             self._shared_metadata["offsets_pos"] = torch.tensor([], dtype=torch.float32)
             self._shared_metadata["offsets_quat"] = torch.tensor([], dtype=torch.float32)
@@ -45,36 +50,46 @@ class IMU(Sensor):
             return_format["ang_vel"] = (3,)
         return return_format
 
-    def _update_shared_ground_truth_cache(self):
-        gravity = self._solver.get_gravity()
-        quats = self._solver.get_links_quat(links_idx=self._shared_metadata["links_idx"])
-        acc = self._solver.get_links_acc(links_idx=self._shared_metadata["links_idx"])
-        ang = self._solver.get_links_ang(links_idx=self._shared_metadata["links_idx"])
-        if self._solver.n_envs == 0:
+    def _get_cache_length(self) -> int:
+        return 1
+
+    @classmethod
+    def _update_shared_ground_truth_cache(
+        cls, shared_metadata: dict[str, Any], shared_ground_truth_cache: torch.Tensor
+    ):
+        solver = shared_metadata["solver"]
+        links_idx = shared_metadata["links_idx"]
+        offsets_pos = shared_metadata["offsets_pos"]
+        offsets_quat = shared_metadata["offsets_quat"]
+
+        gravity = solver.get_gravity()
+        quats = solver.get_links_quat(links_idx=links_idx)
+        acc = solver.get_links_acc(links_idx=links_idx)
+        ang = solver.get_links_ang(links_idx=links_idx)
+        if solver.n_envs == 0:
             gravity = gravity.unsqueeze(0)
             quats = quats.unsqueeze(0)
             acc = acc.unsqueeze(0)
             ang = ang.unsqueeze(0)
 
-        offset_quats = transform_quat_by_quat(
-            quats, self._shared_metadata["offsets_quat"].unsqueeze(0).repeat(quats.shape[0], 1, 1)
-        )
+        offset_quats = transform_quat_by_quat(quats, offsets_quat.unsqueeze(0).repeat(quats.shape[0], 1, 1))
         # acc/ang shape: (B, n_links, 3)
-        local_acc = inv_transform_by_trans_quat(acc, self._shared_metadata["offsets_pos"], offset_quats)
-        local_ang = inv_transform_by_trans_quat(ang, self._shared_metadata["offsets_pos"], offset_quats)
+        local_acc = inv_transform_by_trans_quat(acc, offsets_pos, offset_quats)
+        local_ang = inv_transform_by_trans_quat(ang, offsets_pos, offset_quats)
 
         local_acc = local_acc - gravity.unsqueeze(1).repeat(1, local_acc.shape[1], 1)
 
         # cache shape: (B, n_links * 6)
-        self._ground_truth_cache.copy_(torch.cat([local_acc, local_ang], dim=2).flatten(1))
+        shared_ground_truth_cache.copy_(torch.cat([local_acc, local_ang], dim=2).flatten(1))
 
-    def _update_shared_cache(self):
-        self._cache.append(self._ground_truth_cache)
+    @classmethod
+    def _update_shared_cache(
+        cls, shared_metadata: dict[str, Any], shared_ground_truth_cache: torch.Tensor, shared_cache: "TensorRingBuffer"
+    ):
+        shared_cache.append(shared_ground_truth_cache)
 
-    def _get_cache_length(self) -> int:
-        return 1
-
-    def _get_cache_dtype(self) -> torch.dtype:
+    @classmethod
+    def _get_cache_dtype(cls) -> torch.dtype:
         return gs.tc_float
 
 
