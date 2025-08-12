@@ -115,7 +115,7 @@ class Sensor(RBC):
 
         for i, shape in enumerate(return_shapes):
             start_idx, end_idx = self._shape_indices[i]
-            value = tensor[envs_idx, start_idx:end_idx].reshape(len(envs_idx), *shape).squeeze()
+            value = tensor[:, envs_idx, start_idx:end_idx].reshape(len(envs_idx), *shape).squeeze()
             if self._manager._sim.n_envs == 0:
                 value = value.squeeze(0)
             return_values.append(value)
