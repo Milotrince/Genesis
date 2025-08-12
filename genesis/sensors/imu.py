@@ -37,13 +37,15 @@ class IMU(Sensor):
             [self._shared_metadata["offsets_quat"], torch.tensor([quat_offset], dtype=torch.float32)]
         )
 
-    def _get_return_format(self) -> dict[str, tuple[int, int]] | None:
-        return {
-            "lin_acc": (0, 3),
-            "ang_vel": (3, 6),
-        }
+    def _get_return_format(self) -> dict[str, tuple[int, ...]]:
+        return_format = {}
+        if self._options.return_accelerometer:
+            return_format["lin_acc"] = (3,)
+        if self._options.return_gyroscope:
+            return_format["ang_vel"] = (3,)
+        return return_format
 
-    def _update_shared_gt_cache(self):
+    def _update_shared_ground_truth_cache(self):
         gravity = self._solver.get_gravity()
         quats = self._solver.get_links_quat(links_idx=self._shared_metadata["links_idx"])
         acc = self._solver.get_links_acc(links_idx=self._shared_metadata["links_idx"])
@@ -63,21 +65,16 @@ class IMU(Sensor):
 
         local_acc = local_acc - gravity.unsqueeze(1).repeat(1, local_acc.shape[1], 1)
 
-        # cache shape: (B, n_links, 6)
-        self._gt_cache.copy_(torch.cat([local_acc, local_ang], dim=2))
+        # cache shape: (B, n_links * 6)
+        self._ground_truth_cache.copy_(torch.cat([local_acc, local_ang], dim=2).flatten(1))
 
     def _update_shared_cache(self):
-        self._cache.append(self._gt_cache)
+        self._cache.append(self._ground_truth_cache)
 
     def _get_cache_length(self) -> int:
         return 1
 
-    @classmethod
-    def _get_cache_size(cls) -> int:
-        return 2 * 3
-
-    @classmethod
-    def _get_cache_dtype(cls) -> torch.dtype:
+    def _get_cache_dtype(self) -> torch.dtype:
         return gs.tc_float
 
 
@@ -100,3 +97,6 @@ class IMUOptions(SensorOptions):
     link_idx: int
     pos_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     euler_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+    return_accelerometer: bool = True
+    return_gyroscope: bool = True
