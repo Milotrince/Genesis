@@ -3,7 +3,8 @@ import torch
 
 import genesis as gs
 from genesis.sensors.imu import IMUOptions
-from utils import assert_allclose
+
+from .utils import assert_allclose
 
 
 def test_imu_sensor(show_viewer):
@@ -25,7 +26,7 @@ def test_imu_sensor(show_viewer):
     box = scene.add_entity(
         morph=gs.morphs.Box(
             size=(0.1, 0.1, 0.1),
-            pos=(0.0, 0.0, 0.1),
+            pos=(0.0, 0.0, 0.2),
         ),
     )
 
@@ -34,22 +35,38 @@ def test_imu_sensor(show_viewer):
 
     scene.build()
 
-    for _ in range(40):
+    for _ in range(10):
         scene.step()
+
+    # freefall
+    imu_data = imu.read()
+    assert_allclose(imu_data["lin_acc"], torch.tensor([0.0, 0.0, 0.0]), tol=1e-7)
+    assert_allclose(imu_data["ang_vel"], torch.tensor([0.0, 0.0, 0.0]), tol=1e-7)
+
+    # shift COM to induce angular velocity
+    box.set_COM_shift(torch.tensor([[0.1, 0.1, 0.1]]))
+
+    for _ in range(30):
+        scene.step()
+    # collision with ground
 
     imu_data = imu.read()
     imu_delayed_data = imu_delayed.read()
-    with np.testing.assert_raises(AssertionError):
-        assert_allclose(imu_data["lin_acc"] - imu_delayed_data["lin_acc"], [0.0, 0.0, 0.0], tol=1e-7)
 
-    for _ in range(60):
+    # angular velocity should not be zero due to COM shift
+    with np.testing.assert_raises(AssertionError):
+        assert_allclose(imu_data["ang_vel"], torch.tensor([0.0, 0.0, 0.0]), tol=1e-3)
+
+    # delayed data should not be equal to the ground truthdata
+    with np.testing.assert_raises(AssertionError):
+        assert_allclose(imu_data["lin_acc"] - imu_delayed_data["lin_acc"], [0.0, 0.0, 0.0], tol=1e-3)
+
+    box.set_COM_shift(torch.tensor([[0.0, 0.0, 0.0]]))
+
+    for _ in range(80):
         scene.step()
 
+    # on ground
     imu_data = imu.read()
     assert_allclose(imu_data["lin_acc"], torch.tensor([0.0, 0.0, -GRAVITY]), tol=1e-7)
-    assert_allclose(imu_data["ang_vel"], torch.tensor([0.0, 0.0, 0.0]), tol=1e-7)
-
-
-if __name__ == "__main__":
-    gs.init(backend=gs.cpu)
-    test_imu_sensor(show_viewer=False)
+    assert_allclose(imu_data["ang_vel"], torch.tensor([0.0, 0.0, 0.0]), tol=1e-5)
