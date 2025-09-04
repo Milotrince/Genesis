@@ -456,7 +456,9 @@ class RaycasterSensor(RigidSensorMixin, NoisySensorMixin, Sensor):
         self._shared_metadata.pattern_generators.append(self.pattern_generator)
 
         pos_offset = self._shared_metadata.offsets_pos[-1, :]
-        quat_offset = self._shared_metadata.offsets_quat[0, -1, :]
+        quat_offset = self._shared_metadata.offsets_quat[..., -1, :]
+        if self._shared_metadata.solver.n_envs > 0:
+            quat_offset = quat_offset[0]
 
         ray_starts = self.pattern_generator.get_ray_starts().reshape(-1, 3)
         ray_starts = transform_by_trans_quat(ray_starts, pos_offset, quat_offset)
