@@ -218,7 +218,7 @@ class TemperatureProperties(NamedTuple):
     emissivity: float = 0.9
 
 
-class TemperatureGrid(RigidSensorOptionsMixin, NoisySensorOptionsMixin, SensorOptions):
+class TemperatureGrid(RigidSensorOptionsMixin, NoisySensorOptionsMixin):
     """
     Sensor that returns the temperature in Celsius of the associated RigidLink in its local frame.
     Temperature is computed based on object contacts and their material properties provided to these options.
@@ -265,7 +265,7 @@ class TemperatureGrid(RigidSensorOptionsMixin, NoisySensorOptionsMixin, SensorOp
     debug_temperature_range: tuple[float, float] = (0.0, 100.0)
 
 
-class IMU(RigidSensorOptionsMixin, NoisySensorOptionsMixin, SensorOptions):
+class IMU(RigidSensorOptionsMixin, NoisySensorOptionsMixin):
     """
     IMU sensor returns the linear acceleration (accelerometer) and angular velocity (gyroscope)
     of the associated entity link.
