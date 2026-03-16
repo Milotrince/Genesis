@@ -348,7 +348,7 @@ def _kernel_contact_heat(
             other_link = lb if la == sensor_link_idx else la
             mat_other = link_to_material_idx[other_link]
             if mat_other >= 0:
-                T_other = qd.select(use_link_temps, link_temps[i_b, other_link], link_base_temperature[mat_other])
+                T_other = link_temps[i_b, other_link] if use_link_temps else link_base_temperature[mat_other]
                 k_other = link_conductivity[mat_other]
                 k_eff = _qd_k_eff(k_sensor, k_other, eps)
                 p_world = collider_state.contact_data.pos[i_c, i_b]
