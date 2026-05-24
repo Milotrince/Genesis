@@ -1,9 +1,10 @@
 import math
 import os
+import subprocess
+import threading
 import time
 from collections import namedtuple
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pytest
@@ -14,7 +15,6 @@ import genesis as gs
 from .utils import (
     get_hf_dataset,
     get_git_commit_timestamp,
-    pprint_oneline,
 )
 
 STEP_DT = 0.01
@@ -828,6 +828,89 @@ def make_dex_hand(n_envs, solver=None, gjk=None, **scene_kwargs):
 # ---------------------------------------------------------------------------
 
 
+def _process_gpu_mem_mb():
+    # Per-process GPU memory (MiB) for this worker, via nvidia-smi.
+    #
+    # `torch.cuda.mem_get_info` was used here before but it reports DEVICE-WIDE
+    # memory (`total - free`): it also counts other processes sharing the GPU,
+    # the CUDA context, and the quadrants memory pool reservation. That made the
+    # number both noisy across runs and flat after build (the pool is grabbed up
+    # front and never released, so `peak` could never exceed `mem_after_build`).
+    # `--query-compute-apps` isolates the memory CUDA attributes to THIS pid,
+    # which is also the source of truth used by `monitor_test_mem.py`.
+    # Returns None on non-CUDA backends or when nvidia-smi is unavailable.
+    device = getattr(gs, "device", None)
+    if device is None or getattr(device, "type", None) != "cuda":
+        return None
+    try:
+        output = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=True,
+            text=True,
+            timeout=10,
+        ).stdout
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+
+    pid = os.getpid()
+    used_mb = None
+    for line in output.splitlines():
+        fields = line.split(",")
+        if len(fields) != 2:
+            continue
+        try:
+            row_pid, row_mb = int(fields[0]), float(fields[1])
+        except ValueError:
+            continue
+        if row_pid == pid:
+            # A pid can appear once per GPU context; accumulate to be safe.
+            used_mb = row_mb if used_mb is None else used_mb + row_mb
+    return used_mb
+
+
+class _GpuMemorySampler:
+    # Polls per-process GPU memory in a daemon thread on a wall-clock interval.
+    #
+    # Sampling must NOT happen inside the timed step loop: `nvidia-smi` costs
+    # tens of milliseconds per call, enough to corrupt `runtime_fps` if called
+    # every N steps. A background thread keeps the measurement off the hot path,
+    # and wall-clock sampling makes the peak independent of step throughput.
+    _INTERVAL_S = 0.25
+
+    def __init__(self):
+        self._peak_mb = None
+        self._stop = threading.Event()
+        self._thread = None
+
+    def sample(self):
+        mem_mb = _process_gpu_mem_mb()
+        if mem_mb is not None:
+            self._peak_mb = mem_mb if self._peak_mb is None else max(self._peak_mb, mem_mb)
+        return mem_mb
+
+    def _run(self):
+        while not self._stop.wait(self._INTERVAL_S):
+            self.sample()
+
+    def __enter__(self):
+        if self.sample() is not None:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+        self.sample()
+
+    @property
+    def peak_mb(self):
+        return self._peak_mb
+
+
 def run_benchmark(step_fn, *, n_envs, meta):
     import quadrants as qd
 
@@ -850,89 +933,41 @@ def run_benchmark(step_fn, *, n_envs, meta):
     step_fn()
     qd.sync()
 
-    num_steps = 0
-    is_recording = False
-    time_start = time.time()
-    while True:
-        step_fn()
-        time_elapsed = time.time() - time_start
-        if is_recording:
-            num_steps += 1
-            if time_elapsed > meta.duration_record:
+    with _GpuMemorySampler() as mem_sampler:
+        # Measured after build + the warmup-bracketing step above, so the
+        # quadrants pool and torch allocator are fully warmed: this is the
+        # steady post-build footprint. `peak_mem_mb` then tracks the wall-clock
+        # maximum over the whole warmup + record window.
+        mem_after_build_mb = mem_sampler.sample()
+
+        num_steps = 0
+        is_recording = False
+        time_start = time.time()
+        while True:
+            step_fn()
+            time_elapsed = time.time() - time_start
+            if is_recording:
+                num_steps += 1
+                if time_elapsed > meta.duration_record:
+                    qd.sync()
+                    time_elapsed = time.time() - time_start
+                    break
+            elif time_elapsed > meta.duration_warmup:
                 qd.sync()
-                time_elapsed = time.time() - time_start
-                break
-        elif time_elapsed > meta.duration_warmup:
-            qd.sync()
-            time_start = time.time()
-            is_recording = True
+                time_start = time.time()
+                is_recording = True
+
+    peak_mem_mb = mem_sampler.peak_mb
     runtime_fps = int(num_steps * max(n_envs, 1) / time_elapsed)
     realtime_factor = runtime_fps * meta.step_dt
 
-    return dict(compile_time=meta.compile_time, runtime_fps=runtime_fps, realtime_factor=realtime_factor)
-
-
-# ---------------------------------------------------------------------------
-# Pytest infrastructure
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="session")
-def stream_writers(printer_session, request):
-    report_path = Path(request.config.getoption("--speed-test-filepath"))
-
-    # Delete old unrelated worker-specific reports
-    worker_id = os.environ.get("PYTEST_XDIST_WORKER")
-    if worker_id == "gw0":
-        worker_count = int(os.environ["PYTEST_XDIST_WORKER_COUNT"])
-
-        for path in report_path.parent.glob("-".join((report_path.stem, "*.txt"))):
-            _, worker_id_ = path.stem.rsplit("-", 1)
-            worker_num = int(worker_id_[2:])
-            if worker_num >= worker_count:
-                path.unlink()
-
-    # Create new empty worker-specific report
-    report_name = "-".join(filter(None, (report_path.stem, worker_id)))
-    report_path = report_path.with_name(f"{report_name}.txt")
-    if report_path.exists():
-        report_path.unlink()
-    fd = open(report_path, "w")
-
-    yield (lambda msg: print(msg, file=fd, flush=True), printer_session)
-
-    fd.close()
-
-
-@pytest.fixture(scope="function")
-def factory_logger(stream_writers):
-    class Logger:
-        def __init__(self, hparams: dict[str, Any]):
-            self.hparams = {
-                **hparams,
-                "dtype": "ndarray" if gs.use_ndarray else "field",
-                "backend": str(gs.backend.name),
-            }
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc_value, traceback):
-            pass
-
-        def write(self, items):
-            nonlocal stream_writers
-
-            if stream_writers:
-                msg = (
-                    pprint_oneline(self.hparams, delimiter=" \t| ")
-                    + " \t| "
-                    + pprint_oneline(items, delimiter=" \t| ", digits=1)
-                )
-                for writer in stream_writers:
-                    writer(msg)
-
-    return Logger
+    return dict(
+        compile_time=meta.compile_time,
+        runtime_fps=runtime_fps,
+        realtime_factor=realtime_factor,
+        mem_after_build_mb=mem_after_build_mb,
+        peak_mem_mb=peak_mem_mb,
+    )
 
 
 # ---------------------------------------------------------------------------

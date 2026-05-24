@@ -14,10 +14,10 @@ from io import BytesIO
 from pathlib import Path
 
 import numpy as np
-import setproctitle
 import psutil
 import pyglet
 import pytest
+import setproctitle
 from _pytest.mark import Expression, MarkMatcher
 from PIL import Image
 from syrupy.extensions.image import PNGImageSnapshotExtension
@@ -572,6 +572,7 @@ def asset_tmp_path(tmp_path_factory):
 @pytest.fixture
 def tol():
     import numpy as np
+
     import genesis as gs
 
     return TOL_DOUBLE if gs.np_float == np.float64 else TOL_SINGLE
@@ -781,10 +782,11 @@ def initialize_genesis(request, monkeypatch, tmp_path, backend, precision, perfo
 
             monkeypatch.setattr(RigidSimStaticConfig, "__init__", _RigidSimStaticConfig_init)
 
-        if gs.backend != gs.cpu and gs.device.index is not None:
-            device_idx = _torch_get_gpu_idx(gs.device.index)
-            if device_idx not in _get_gpu_indices():
-                raise RuntimeError(f"Invalid CUDA GPU device, got {device_idx}, not in {_get_gpu_indices()}.")
+        if not os.environ.get("GENESIS_SKIP_GPU_DEVICE_CHECK", False):
+            if gs.backend != gs.cpu and gs.device.index is not None:
+                device_idx = _torch_get_gpu_idx(gs.device.index)
+                if device_idx not in _get_gpu_indices():
+                    raise RuntimeError(f"Invalid CUDA GPU device, got {device_idx}, not in {_get_gpu_indices()}.")
 
         if backend != gs.cpu and gs.backend == gs.cpu:
             pytest.skip(SKIP_NO_GPU)
@@ -977,3 +979,72 @@ def png_snapshot(request, snapshot):
         )
 
     return snapshot_obj
+
+
+# ---------------------------------------------------------------------------
+# Benchmark logging fixtures (shared across all benchmark_*.py / test_*_benchmarks.py)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def stream_writers(printer_session, request):
+    report_path = Path(request.config.getoption("--speed-test-filepath"))
+
+    # Delete old unrelated worker-specific reports
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER")
+    if worker_id == "gw0":
+        worker_count = int(os.environ["PYTEST_XDIST_WORKER_COUNT"])
+
+        for path in report_path.parent.glob("-".join((report_path.stem, "*.txt"))):
+            _, worker_id_ = path.stem.rsplit("-", 1)
+            worker_num = int(worker_id_[2:])
+            if worker_num >= worker_count:
+                path.unlink()
+
+    # Create new empty worker-specific report
+    report_name = "-".join(filter(None, (report_path.stem, worker_id)))
+    report_path = report_path.with_name(f"{report_name}.txt")
+    if report_path.exists():
+        report_path.unlink()
+    fd = open(report_path, "w")
+
+    yield (lambda msg: print(msg, file=fd, flush=True), printer_session)
+
+    fd.close()
+
+
+@pytest.fixture(scope="function")
+def factory_logger(stream_writers):
+    from typing import Any
+
+    import genesis as gs
+
+    from .utils import pprint_oneline
+
+    class Logger:
+        def __init__(self, hparams: dict[str, Any]):
+            self.hparams = {
+                **hparams,
+                "dtype": "ndarray" if gs.use_ndarray else "field",
+                "backend": str(gs.backend.name),
+            }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            pass
+
+        def write(self, items):
+            nonlocal stream_writers
+
+            if stream_writers:
+                msg = (
+                    pprint_oneline(self.hparams, delimiter=" \t| ")
+                    + " \t| "
+                    + pprint_oneline(items, delimiter=" \t| ", digits=1)
+                )
+                for writer in stream_writers:
+                    writer(msg)
+
+    return Logger
