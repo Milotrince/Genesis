@@ -34,6 +34,7 @@ PROBE_SENSOR_RUNNABLES = (
     "surface_distance_probe",
     "contact_depth_probe",
     "kinematic_taxel",
+    "proximity_taxel",
     "elastomer_taxel",
 )
 POINTCLOUD_SENSOR_RUNNABLES = (
@@ -44,7 +45,7 @@ POINTCLOUD_SENSOR_RUNNABLES = (
 N_ENVS_VARIANTS = (512, 1024, 2048, 4096, 8192, 16384)
 N_SENSORS_VARIANTS = (1, 5)
 PROBE_COUNTS = (10, 100, 1000, 10_000)
-SAMPLE_POINT_COUNTS = (60, 600, 6000, 60_000)
+SAMPLE_POINT_COUNTS = (60, 600, 6000, 60_000, 600_000)
 
 DEFAULT_N_SENSORS = 1
 DEFAULT_N_PROBES = 100
