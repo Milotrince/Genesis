@@ -13,15 +13,19 @@ from genesis.typing import (
     NonNegativeInt,
     OptionalIArrayType,
     PositiveFArrayType,
+    PositiveFGridType,
     PositiveFloat,
     PositiveVec3IType,
     RotationMatrixType,
+    UnitInterval,
     UnitIntervalVec3Type,
     UnitIntervalVec4Type,
     UnitVec3FArrayType,
+    UnitVec3FGridType,
     UnitVec3FType,
     Vec2FType,
     Vec3FArrayType,
+    Vec3FGridType,
     Vec3FType,
     Vec4FType,
     is_sequence,
@@ -201,25 +205,39 @@ class ProbeSensorOptionsMixin(SensorOptions[SensorT]):
 
     Parameters
     ----------
-    probe_local_pos : array-like[array-like[float, float, float]]
-        Probe positions in link-local frame. One ``(x, y, z)`` per probe.
-    probe_radius : float | array-like[float]
-        Probe sensing radius in meters. A scalar is shared by every probe; an array must match the probe count.
+    probe_local_pos : array-like[array-like[float, float, float]] or shape ``(M, N, 3)`` grid
+        Probe positions in link-local frame. Either a flat ``(N, 3)`` set or a 2D grid ``(M, N, 3)``; the
+        ``read()`` output is reshaped back to match this layout.
+    probe_radius : float | array-like[float] or shape ``(M, N)`` grid
+        Probe sensing radius in meters. A scalar is shared by every probe; an array (or grid) must match the
+        layout of ``probe_local_pos``.
     probe_radius_noise : float
         Additive radius noise in meters used by kernels whose measured branch depends on effective probe radius.
-    debug_probe_color : array-like[float, float, float, float]
-        RGBA color for inactive debug probe spheres.
+    debug_probe_color : array-like[float, float, float]
+        RGB color for debug probe spheres (no alpha; the center sphere is drawn opaque and the outer sphere uses
+        ``debug_probe_sphere_opacity``).
+    debug_probe_center_radius : float
+        Radius in meters of the small opaque marker sphere drawn at each probe position.
+    debug_probe_sphere_opacity : float
+        Alpha (0..1) of the outer translucent sphere drawn at each probe's sensing radius. Set to ``0.0`` to skip.
     """
 
-    probe_local_pos: Vec3FArrayType = ((0.0, 0.0, 0.0),)
-    probe_radius: PositiveFArrayType | PositiveFloat = 0.01
+    probe_local_pos: Vec3FArrayType | Vec3FGridType = ((0.0, 0.0, 0.0),)
+    probe_radius: PositiveFloat | PositiveFArrayType | PositiveFGridType = 0.01
     probe_radius_noise: NonNegativeFloat = 0.0
-    debug_probe_color: UnitIntervalVec4Type = (0.2, 0.6, 1.0, 0.6)
+    debug_probe_color: UnitIntervalVec3Type = (0.2, 0.4, 1.0)
+    debug_probe_center_radius: PositiveFloat = 0.0008
+    debug_probe_sphere_opacity: UnitInterval = 0.3
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        n_probes = np.array(self.probe_local_pos).reshape(-1, 3).shape[0]
-        _check_len_match(self.probe_radius, n_probes, "probe_radius", "probe_local_pos")
+        n_probes = int(np.prod(np.asarray(self.probe_local_pos).shape[:-1]))
+        if isinstance(self.probe_radius, Sequence):
+            if np.asarray(self.probe_radius).size != n_probes:
+                gs.raise_exception(
+                    f"probe_radius shape {np.asarray(self.probe_radius).shape} must contain "
+                    f"{n_probes} entries to match probe_local_pos."
+                )
 
 
 class ProbesWithNormalSensorOptionsMixin(ProbeSensorOptionsMixin[SensorT]):
@@ -227,16 +245,16 @@ class ProbesWithNormalSensorOptionsMixin(ProbeSensorOptionsMixin[SensorT]):
     Probe options for sensors that also define one normal per probe, or one shared normal.
     """
 
-    probe_local_normal: UnitVec3FArrayType | UnitVec3FType = (0.0, 0.0, 1.0)
+    probe_local_normal: UnitVec3FType | UnitVec3FArrayType | UnitVec3FGridType = (0.0, 0.0, 1.0)
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        n_probes = np.array(self.probe_local_pos).reshape(-1, 3).shape[0]
-        normals = np.array(self.probe_local_normal)
-        if normals.ndim > 1 and normals.reshape(-1, 3).shape[0] != n_probes:
+        n_probes = int(np.prod(np.asarray(self.probe_local_pos).shape[:-1]))
+        normals = np.asarray(self.probe_local_normal)
+        if normals.ndim > 1 and normals.size // 3 != n_probes:
             gs.raise_exception(
-                "probe_local_normal must be one normal or match probe_local_pos length. "
-                f"Got {normals.reshape(-1, 3).shape[0]} normals and {n_probes} probe positions."
+                "probe_local_normal must be one normal or contain one normal per probe. "
+                f"Got normal shape {normals.shape} for {n_probes} probes."
             )
 
 
@@ -492,17 +510,13 @@ class SurfaceDistanceProbe(
         Probe positions in link-local frame. One (x, y, z) per probe.
     probe_radius : float | array-like[float]
         Maximum sensing range in meters. When no mesh is within this distance, distance is clamped to the probe
-        radius and nearest points is the probe position. Default: 10.0.
+        radius and nearest points is the probe position. Default: 0.5. Also controls the outer debug sphere.
     track_link_idx : array-like[int]
         Global link indices (solver link space) whose mesh geoms are used for distance queries.
-    debug_sphere_radius: float, optional
-        The radius of each debug sphere drawn in the scene. Defaults to 0.008.
     """
 
-    probe_radius: PositiveFArrayType | PositiveFloat = 10.0
+    probe_radius: PositiveFArrayType | PositiveFloat = 0.5
     track_link_idx: IArrayType = Field(default_factory=tuple)
-
-    debug_sphere_radius: PositiveFloat = 0.008
 
     def validate_scene(self, scene: "Scene"):
         super().validate_scene(scene)

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -8,13 +8,25 @@ import torch
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
-from genesis.engine.solvers.rigid.abd.forward_kinematics import func_update_all_verts
 from genesis.options.sensors import SurfaceDistanceProbe as SurfaceDistanceProbeOptions
 from genesis.utils.misc import concat_with_tensor, make_tensor_field, tensor_to_array
-from genesis.utils.raycast_qd import get_triangle_vertices
 
 from .base_sensor import RigidSensorMetadataMixin, RigidSensorMixin, SimpleSensor, SimpleSensorMetadata
-from .probe import ProbeSensorMetadataMixin, ProbeSensorMixin, func_noised_probe_radius
+from .probe import (
+    ProbeSensorMetadataMixin,
+    ProbeSensorMixin,
+    func_noised_probe_radius,
+    get_measured_bufs,
+)
+from .tactile_shared import (
+    BVH_LEAF_SIZE,
+    BVH_STACK_SIZE,
+    BVHMetadata,
+    build_static_chunk_bvh,
+    func_sphere_intersects_aabb,
+    func_vec3_at,
+    get_mesh_geom_chunks,
+)
 
 if TYPE_CHECKING:
     from genesis.utils.ring_buffer import TensorRingBuffer
@@ -83,8 +95,125 @@ def _func_closest_point_on_triangle(point: gs.qd_vec3, v0: gs.qd_vec3, v1: gs.qd
     return closest
 
 
+@dataclass
+class TriangleMeshBVH(BVHMetadata):
+    """
+    BVH over tracked mesh triangles for one sensor class. ``leaf_elem_idx`` entries are absolute rows
+    into ``tri_verts``, a flat per-class table of link-local triangle vertices (shape ``(total_n_tri,
+    3, 3)``: per triangle, three xyz vertex positions). See ``BVHMetadata`` for the shared scaffolding
+    semantics. Rigid-link assumption: built once at scene init, never rebuilt.
+    """
+
+    tri_verts: torch.Tensor = make_tensor_field((0, 3, 3))
+
+    def append_sensor(self, track_link_idx: np.ndarray, solver) -> None:
+        """
+        Build per-tracked-link chunks for one sensor (link-local triangle BVH) and append into the flat
+        tensors. Sensors with no tracked-link geometry register zero chunks; the kernel's per-sensor
+        chunk loop iterates ``[0, sensor_chunk_count[i_s])`` and is a no-op for those.
+        """
+        new_chunk_link_idx: list[int] = []
+        new_chunk_node_start: list[int] = []
+        new_chunk_node_count: list[int] = []
+        all_node_min: list[np.ndarray] = []
+        all_node_max: list[np.ndarray] = []
+        all_node_left: list[np.ndarray] = []
+        all_node_right: list[np.ndarray] = []
+        all_node_leaf_start: list[np.ndarray] = []
+        all_node_leaf_count: list[np.ndarray] = []
+        all_leaf_elem_idx: list[np.ndarray] = []
+        all_tri_verts: list[np.ndarray] = []
+
+        chunk_start_for_sensor = int(self.chunk_link_idx.shape[0])
+        node_offset = int(self.node_min.shape[0])
+        leaf_offset = int(self.leaf_elem_idx.shape[0])
+        tri_offset = int(self.tri_verts.shape[0])
+
+        for i_l in range(int(track_link_idx.shape[0])):
+            link_idx = int(track_link_idx[i_l])
+            link = solver.links[link_idx]
+            geom_chunks = get_mesh_geom_chunks(link, prefer_visual=False)
+            if not geom_chunks:
+                continue
+            # Concatenate triangles from all geoms of this link into one chunk.
+            tri_v0_list: list[np.ndarray] = []
+            tri_v1_list: list[np.ndarray] = []
+            tri_v2_list: list[np.ndarray] = []
+            for _geom, verts_link, faces in geom_chunks:
+                tri_v0_list.append(verts_link[faces[:, 0]])
+                tri_v1_list.append(verts_link[faces[:, 1]])
+                tri_v2_list.append(verts_link[faces[:, 2]])
+            v0 = np.concatenate(tri_v0_list, axis=0).astype(np.float32, copy=False)
+            v1 = np.concatenate(tri_v1_list, axis=0).astype(np.float32, copy=False)
+            v2 = np.concatenate(tri_v2_list, axis=0).astype(np.float32, copy=False)
+            n_tri = int(v0.shape[0])
+            if n_tri == 0:
+                continue
+
+            centroids = (v0 + v1 + v2) / 3.0
+            aabb_mins = np.minimum(np.minimum(v0, v1), v2)
+            aabb_maxs = np.maximum(np.maximum(v0, v1), v2)
+
+            tri_stack = np.stack((v0, v1, v2), axis=1)  # (n_tri, 3, 3)
+            global_rows = (tri_offset + np.arange(n_tri, dtype=np.int32)).astype(np.int32)
+
+            nmin, nmax, nleft, nright, lstart, lcount, eidx = build_static_chunk_bvh(
+                centroids, aabb_mins, aabb_maxs, global_rows, BVH_LEAF_SIZE
+            )
+
+            new_chunk_link_idx.append(link_idx)
+            new_chunk_node_start.append(node_offset)
+            new_chunk_node_count.append(int(nmin.shape[0]))
+
+            all_node_min.append(nmin)
+            all_node_max.append(nmax)
+            # Rebase intra-chunk child / leaf-start indices into the flat tensors' absolute space.
+            all_node_left.append(np.where(nleft >= 0, nleft + node_offset, nleft).astype(np.int32))
+            all_node_right.append(np.where(nright >= 0, nright + node_offset, nright).astype(np.int32))
+            all_node_leaf_start.append(np.where(lcount > 0, lstart + leaf_offset, lstart).astype(np.int32))
+            all_node_leaf_count.append(lcount)
+            all_leaf_elem_idx.append(eidx)
+            all_tri_verts.append(tri_stack.astype(np.float32, copy=False))
+
+            node_offset += int(nmin.shape[0])
+            leaf_offset += int(eidx.shape[0])
+            tri_offset += n_tri
+
+        if not new_chunk_link_idx:
+            # No tracked links contributed geometry; record zero chunks for this sensor.
+            self.sensor_chunk_start = concat_with_tensor(self.sensor_chunk_start, chunk_start_for_sensor, expand=(1,))
+            self.sensor_chunk_count = concat_with_tensor(self.sensor_chunk_count, 0, expand=(1,))
+            return
+
+        nm = torch.tensor(np.concatenate(all_node_min, axis=0), dtype=gs.tc_float, device=gs.device)
+        nx = torch.tensor(np.concatenate(all_node_max, axis=0), dtype=gs.tc_float, device=gs.device)
+        nl = torch.tensor(np.concatenate(all_node_left, axis=0), dtype=gs.tc_int, device=gs.device)
+        nr = torch.tensor(np.concatenate(all_node_right, axis=0), dtype=gs.tc_int, device=gs.device)
+        lst = torch.tensor(np.concatenate(all_node_leaf_start, axis=0), dtype=gs.tc_int, device=gs.device)
+        lct = torch.tensor(np.concatenate(all_node_leaf_count, axis=0), dtype=gs.tc_int, device=gs.device)
+        eidx_t = torch.tensor(np.concatenate(all_leaf_elem_idx, axis=0), dtype=gs.tc_int, device=gs.device)
+        tv = torch.tensor(np.concatenate(all_tri_verts, axis=0), dtype=gs.tc_float, device=gs.device)
+        cli = torch.tensor(new_chunk_link_idx, dtype=gs.tc_int, device=gs.device)
+        cns = torch.tensor(new_chunk_node_start, dtype=gs.tc_int, device=gs.device)
+        cnc = torch.tensor(new_chunk_node_count, dtype=gs.tc_int, device=gs.device)
+
+        self.node_min = concat_with_tensor(self.node_min, nm, expand=(nm.shape[0], 3))
+        self.node_max = concat_with_tensor(self.node_max, nx, expand=(nx.shape[0], 3))
+        self.node_left = concat_with_tensor(self.node_left, nl, expand=(nl.shape[0],))
+        self.node_right = concat_with_tensor(self.node_right, nr, expand=(nr.shape[0],))
+        self.node_leaf_start = concat_with_tensor(self.node_leaf_start, lst, expand=(lst.shape[0],))
+        self.node_leaf_count = concat_with_tensor(self.node_leaf_count, lct, expand=(lct.shape[0],))
+        self.leaf_elem_idx = concat_with_tensor(self.leaf_elem_idx, eidx_t, expand=(eidx_t.shape[0],))
+        self.tri_verts = concat_with_tensor(self.tri_verts, tv, expand=(tv.shape[0], 3, 3))
+        self.chunk_link_idx = concat_with_tensor(self.chunk_link_idx, cli, expand=(cli.shape[0],))
+        self.chunk_node_start = concat_with_tensor(self.chunk_node_start, cns, expand=(cns.shape[0],))
+        self.chunk_node_count = concat_with_tensor(self.chunk_node_count, cnc, expand=(cnc.shape[0],))
+        self.sensor_chunk_start = concat_with_tensor(self.sensor_chunk_start, chunk_start_for_sensor, expand=(1,))
+        self.sensor_chunk_count = concat_with_tensor(self.sensor_chunk_count, len(new_chunk_link_idx), expand=(1,))
+
+
 @qd.kernel
-def _kernel_surface_distance_probe(
+def _kernel_surface_distance_probe_bvh(
     probe_positions_local: qd.types.ndarray(),
     probe_radii: qd.types.ndarray(),
     probe_radii_noise: qd.types.ndarray(),
@@ -92,29 +221,35 @@ def _kernel_surface_distance_probe(
     links_idx: qd.types.ndarray(),
     sensor_cache_start: qd.types.ndarray(),
     sensor_probe_start: qd.types.ndarray(),
-    track_link_start: qd.types.ndarray(),
-    track_link_end: qd.types.ndarray(),
-    track_link_flat: qd.types.ndarray(),
-    static_rigid_sim_config: qd.template(),
+    bvh_sensor_chunk_start: qd.types.ndarray(),
+    bvh_sensor_chunk_count: qd.types.ndarray(),
+    bvh_chunk_link_idx: qd.types.ndarray(),
+    bvh_chunk_node_start: qd.types.ndarray(),
+    bvh_node_min: qd.types.ndarray(),
+    bvh_node_max: qd.types.ndarray(),
+    bvh_node_left: qd.types.ndarray(),
+    bvh_node_right: qd.types.ndarray(),
+    bvh_node_leaf_start: qd.types.ndarray(),
+    bvh_node_leaf_count: qd.types.ndarray(),
+    bvh_leaf_elem_idx: qd.types.ndarray(),
+    bvh_tri_verts: qd.types.ndarray(),
     links_state: array_class.LinksState,
-    links_info: array_class.LinksInfo,
-    geoms_info: array_class.GeomsInfo,
-    geoms_state: array_class.GeomsState,
-    faces_info: array_class.FacesInfo,
-    verts_info: array_class.VertsInfo,
-    fixed_verts_state: array_class.VertsState,
-    free_verts_state: array_class.VertsState,
     positions_gt: qd.types.ndarray(),
     positions_measured: qd.types.ndarray(),
     output_gt: qd.types.ndarray(),
     output_measured: qd.types.ndarray(),
 ):
+    """
+    BVH-accelerated surface-distance query.
+
+    Per ``(probe, env)``: transform the probe into each tracked-link's local frame, traverse the
+    per-(sensor, tracked-link) static BVH with a fixed-depth stack, cull nodes via sphere-vs-AABB with
+    radius squared = current best (the larger of GT / measured branch), and on leaf nodes call
+    closest-point-on-triangle against the stored link-local vertices. The closest world-frame point is
+    written to ``positions_*`` and the distance to ``output_*``.
+    """
     total_n_probes = probe_positions_local.shape[0]
     n_batches = output_gt.shape[-1]
-
-    func_update_all_verts(
-        geoms_state, geoms_info, verts_info, free_verts_state, fixed_verts_state, static_rigid_sim_config
-    )
 
     for i_p, i_b in qd.ndrange(total_n_probes, n_batches):
         i_s = probe_sensor_idx[i_p]
@@ -122,14 +257,12 @@ def _kernel_surface_distance_probe(
         link_pos = links_state.pos[sensor_link_idx, i_b]
         link_quat = links_state.quat[sensor_link_idx, i_b]
 
-        probe_pos_local = qd.Vector(
-            [probe_positions_local[i_p, 0], probe_positions_local[i_p, 1], probe_positions_local[i_p, 2]]
-        )
-        probe_pos = link_pos + gu.qd_transform_by_quat(probe_pos_local, link_quat)
+        probe_local = func_vec3_at(probe_positions_local, i_p)
+        probe_world = link_pos + gu.qd_transform_by_quat(probe_local, link_quat)
 
         max_r_gt = probe_radii[i_p]
         best_dist_sq_gt = max_r_gt * max_r_gt
-        best_point_gt = probe_pos
+        best_point_gt = probe_world
 
         probe_radius_noise = probe_radii_noise[i_p]
         use_noised_radius = probe_radius_noise > gs.EPS
@@ -137,37 +270,67 @@ def _kernel_surface_distance_probe(
         if use_noised_radius:
             max_r_m = func_noised_probe_radius(max_r_gt, probe_radius_noise)
         best_dist_sq_m = max_r_m * max_r_m
-        best_point_m = probe_pos
+        best_point_m = probe_world
 
-        start = track_link_start[i_s]
-        end = track_link_end[i_s]
+        chunk_start = bvh_sensor_chunk_start[i_s]
+        n_chunks = bvh_sensor_chunk_count[i_s]
+        for c_off in range(n_chunks):
+            i_c = chunk_start + c_off
+            track_link_idx = bvh_chunk_link_idx[i_c]
+            track_pos = links_state.pos[track_link_idx, i_b]
+            track_quat = links_state.quat[track_link_idx, i_b]
+            # BVH lives in the tracked link's local frame; bring the probe over.
+            probe_link = gu.qd_inv_transform_by_trans_quat(probe_world, track_pos, track_quat)
 
-        for k in range(start, end):
-            i_l = track_link_flat[k]
-            I_l = [i_l, i_b] if qd.static(static_rigid_sim_config.batch_links_info) else i_l
-            geom_start = links_info.geom_start[I_l]
-            geom_end = links_info.geom_end[I_l]
+            stack = qd.Vector.zero(gs.qd_int, qd.static(BVH_STACK_SIZE))
+            stack[0] = bvh_chunk_node_start[i_c]
+            stack_idx = 1
 
-            for i_g in range(geom_start, geom_end):
-                face_start = geoms_info.face_start[i_g]
-                face_end = geoms_info.face_end[i_g]
-
-                for i_f in range(face_start, face_end):
-                    tri_verts = get_triangle_vertices(
-                        i_f, i_b, faces_info, verts_info, fixed_verts_state, free_verts_state
-                    )
-                    v0 = tri_verts[:, 0]
-                    v1 = tri_verts[:, 1]
-                    v2 = tri_verts[:, 2]
-                    closest = _func_closest_point_on_triangle(probe_pos, v0, v1, v2)
-                    diff = closest - probe_pos
-                    dist_sq = diff.dot(diff)
-                    if dist_sq < best_dist_sq_gt:
-                        best_dist_sq_gt = dist_sq
-                        best_point_gt = closest
-                    if use_noised_radius and dist_sq < best_dist_sq_m:
-                        best_dist_sq_m = dist_sq
-                        best_point_m = closest
+            while stack_idx > 0:
+                stack_idx -= 1
+                n = stack[stack_idx]
+                bmin = func_vec3_at(bvh_node_min, n)
+                bmax = func_vec3_at(bvh_node_max, n)
+                # Cull when min distance from probe to AABB exceeds the conservative current best.
+                cull_radius_sq = qd.max(best_dist_sq_gt, best_dist_sq_m)
+                if not func_sphere_intersects_aabb(probe_link, cull_radius_sq, bmin, bmax):
+                    continue
+                left = bvh_node_left[n]
+                if left == -1:
+                    fstart = bvh_node_leaf_start[n]
+                    fn = bvh_node_leaf_count[n]
+                    for j in range(fn):
+                        i_f = bvh_leaf_elem_idx[fstart + j]
+                        v0 = qd.Vector(
+                            [bvh_tri_verts[i_f, 0, 0], bvh_tri_verts[i_f, 0, 1], bvh_tri_verts[i_f, 0, 2]],
+                            dt=gs.qd_float,
+                        )
+                        v1 = qd.Vector(
+                            [bvh_tri_verts[i_f, 1, 0], bvh_tri_verts[i_f, 1, 1], bvh_tri_verts[i_f, 1, 2]],
+                            dt=gs.qd_float,
+                        )
+                        v2 = qd.Vector(
+                            [bvh_tri_verts[i_f, 2, 0], bvh_tri_verts[i_f, 2, 1], bvh_tri_verts[i_f, 2, 2]],
+                            dt=gs.qd_float,
+                        )
+                        closest_link = _func_closest_point_on_triangle(probe_link, v0, v1, v2)
+                        diff = closest_link - probe_link
+                        dist_sq = diff.dot(diff)
+                        if dist_sq < best_dist_sq_gt or (use_noised_radius and dist_sq < best_dist_sq_m):
+                            # Transform the hit back to world frame and record on whichever branch tightened.
+                            closest_world = track_pos + gu.qd_transform_by_quat(closest_link, track_quat)
+                            if dist_sq < best_dist_sq_gt:
+                                best_dist_sq_gt = dist_sq
+                                best_point_gt = closest_world
+                            if use_noised_radius and dist_sq < best_dist_sq_m:
+                                best_dist_sq_m = dist_sq
+                                best_point_m = closest_world
+                else:
+                    right = bvh_node_right[n]
+                    stack[stack_idx] = left
+                    stack_idx += 1
+                    stack[stack_idx] = right
+                    stack_idx += 1
 
         best_dist_gt = qd.sqrt(best_dist_sq_gt)
         best_dist_m = best_dist_gt
@@ -179,24 +342,27 @@ def _kernel_surface_distance_probe(
 
         probe_idx_in_sensor = i_p - sensor_probe_start[i_s]
         cache_start = sensor_cache_start[i_s]
-        probe_global_idx = sensor_probe_start[i_s] + probe_idx_in_sensor
 
         output_gt[cache_start + probe_idx_in_sensor, i_b] = best_dist_gt
         output_measured[cache_start + probe_idx_in_sensor, i_b] = best_dist_m
         for j in qd.static(range(3)):
-            positions_gt[i_b, probe_global_idx, j] = best_point_gt[j]
-            positions_measured[i_b, probe_global_idx, j] = best_point_m[j]
+            positions_gt[i_b, i_p, j] = best_point_gt[j]
+            positions_measured[i_b, i_p, j] = best_point_m[j]
 
 
 @dataclass
 class SurfaceDistanceProbeSensorMetadataMixin(ProbeSensorMetadataMixin):
-    """Shared metadata for surface distance probe sensors: tracked links and nearest-point buffer."""
+    """
+    Shared metadata for surface distance probe sensors: tracked-link bookkeeping, nearest-point buffer,
+    and the per-class static triangle-mesh BVH consumed by ``_kernel_surface_distance_probe_bvh``.
+    """
 
     track_link_start: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
     track_link_end: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
     track_link_flat: torch.Tensor = make_tensor_field((0,), dtype_factory=lambda: gs.tc_int)
     nearest_positions: torch.Tensor = make_tensor_field((0, 0, 3))
     nearest_positions_measured: torch.Tensor = make_tensor_field((0, 0, 3))
+    bvh: TriangleMeshBVH = field(default_factory=TriangleMeshBVH)
 
 
 @dataclass
@@ -215,7 +381,6 @@ class SurfaceDistanceProbeSensor(
 
     def __init__(self, sensor_options: SurfaceDistanceProbeOptions, sensor_idx: int, sensor_manager: "SensorManager"):
         super().__init__(sensor_options, sensor_idx, sensor_manager)
-        self._debug_objects: list = []
         self._nearest_points_slice: slice | None = None
 
     def _get_return_format(self) -> tuple[tuple[int, ...], ...]:
@@ -255,6 +420,10 @@ class SurfaceDistanceProbeSensor(
         slice_start = self._shared_metadata.sensor_probe_start[self._idx]
         self._nearest_points_slice = slice(slice_start, slice_start + self._n_probes)
 
+        # Build the per-(sensor, tracked-link) triangle BVH in link-local frame. Rigid links don't deform,
+        # so this is a one-shot scene-build cost; per-step queries traverse the static structure.
+        self._shared_metadata.bvh.append_sensor(track_link_idx, self._shared_metadata.solver)
+
     @classmethod
     def reset(cls, shared_metadata: SurfaceDistanceProbeMetadata, shared_ground_truth_cache: torch.Tensor, envs_idx):
         super().reset(shared_metadata, shared_ground_truth_cache, envs_idx)
@@ -272,14 +441,11 @@ class SurfaceDistanceProbeSensor(
         measured_data_timeline: "TensorRingBuffer",
     ):
         solver = shared_metadata.solver
-        current_ground_truth_data_T.zero_()
-        measured = measured_data_timeline.at(0, copy=False)
-        measured.zero_()
-        if shared_metadata.measured_scratch_T.shape != current_ground_truth_data_T.shape:
-            shared_metadata.measured_scratch_T = torch.empty_like(current_ground_truth_data_T)
-        measured_cols_b = shared_metadata.measured_scratch_T
-
-        _kernel_surface_distance_probe(
+        measured, measured_cols_b = get_measured_bufs(
+            shared_metadata, current_ground_truth_data_T, measured_data_timeline
+        )
+        bvh = shared_metadata.bvh
+        _kernel_surface_distance_probe_bvh(
             shared_metadata.probe_positions,
             shared_metadata.probe_radii,
             shared_metadata.probe_radii_noise,
@@ -287,18 +453,19 @@ class SurfaceDistanceProbeSensor(
             shared_metadata.links_idx,
             shared_metadata.sensor_cache_start,
             shared_metadata.sensor_probe_start,
-            shared_metadata.track_link_start,
-            shared_metadata.track_link_end,
-            shared_metadata.track_link_flat,
-            solver._static_rigid_sim_config,
+            bvh.sensor_chunk_start,
+            bvh.sensor_chunk_count,
+            bvh.chunk_link_idx,
+            bvh.chunk_node_start,
+            bvh.node_min,
+            bvh.node_max,
+            bvh.node_left,
+            bvh.node_right,
+            bvh.node_leaf_start,
+            bvh.node_leaf_count,
+            bvh.leaf_elem_idx,
+            bvh.tri_verts,
             solver.links_state,
-            solver.links_info,
-            solver.geoms_info,
-            solver.geoms_state,
-            solver.faces_info,
-            solver.verts_info,
-            solver.fixed_verts_state,
-            solver.free_verts_state,
             shared_metadata.nearest_positions,
             shared_metadata.nearest_positions_measured,
             current_ground_truth_data_T,
@@ -316,24 +483,30 @@ class SurfaceDistanceProbeSensor(
 
         link_pos = self._link.get_pos(env_idx).squeeze()
         link_quat = self._link.get_quat(env_idx).squeeze()
-        probe_world = tensor_to_array(gu.transform_by_trans_quat(self._probe_local_pos, link_pos, link_quat))
+        probe_world = tensor_to_array(
+            gu.transform_by_trans_quat(self._probe_local_pos.reshape(-1, 3), link_pos, link_quat)
+        ).reshape(-1, 3)
         points = tensor_to_array(self.nearest_points[env_idx]).reshape(-1, 3)
 
+        rgb = tuple(float(c) for c in self._options.debug_probe_color)
+        line_color = (*rgb, 1.0)
+        self._debug_objects.extend(self._draw_probe_spheres(context, probe_world, rgb))
         self._debug_objects.append(
             context.draw_debug_spheres(
-                poss=np.concatenate([probe_world, points]),
-                radius=self._options.debug_sphere_radius,
-                color=self._options.debug_probe_color,
+                poss=points,
+                radius=float(self._options.debug_probe_center_radius),
+                color=line_color,
             )
         )
         for i in range(len(probe_world)):
-            line_obj = context.draw_debug_line(
-                probe_world[i],
-                points[i],
-                radius=self._options.debug_sphere_radius / 4.0,
-                color=self._options.debug_probe_color,
+            self._debug_objects.append(
+                context.draw_debug_line(
+                    probe_world[i],
+                    points[i],
+                    radius=float(self._options.debug_probe_center_radius) / 4.0,
+                    color=line_color,
+                )
             )
-            self._debug_objects.append(line_obj)
 
     @property
     def nearest_points(self) -> torch.Tensor:
