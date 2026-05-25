@@ -52,12 +52,29 @@ DEFAULT_N_PROBES = 100
 DEFAULT_N_SAMPLE_POINTS = 600
 DEFAULT_N_ENVS = 1024
 
+# Sensor imperfections applied when running the noised variant. Each is filtered through
+# ``_sensor_has_field`` so it is only set on sensors that expose it (see examples/sensors/tactile_sandbox.py):
+#   - ``hysteresis_*``, ``probe_gain``: tactile sensors only (not SurfaceDistanceProbe).
+#   - ``probe_radius_noise``: every probe-style sensor (including SurfaceDistanceProbe).
+#   - ``noise`` (white noise stddev) and ``random_walk``: every SimpleSensor (all five here).
+#   - ``crosstalk_*``: KinematicTaxel only; requires a 2D probe grid (see ``_make_probe_kwargs``).
+NOISE_KWARGS = {
+    "hysteresis_strength": 0.5,
+    "hysteresis_tau": 0.1,
+    "probe_radius_noise": 0.001,
+    "probe_gain": 1.5,
+    "noise": 0.001,
+    "random_walk": 0.0001,
+    "crosstalk_strength": 0.3,
+    "crosstalk_sigma": 0.01,
+}
+
 
 def _sensor_has_field(sensor_cls: type[Any], field_name: str) -> bool:
     return field_name in sensor_cls.model_fields
 
 
-def _make_probe_kwargs(sensor_cls: type[Any], n_probes: int, half_size: float) -> dict[str, Any]:
+def _make_probe_kwargs(sensor_cls: type[Any], n_probes: int, half_size: float, noise: bool = False) -> dict[str, Any]:
     nx = math.ceil(math.sqrt(n_probes))
     ny = math.ceil(n_probes / nx)
     n_total = nx * ny
@@ -77,11 +94,15 @@ def _make_probe_kwargs(sensor_cls: type[Any], n_probes: int, half_size: float) -
     if n_filler > 0 and not supports_filler:
         return {"probe_local_pos": grid.reshape(-1, 3)[:n_probes]}
 
-    probe_local_pos = grid if sensor_cls is gs.sensors.ElastomerTaxel else grid.reshape(-1, 3)
+    # ElastomerTaxel always needs the 2D grid; KinematicTaxel needs it to enable FFT crosstalk under noise.
+    keep_grid = sensor_cls is gs.sensors.ElastomerTaxel or (sensor_cls is gs.sensors.KinematicTaxel and noise)
+    probe_local_pos = grid if keep_grid else grid.reshape(-1, 3)
     kwargs: dict[str, Any] = {"probe_local_pos": probe_local_pos}
     if n_filler > 0:
         probe_radius = np.full(n_total, 0.01, dtype=gs.np_float)
         probe_radius[-n_filler:] = 0.0
+        if keep_grid:
+            probe_radius = probe_radius.reshape(nx, ny)
         kwargs["probe_radius"] = probe_radius
     return kwargs
 
@@ -94,6 +115,7 @@ def _make_tactile_sensor_options(
     n_probes: int,
     n_sample_points: int,
     half_size: float,
+    noise: bool = False,
 ):
     sensor_kwargs = {"entity_idx": box.idx}
 
@@ -101,10 +123,15 @@ def _make_tactile_sensor_options(
         sensor_kwargs["track_link_idx"] = (track_box.base_link_idx,)
 
     if _sensor_has_field(sensor_cls, "probe_local_pos"):
-        sensor_kwargs.update(_make_probe_kwargs(sensor_cls, n_probes, half_size))
+        sensor_kwargs.update(_make_probe_kwargs(sensor_cls, n_probes, half_size, noise=noise))
 
     if _sensor_has_field(sensor_cls, "n_sample_points"):
         sensor_kwargs["n_sample_points"] = n_sample_points
+
+    if noise:
+        for field, value in NOISE_KWARGS.items():
+            if _sensor_has_field(sensor_cls, field):
+                sensor_kwargs[field] = value
 
     return sensor_cls(**sensor_kwargs)
 
@@ -116,6 +143,7 @@ def make_box_pyramid_with_sensors(
     n_probes=DEFAULT_N_PROBES,
     n_sample_points=DEFAULT_N_SAMPLE_POINTS,
     n_cubes=4,
+    noise=False,
     **scene_kwargs,
 ):
     scene = gs.Scene(
@@ -166,6 +194,7 @@ def make_box_pyramid_with_sensors(
                 n_probes=n_probes,
                 n_sample_points=n_sample_points,
                 half_size=half_size,
+                noise=noise,
             )
         )
 
@@ -183,13 +212,14 @@ def make_box_pyramid_with_sensors(
     return scene, step, SceneMeta(compile_time=compile_time)
 
 
-def _run_tactile_sensor_benchmark(n_envs, n_sensors, n_probes, n_sample_points, sensor_cls):
+def _run_tactile_sensor_benchmark(n_envs, n_sensors, n_probes, n_sample_points, sensor_cls, noise=False):
     _, step_fn, meta = make_box_pyramid_with_sensors(
         n_envs,
         sensor_cls,
         n_sensors=n_sensors,
         n_probes=n_probes,
         n_sample_points=n_sample_points,
+        noise=noise,
     )
     return run_benchmark(step_fn, n_envs=n_envs, meta=meta)
 
@@ -210,33 +240,49 @@ def n_sample_points():
 
 
 @pytest.fixture
+def noise(request):
+    # Default off; the noised tests flip this to True via ``indirect=["noise"]`` parametrize.
+    return getattr(request, "param", False)
+
+
+@pytest.fixture
 def no_sensors(n_envs):
     return _run_tactile_sensor_benchmark(n_envs, 0, 0, 0, None)
 
 
 @pytest.fixture
-def surface_distance_probe(n_envs, n_sensors, n_probes, n_sample_points):
-    return _run_tactile_sensor_benchmark(n_envs, n_sensors, n_probes, n_sample_points, gs.sensors.SurfaceDistanceProbe)
+def surface_distance_probe(n_envs, n_sensors, n_probes, n_sample_points, noise):
+    return _run_tactile_sensor_benchmark(
+        n_envs, n_sensors, n_probes, n_sample_points, gs.sensors.SurfaceDistanceProbe, noise=noise
+    )
 
 
 @pytest.fixture
-def contact_depth_probe(n_envs, n_sensors, n_probes, n_sample_points):
-    return _run_tactile_sensor_benchmark(n_envs, n_sensors, n_probes, n_sample_points, gs.sensors.ContactDepthProbe)
+def contact_depth_probe(n_envs, n_sensors, n_probes, n_sample_points, noise):
+    return _run_tactile_sensor_benchmark(
+        n_envs, n_sensors, n_probes, n_sample_points, gs.sensors.ContactDepthProbe, noise=noise
+    )
 
 
 @pytest.fixture
-def kinematic_taxel(n_envs, n_sensors, n_probes, n_sample_points):
-    return _run_tactile_sensor_benchmark(n_envs, n_sensors, n_probes, n_sample_points, gs.sensors.KinematicTaxel)
+def kinematic_taxel(n_envs, n_sensors, n_probes, n_sample_points, noise):
+    return _run_tactile_sensor_benchmark(
+        n_envs, n_sensors, n_probes, n_sample_points, gs.sensors.KinematicTaxel, noise=noise
+    )
 
 
 @pytest.fixture
-def elastomer_taxel(n_envs, n_sensors, n_probes, n_sample_points):
-    return _run_tactile_sensor_benchmark(n_envs, n_sensors, n_probes, n_sample_points, gs.sensors.ElastomerTaxel)
+def elastomer_taxel(n_envs, n_sensors, n_probes, n_sample_points, noise):
+    return _run_tactile_sensor_benchmark(
+        n_envs, n_sensors, n_probes, n_sample_points, gs.sensors.ElastomerTaxel, noise=noise
+    )
 
 
 @pytest.fixture
-def proximity_taxel(n_envs, n_sensors, n_probes, n_sample_points):
-    return _run_tactile_sensor_benchmark(n_envs, n_sensors, n_probes, n_sample_points, gs.sensors.ProximityTaxel)
+def proximity_taxel(n_envs, n_sensors, n_probes, n_sample_points, noise):
+    return _run_tactile_sensor_benchmark(
+        n_envs, n_sensors, n_probes, n_sample_points, gs.sensors.ProximityTaxel, noise=noise
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +323,30 @@ def test_tactile_sensor_speed(factory_logger, request, runnable, n_envs, n_senso
             "sensor": runnable,
             "batch_size": n_envs,
             "n_sensors": n_sensors,
+            "use_contact_island": False,
+        }
+    ) as logger:
+        logger.write(request.getfixturevalue(runnable))
+
+
+@pytest.mark.parametrize(
+    "runnable, n_envs, n_sensors, noise, backend",
+    [
+        (runnable, n_envs, n_sensors, True, gs.gpu)
+        for runnable in TACTILE_SENSOR_RUNNABLES
+        for n_envs in N_ENVS_VARIANTS
+        for n_sensors in N_SENSORS_VARIANTS
+    ],
+    indirect=["noise"],
+)
+def test_noised_tactile_sensor_speed(factory_logger, request, runnable, n_envs, n_sensors, noise):
+    with factory_logger(
+        {
+            "env": "box_pyramid_with_sensors",
+            "sensor": runnable,
+            "batch_size": n_envs,
+            "n_sensors": n_sensors,
+            "noise": True,
             "use_contact_island": False,
         }
     ) as logger:
