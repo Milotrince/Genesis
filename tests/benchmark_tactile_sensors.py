@@ -372,6 +372,24 @@ def test_probe_sensor_speed_per_num_probe(factory_logger, request, runnable, n_e
 
 
 @pytest.mark.parametrize(
+    "runnable, n_envs, n_sensors, n_probes, backend",
+    [("contact_depth_probe", n_envs, 5, 1024, gs.gpu) for n_envs in N_ENVS_VARIANTS],
+)
+def test_tacmap_comparsion(factory_logger, request, runnable, n_envs, n_sensors, n_probes):
+    with factory_logger(
+        {
+            "env": "box_pyramid_with_sensors",
+            "sensor": runnable,
+            "batch_size": n_envs,
+            "n_sensors": n_sensors,
+            "n_probes": n_probes,
+            "use_contact_island": False,
+        }
+    ) as logger:
+        logger.write(request.getfixturevalue(runnable))
+
+
+@pytest.mark.parametrize(
     "runnable, n_envs, n_sample_points, backend",
     [
         (runnable, DEFAULT_N_ENVS, n_sample_points, gs.gpu)
