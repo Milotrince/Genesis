@@ -47,8 +47,8 @@ from .contact import (
     func_contact_orthogonals,
     func_rotate_frame,
     func_set_upstream_grad,
-    func_clamp_and_sort_contacts,
-    func_prune_contacts,
+    func_clamp_prune_and_sort_contacts,
+    func_clamp_prune_and_sort_contacts_coop,
 )
 from . import narrowphase
 from .narrowphase import (
@@ -93,7 +93,9 @@ class Collider:
 
         self._init_static_config()
         self._use_split_narrowphase = (
-            self._collider_static_config.has_non_box_plane_convex_convex and gs.backend != gs.cpu
+            self._collider_static_config.has_non_box_plane_convex_convex
+            and gs.backend != gs.cpu
+            and not self._solver._requires_grad
         )
         self._init_collision_fields()
 
@@ -144,12 +146,17 @@ class Collider:
             else:
                 ccd_algorithm = CCD_ALGORITHM_CODE.MPR
 
-        n_contacts_per_pair = 20 if self._solver._static_rigid_sim_config.requires_grad else 5
-        if (
-            self._solver._options.box_box_detection
-            and sum(geom.type == gs.GEOM_TYPE.BOX for geom in self._solver.geoms) > 1
-        ):
-            n_contacts_per_pair = max(n_contacts_per_pair, self._box_MAXCONPAIR)
+        n_contacts_per_convex_pair = 20 if self._solver._static_rigid_sim_config.requires_grad else 5
+
+        # Nonconvex vertex-vs-SDF pairs and box-box pairs (via their specialized detector) emit many contacts per pair -
+        # a full annular ring or face patch - unlike the handful a generic convex pair emits. They share a larger cap,
+        # kept separate from the convex cap so the contact buffer is not over-allocated for ordinary convex pairs, and
+        # are grouped together for the buffer sizing below. The cap is sized to keep an extended contact patch fully
+        # represented: too few points and parts of the patch drop out intermittently as the geometry moves, losing
+        # constraint directions and letting bodies slip.
+        n_contacts_per_nonconvex_pair = 40
+        if self._solver._options.box_box_detection and sum(g.type == gs.GEOM_TYPE.BOX for g in self._solver.geoms) > 1:
+            n_contacts_per_nonconvex_pair = max(n_contacts_per_nonconvex_pair, self._box_MAXCONPAIR)
 
         # Compute collision pairs and algorithm flags in a single pass
         (
@@ -160,13 +167,60 @@ class Collider:
             has_non_box_plane_convex_convex,
             has_convex_specialization,
             has_nonconvex_nonterrain,
+            self._n_possible_nonconvex_pairs,
         ) = self._compute_collision_pair_idx()
 
         # Link-pair pruning can do useful work only when contacts from distinct geom-pairs can accumulate into the same
         # (link_a, link_b) bucket. That happens when any link has more than one geom (compound/decomposed body), when
         # any geom is nonconvex (vertex-based narrowphase emits many contacts per pair), or when terrain is present.
-        any_link_multi_geom = any(len(link.geoms) > 1 for link in self._solver.links)
-        link_pair_pruning_supported = any_link_multi_geom or has_nonconvex_nonterrain or has_terrain
+        # Disabled outright when use_contact_island is True: pruning produces a logical permutation in contact_sort_idx
+        # that the contact-island construction kernel does not honor (it reads contact_data in physical order).
+        if self._solver._options.use_contact_island:
+            has_prunable_contacts = False
+        elif has_nonconvex_nonterrain or has_terrain:
+            has_prunable_contacts = True
+        else:
+            has_prunable_contacts = False
+            for link in self._solver.links:
+                variant_geom_ranges = link._variant_geom_ranges
+                if variant_geom_ranges is None:
+                    variant_geom_ranges = ((link.geom_start, link.geom_end),)
+                for geom_range in variant_geom_ranges:
+                    n_geoms = geom_range[1] - geom_range[0]
+                    if n_geoms < 2:
+                        continue
+                    if n_geoms >= 5:
+                        has_prunable_contacts = True
+                        continue
+                    for geom_idx in range(*geom_range):
+                        geom = self._solver.geoms[geom_idx]
+                        if self._solver._options.enable_multi_contact and geom.type not in (
+                            gs.GEOM_TYPE.SPHERE,
+                            gs.GEOM_TYPE.ELLIPSOID,
+                        ):
+                            has_prunable_contacts = True
+
+        # Spatial sort by x-position only runs on GPU for convex-convex scenes whose contacts could benefit from
+        # locality. Disabled when use_contact_island is True for the same reason as pruning. Also disabled in
+        # autodiff mode: the sort permutes the logical contact order via contact_sort_idx, get_contacts applies that
+        # permutation, but func_set_upstream_grad writes upstream gradients back by physical index, so a non-identity
+        # permutation would attach gradients to the wrong contacts.
+        spatial_sort_supported = (
+            has_non_box_plane_convex_convex
+            and gs.backend != gs.cpu
+            and not self._solver._options.use_contact_island
+            and not self._solver._requires_grad
+        )
+
+        # Hibernation (func_collision_clear / func_collider_clear_env in this module's siblings) advects carried
+        # contacts by walking physical slots [0, n_contacts), which only matches the live set when sort_idx is the
+        # identity. The use_hibernation -> use_contact_island chain in RigidSolver already enforces that pruning and
+        # spatial sort are off, so this is a defensive assertion meant to fail loudly if either gate is loosened.
+        if self._solver._use_hibernation and (has_prunable_contacts or spatial_sort_supported):
+            gs.raise_exception(
+                "Hibernation is incompatible with link-pair pruning and spatial sort: both reorder logical contacts "
+                "via contact_sort_idx, but the hibernation advect loop reads contact_data in physical order."
+            )
 
         # Initialize the static config, which stores every data that are compile-time constants.
         # Note that updating any of them will trigger recompilation.
@@ -175,8 +229,10 @@ class Collider:
             has_non_box_plane_convex_convex=has_non_box_plane_convex_convex,
             has_convex_specialization=has_convex_specialization,
             has_nonconvex_nonterrain=has_nonconvex_nonterrain,
-            link_pair_pruning_supported=link_pair_pruning_supported,
-            n_contacts_per_pair=n_contacts_per_pair,
+            has_prunable_contacts=has_prunable_contacts,
+            spatial_sort_supported=spatial_sort_supported,
+            n_contacts_per_convex_pair=n_contacts_per_convex_pair,
+            n_contacts_per_nonconvex_pair=n_contacts_per_nonconvex_pair,
             ccd_algorithm=ccd_algorithm,
         )
 
@@ -204,7 +260,7 @@ class Collider:
         self._init_collision_pair_idx(self._collision_pair_idx)
         self._init_valid_pairs()
         self._init_verts_connectivity(vert_neighbors, vert_neighbor_start, vert_n_neighbors)
-        self._init_max_contact_pairs(self._n_possible_pairs)
+        self._init_max_contact_pairs(self._n_possible_pairs, self._n_possible_nonconvex_pairs)
         self._init_terrain_state()
 
         # Initialize [state], which stores every data that are may be updated at every single simulation step
@@ -221,27 +277,30 @@ class Collider:
         # 'contact_data_cache' is not used in Quadrants kernels, so keep it outside of the collider state / info
         self._contact_data_cache: dict[tuple[bool, bool], dict[str, torch.Tensor | tuple[torch.Tensor]]] = {}
 
-        # Contact0 & multicontact scratch states only needed when split narrowphase is active.
+        # GPU core count (used by split-narrowphase chunking + the cooperative dedup dispatch gate).
         # FIXME: Quadrants should expose a unified API to query GPU core count across all backends.
         # Falling back to upper bound for backends where torch.cuda is unavailable (e.g., CPU-only torch). Benchmarks
         # on RTX 6000 Blackwell (Genesis-Embodied-AI/Genesis#2616) showed that switching from hardcoded 40000 threads
         # to hardware-derived 21760 had marginal performance impact, so it should be fine.
+        if torch.cuda.is_available():
+            gpu_props = torch.cuda.get_device_properties(torch.cuda.current_device())
+            # NVIDIA: 128 CUDA cores per SM. AMD/ROCm: 64 stream processors per CU.
+            cores_per_unit = 64 if torch.version.hip else 128
+            gpu_cores = gpu_props.multi_processor_count * cores_per_unit
+        elif gs.backend == gs.metal:
+            # Upper-bound estimate for Apple Silicon: 40 GPU cores, each GPU core having 128 ALUs
+            cores_per_unit = 128
+            gpu_cores = 5120
+        else:
+            # Using AMD GPU as a baseline. AMD MI350X has 256 SM (so-called Compute Units) with 64 cores each.
+            # See: https://www.amd.com/en/products/accelerators/instinct/mi350/mi350x.html
+            # For comparison, RTX6000 Blackwell boasts 188 SMs, compared to 170 SMs for RTX5090 with 128 cores each.
+            cores_per_unit = 64
+            gpu_cores = 16384
+        self._gpu_cores = gpu_cores
+
+        # Contact0 & multicontact scratch states only needed when split narrowphase is active.
         if self._use_split_narrowphase:
-            if torch.cuda.is_available():
-                gpu_props = torch.cuda.get_device_properties(torch.cuda.current_device())
-                # NVIDIA: 128 CUDA cores per SM. AMD/ROCm: 64 stream processors per CU.
-                cores_per_unit = 64 if torch.version.hip else 128
-                gpu_cores = gpu_props.multi_processor_count * cores_per_unit
-            elif gs.backend == gs.metal:
-                # Upper-bound estimate for Apple Silicon: 40 GPU cores, each GPU core having 128 ALUs
-                cores_per_unit = 128
-                gpu_cores = 5120
-            else:
-                # Using AMD GPU as a baseline. AMD MI350X has 256 SM (so-called Compute Units) with 64 cores each.
-                # See: https://www.amd.com/en/products/accelerators/instinct/mi350/mi350x.html
-                # For comparison, RTX6000 Blackwell boasts 188 SMs, compared to 170 SMs for RTX5090 with 128 cores each.
-                cores_per_unit = 64
-                gpu_cores = 16384
             self._contact0_n_chunks = max(1, math.ceil(gpu_cores / self._solver._B))
             self._contact0_grid_size = self._solver._B * self._contact0_n_chunks
             self._contact0_mpr_state = array_class.get_mpr_state(self._contact0_grid_size)
@@ -287,7 +346,7 @@ class Collider:
 
         if n_geoms == 0:
             empty_pairs = np.empty((0, 2), dtype=gs.np_int)
-            return 0, np.full((0, 0), fill_value=-1, dtype=gs.np_int), empty_pairs, False, False, False, False
+            return 0, np.full((0, 0), fill_value=-1, dtype=gs.np_int), empty_pairs, False, False, False, False, 0
 
         # Links delegated to IPC coupler (skip pair only when BOTH are IPC-handled)
         ipc_delegated_link_idxs = set()
@@ -468,6 +527,20 @@ class Collider:
             if self._solver._options.box_box_detection:
                 specialized = specialized | (is_box_a & is_box_b)
             has_non_box_plane_convex_convex = bool(np.any(both_convex & ~specialized))
+
+            # Differentiable contact detection (diff_gjk) reconstructs each contact from a triangular face of the
+            # Minkowski difference. A sphere or ellipsoid has no flat facet, so a pair of them yields an everywhere
+            # smoothly curved Minkowski boundary on which EPA never converges, and no contact is ever generated -
+            # the bodies silently tunnel. Faceted partners (box, mesh) and the analytical plane branch are unaffected.
+            if self._solver._requires_grad:
+                is_smooth_a = (valid_type_a == gs.GEOM_TYPE.SPHERE) | (valid_type_a == gs.GEOM_TYPE.ELLIPSOID)
+                is_smooth_b = (valid_type_b == gs.GEOM_TYPE.SPHERE) | (valid_type_b == gs.GEOM_TYPE.ELLIPSOID)
+                if np.any(both_convex & ~specialized & is_smooth_a & is_smooth_b):
+                    gs.raise_exception(
+                        "Differentiable contact detection is not supported for sphere-sphere, sphere-ellipsoid or "
+                        "ellipsoid-ellipsoid collision pairs (requires_grad=True). Approximate them with a faceted "
+                        "geometry (e.g. a convex mesh) or disable requires_grad."
+                    )
         else:
             has_non_box_plane_convex_convex = False
 
@@ -484,13 +557,22 @@ class Collider:
                 )
             )
 
-        has_nonconvex_vs_nonterrain = bool(
-            np.any(
-                ~(valid_convex_a & valid_convex_b)
-                & (valid_type_a != gs.GEOM_TYPE.TERRAIN)
-                & (valid_type_b != gs.GEOM_TYPE.TERRAIN)
-            )
+        # Pairs routed to the vertex-vs-SDF nonconvex narrowphase (at least one nonconvex geom, neither terrain).
+        nonconvex_pair_mask = (
+            ~(valid_convex_a & valid_convex_b)
+            & (valid_type_a != gs.GEOM_TYPE.TERRAIN)
+            & (valid_type_b != gs.GEOM_TYPE.TERRAIN)
         )
+        has_nonconvex_vs_nonterrain = bool(np.any(nonconvex_pair_mask))
+        # Pairs that emit many contacts per pair, used to size the contact buffer. Box-box pairs (when the specialized
+        # detector is enabled) emit up to box_MAXCONPAIR contacts, so they join the nonconvex pairs in the large-cap
+        # bucket rather than being sized as generic convex pairs.
+        large_contact_mask = nonconvex_pair_mask
+        if self._solver._options.box_box_detection:
+            large_contact_mask = large_contact_mask | (
+                (valid_type_a == gs.GEOM_TYPE.BOX) & (valid_type_b == gs.GEOM_TYPE.BOX)
+            )
+        n_possible_nonconvex_pairs = int(np.count_nonzero(large_contact_mask))
 
         return (
             n_possible_pairs,
@@ -500,6 +582,7 @@ class Collider:
             has_non_box_plane_convex_convex,
             has_convex_specialization,
             has_nonconvex_vs_nonterrain,
+            n_possible_nonconvex_pairs,
         )
 
     def _compute_verts_connectivity(self):
@@ -539,9 +622,16 @@ class Collider:
             self._collider_info.vert_neighbor_start.from_numpy(vert_neighbor_start)
             self._collider_info.vert_n_neighbors.from_numpy(vert_n_neighbors)
 
-    def _init_max_contact_pairs(self, n_possible_pairs):
+    def _init_max_contact_pairs(self, n_possible_pairs, n_possible_nonconvex_pairs):
         max_collision_pairs = min(self._solver.max_collision_pairs, n_possible_pairs)
-        max_contact_pairs = max_collision_pairs * self._collider_static_config.n_contacts_per_pair
+        # Size the contact buffer per regime: nonconvex pairs each emit up to n_contacts_per_nonconvex_pair, convex and
+        # terrain pairs up to n_contacts_per_convex_pair. The worst case fills the capped pair budget with as many
+        # (larger-cap) nonconvex pairs as exist, then the rest with convex pairs.
+        cap_nonconvex = self._collider_static_config.n_contacts_per_nonconvex_pair
+        cap_convex = self._collider_static_config.n_contacts_per_convex_pair
+        n_nonconvex = min(n_possible_nonconvex_pairs, max_collision_pairs)
+        n_convex = min(n_possible_pairs - n_possible_nonconvex_pairs, max_collision_pairs - n_nonconvex)
+        max_contact_pairs = n_nonconvex * cap_nonconvex + n_convex * cap_convex
         max_contact_pairs_broad = max_collision_pairs * self._solver._options.multiplier_collision_broad_phase
 
         self._collider_info.max_possible_pairs[None] = n_possible_pairs
@@ -819,23 +909,31 @@ class Collider:
                 self._solver._errno,
             )
 
-        if (
-            self._collider_static_config.link_pair_pruning_supported
-            and self._solver._options.contact_pruning_tolerance is not None
+        # GPU dedup-eligible path: warp-per-env coop kernel beats one-env-per-thread serial fused kernel only when
+        # the GPU has spare occupancy. The _B * 2 <= gpu_cores gate keeps the coop launch from oversubscribing the
+        # SMs (the serial fused kernel wins above that threshold).
+        ran_fused_dedup_coop = (
+            gs.backend != gs.cpu
+            and self._collider_static_config.has_prunable_contacts
             and not self._solver._static_rigid_sim_config.requires_grad
-        ):
-            func_prune_contacts(
+            and (self._solver._options.contact_pruning_tolerance or 0.0) > 0.0
+            and self._solver._B * 2 <= self._gpu_cores
+        )
+        if ran_fused_dedup_coop:
+            func_clamp_prune_and_sort_contacts_coop(
                 self._collider_state,
                 self._collider_info,
                 self._solver._rigid_global_info,
                 self._solver._static_rigid_sim_config,
+                self._collider_static_config,
             )
-
-        if self._use_split_narrowphase:
-            func_clamp_and_sort_contacts(
+        else:
+            func_clamp_prune_and_sort_contacts(
                 self._collider_state,
                 self._collider_info,
+                self._solver._rigid_global_info,
                 self._solver._static_rigid_sim_config,
+                self._collider_static_config,
             )
 
     def get_contacts(self, as_tensor: bool = True, to_torch: bool = True, keep_batch_dim: bool = False):
@@ -845,22 +943,50 @@ class Collider:
             return contact_data.copy()
 
         n_envs = self._solver.n_envs
+        # When pruning and spatial sort are both statically disabled, contact_sort_idx is guaranteed to stay at the
+        # identity permutation, so the physical layout of contact_data already matches the logical order. In that
+        # case the zero-copy fast path returns torch views over contact_data storage truncated to n_contacts_max.
+        # Otherwise the permutation must be applied: read both contact_data and contact_sort_idx as zero-copy torch
+        # views, then materialize each field via a single torch.gather along the contact axis. This still avoids the
+        # Quadrants gather kernel and produces a contiguous output suitable for downstream consumers.
+        zerocopy_aligned = (
+            not self._collider_static_config.has_prunable_contacts
+            and not self._collider_static_config.spatial_sort_supported
+        )
         if gs.use_zerocopy:
             n_contacts = qd_to_torch(self._collider_state.n_contacts, copy=False)
             if as_tensor or n_envs == 0:
                 n_contacts_max = (n_contacts if n_envs == 0 else n_contacts.max()).item()
 
-            for key, data in self._contact_data.items():
-                if n_envs == 0:
-                    data = data[0, :n_contacts_max] if not keep_batch_dim else data[:, :n_contacts_max]
-                elif as_tensor:
-                    data = data[:, :n_contacts_max]
+            if not zerocopy_aligned:
+                # Build a (_B, n_contacts_max) index tensor once, expanded to (_B, n_contacts_max, 3) for vector
+                # fields. n_contacts_max comes from the max-across-envs reduction so the same index drives every
+                # field; per-env trimming to n_contacts[i] happens in the ragged split below.
+                if not (as_tensor or n_envs == 0):
+                    n_contacts_max = n_contacts.max().item()
+                sort_idx_view = qd_to_torch(self._collider_state.contact_sort_idx, transpose=True, copy=False)
+                gather_idx_flat = sort_idx_view[:, :n_contacts_max]
+                gather_idx_vec = gather_idx_flat.unsqueeze(-1).expand(-1, -1, 3)
 
-                if to_torch:
-                    if gs.backend == gs.cpu:
-                        data = data.clone()
+            for key, data in self._contact_data.items():
+                if zerocopy_aligned:
+                    if n_envs == 0:
+                        data = data[0, :n_contacts_max] if not keep_batch_dim else data[:, :n_contacts_max]
+                    elif as_tensor:
+                        data = data[:, :n_contacts_max]
+                    if to_torch:
+                        if gs.backend == gs.cpu:
+                            data = data.clone()
+                    else:
+                        data = tensor_to_array(data)
                 else:
-                    data = tensor_to_array(data)
+                    # data shape is (_B, max_contact_pairs) for scalars or (_B, max_contact_pairs, 3) for vectors.
+                    gidx = gather_idx_vec if data.dim() == 3 else gather_idx_flat
+                    data = data.gather(dim=1, index=gidx)
+                    if n_envs == 0 and not keep_batch_dim:
+                        data = data[0]
+                    if not to_torch:
+                        data = tensor_to_array(data)
 
                 if n_envs > 0 and not as_tensor:
                     if keep_batch_dim:

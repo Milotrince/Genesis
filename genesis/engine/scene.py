@@ -203,6 +203,7 @@ class Scene(RBC):
         self._uid = gs.UID()
         self._t = 0
         self._is_built = False
+        self._pre_step_callbacks: list = []
 
         gs.logger.info(f"Scene ~~~<{self._uid}>~~~ created.")
 
@@ -635,6 +636,27 @@ class Scene(RBC):
         """
         return self._sim._sensor_manager.create_sensor(sensor_options)
 
+    @gs.assert_unbuilt
+    def add_audio_source(self, source_options):
+        """
+        Add an audio *source* to the scene.
+
+        Audio sources generate sound from the physics (e.g. actuation noise) -- the synthesis stage of the audio
+        pipeline. They are not sensors: a receiver sensor (``SpatialAudio`` / microphone) renders the registered
+        sources. Contrast with ``add_sensor`` (receivers / measurements).
+
+        Parameters
+        ----------
+        source_options : AudioSourceOptions
+            The options for the audio source.
+        """
+        return self._sim._audio_manager.add_source(source_options)
+
+    @property
+    def audio(self):
+        """The scene's :class:`~genesis.engine.audio.AudioManager` (registry of audio sources)."""
+        return self._sim._audio_manager
+
     @gs.assert_built
     def read_sensors(self, envs_idx=None) -> "dict[type[Sensor], torch.Tensor]":
         """
@@ -1018,25 +1040,38 @@ class Scene(RBC):
         """
         return self._get_state()
 
+    def register_pre_step_callback(self, callback):
+        """Register a callback invoked at the start of each ``step()``, on the stepping thread. A callback
+        may run deferred work there and veto the advance of that step by returning ``True``. The scene calls
+        them opaquely; use this to drive a scene from an external controller without coupling the scene to it."""
+        self._pre_step_callbacks.append(callback)
+
     @gs.assert_built
     def step(self, update_visualizer=True, refresh_visualizer=True):
         """
         Runs a simulation step forward in time.
         """
-        if not self._forward_ready:
-            gs.raise_exception("Forward simulation not allowed after backward pass. Please reset scene state.")
+        # Run pre-step callbacks on the stepping thread. A callback may perform deferred work and veto this
+        # frame's advance by returning True. The scene treats them opaquely, without knowing what they do or who
+        # registered them (e.g. an InteractiveScene driving GUI-requested rebuild/pause). The visualizer is still
+        # refreshed when the advance is vetoed, so the viewer keeps rendering and stays responsive while paused.
+        advance = not any([callback() for callback in tuple(self._pre_step_callbacks)])
 
-        self._sim.step()
-
-        self._t += 1
+        if advance:
+            if not self._forward_ready:
+                gs.raise_exception("Forward simulation not allowed after backward pass. Please reset scene state.")
+            self._sim.step()
+            self._t += 1
 
         if update_visualizer:
-            self._visualizer.update(force=False, auto=refresh_visualizer)
+            # Force the refresh when the sim did not advance (e.g. paused) so edits made off the step loop -
+            # like a GUI joint slider calling set_qpos - are still drawn and the viewer does not appear frozen.
+            self._visualizer.update(force=not advance, auto=refresh_visualizer)
 
-        if self.profiling_options.show_FPS:
-            self.FPS_tracker.step()
-
-        self._recorder_manager.step(self._sim.cur_step_global)
+        if advance:
+            if self.profiling_options.show_FPS:
+                self.FPS_tracker.step()
+            self._recorder_manager.step(self._sim.cur_step_global)
 
     def stop_recording(self):
         self._recorder_manager.stop()

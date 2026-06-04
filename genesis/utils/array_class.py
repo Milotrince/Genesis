@@ -240,8 +240,8 @@ class ConstraintState:
     jac: qd.Tensor
     diag: qd.Tensor
     aref: qd.Tensor
-    jac_relevant_dofs: qd.Tensor
-    jac_n_relevant_dofs: qd.Tensor
+    jac_dofs_idx: qd.Tensor
+    jac_n_dofs: qd.Tensor
     n_constraints_equality: qd.Tensor
     n_constraints_frictionloss: qd.Tensor
     improved: qd.Tensor
@@ -290,6 +290,18 @@ class ConstraintState:
     # In practice, this variable is re-purposed to store the Cholesky factor L st H = L @ L.T to spare memory resources.
     # TODO: Optimize storage to only allocate memory half of the Hessian matrix to sparse memory resources.
     nt_H: qd.Tensor
+    # Skyline envelope: nt_H_env_start[i_b, i_d] is the first (smallest) column index with a structural
+    # nonzero in row i_d of the Hessian. Cholesky fill-in stays within this envelope, so the factor and
+    # solve loops only need to visit columns [nt_H_env_start[i_d], i_d]. Only meaningful with sparse_solve.
+    nt_H_env_start: qd.Tensor
+    # Fill-reducing DOF reordering (sparse_solve). dof_perm[i_b, p] = original DOF at permuted position p;
+    # dof_iperm[i_b, d] = permuted position of original DOF d. The Hessian is assembled, factored and solved in
+    # permuted order (a spatial sort of bodies that keeps coupled DOFs index-adjacent), making the skyline band
+    # insensitive to insertion order; grad/Mgrad are indexed through dof_perm at the solve boundary so the rest of
+    # the solver stays in natural order. dof_sort_key is per-DOF scratch for the spatial sort.
+    dof_perm: qd.Tensor
+    dof_iperm: qd.Tensor
+    dof_sort_key: qd.Tensor
     nt_vec: qd.Tensor
     # Compacted list of constraints whose active state changed, used by incremental Cholesky update
     # to reduce GPU thread divergence by iterating only over constraints that need processing.
@@ -345,8 +357,9 @@ def get_constraint_state(constraint_solver, solver):
     jac_shape = (len_constraints_, solver.n_dofs_, _B)
     efc_AR_shape = maybe_shape((len_constraints_, len_constraints_, _B), solver._options.noslip_iterations > 0)
     efc_b_shape = maybe_shape((len_constraints_, _B), solver._options.noslip_iterations > 0)
-    jac_relevant_dofs_shape = maybe_shape(jac_shape, constraint_solver.sparse_solve)
-    jac_n_relevant_dofs_shape = maybe_shape((len_constraints_, _B), constraint_solver.sparse_solve)
+    jac_dofs_idx_shape = maybe_shape(jac_shape, constraint_solver.sparse_solve)
+    jac_n_dofs_shape = maybe_shape((len_constraints_, _B), constraint_solver.sparse_solve)
+    sparse_dof_shape = maybe_shape((_B, solver.n_dofs_), constraint_solver.sparse_solve)
 
     if math.prod(jac_shape) > np.iinfo(np.int32).max:
         gs.raise_exception(
@@ -397,6 +410,10 @@ def get_constraint_state(constraint_solver, solver):
         cg_prev_Mgrad=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
         nt_vec=V(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), layout=dof_vec_layout),
         nt_H=V(dtype=gs.qd_float, shape=(_B, solver.n_dofs_, solver.n_dofs_)),
+        nt_H_env_start=V(dtype=gs.qd_int, shape=sparse_dof_shape),
+        dof_perm=V(dtype=gs.qd_int, shape=sparse_dof_shape),
+        dof_iperm=V(dtype=gs.qd_int, shape=sparse_dof_shape),
+        dof_sort_key=V(dtype=gs.qd_float, shape=sparse_dof_shape),
         incr_changed_idx=V(dtype=gs.qd_int, shape=(len_constraints_, _B)),
         incr_n_changed=V(dtype=gs.qd_int, shape=(_B,)),
         efc_b=V(dtype=gs.qd_float, shape=efc_b_shape),
@@ -414,12 +431,12 @@ def get_constraint_state(constraint_solver, solver):
         efc_D=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         jv=V(dtype=gs.qd_float, shape=(len_constraints_, _B), layout=con_layout),
         jac=V(dtype=gs.qd_float, shape=jac_shape, layout=jac_layout),
-        jac_relevant_dofs=V(
+        jac_dofs_idx=V(
             dtype=gs.qd_int,
-            shape=jac_relevant_dofs_shape,
+            shape=jac_dofs_idx_shape,
             layout=jac_layout if constraint_solver.sparse_solve else None,
         ),
-        jac_n_relevant_dofs=V(dtype=gs.qd_int, shape=jac_n_relevant_dofs_shape),
+        jac_n_dofs=V(dtype=gs.qd_int, shape=jac_n_dofs_shape),
         # Backward gradients
         dL_dqacc=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, _B), solver._requires_grad)),
         dL_dM=V(dtype=gs.qd_float, shape=maybe_shape((solver.n_dofs_, solver.n_dofs_, _B), solver._requires_grad)),
@@ -698,6 +715,10 @@ class ColliderState:
     contact_proj_v: qd.Tensor
     contact_keep: qd.Tensor
     contact_hull_stack: qd.Tensor
+    # Per-bucket lex sort permutation used by the cooperative dedup kernel
+    # (func_clamp_prune_and_sort_contacts_coop) for the phase-3 (u, v) lex sort. Sized to max_contact_pairs because
+    # each env writes its own permutation.
+    contact_lex_idx: qd.Tensor
 
 
 def get_collider_state(
@@ -712,14 +733,15 @@ def get_collider_state(
     n_geoms = solver.n_geoms_
     max_collision_pairs = min(solver.max_collision_pairs, n_possible_pairs)
     max_collision_pairs_broad = max_collision_pairs * max_collision_pairs_broad_k
-    max_contact_pairs = max_collision_pairs * collider_static_config.n_contacts_per_pair
+    # Already sized per regime (convex vs nonconvex) by Collider._init_max_contact_pairs, which runs before this.
+    max_contact_pairs = max(collider_info.max_contact_pairs[None], 1)
     requires_grad = static_rigid_sim_config.requires_grad
 
     box_depth_shape = maybe_shape(
-        (collider_static_config.n_contacts_per_pair, _B), static_rigid_sim_config.box_box_detection
+        (collider_static_config.n_contacts_per_nonconvex_pair, _B), static_rigid_sim_config.box_box_detection
     )
     box_points_shape = maybe_shape(
-        (collider_static_config.n_contacts_per_pair, _B), static_rigid_sim_config.box_box_detection
+        (collider_static_config.n_contacts_per_nonconvex_pair, _B), static_rigid_sim_config.box_box_detection
     )
     box_pts_shape = maybe_shape((6, _B), static_rigid_sim_config.box_box_detection)
     box_lines_shape = maybe_shape((4, _B), static_rigid_sim_config.box_box_detection)
@@ -727,7 +749,7 @@ def get_collider_state(
     box_axi_shape = maybe_shape((3, _B), static_rigid_sim_config.box_box_detection)
     box_ppts2_shape = maybe_shape((4, 2, _B), static_rigid_sim_config.box_box_detection)
     box_pu_shape = maybe_shape((4, _B), static_rigid_sim_config.box_box_detection)
-    prune_shape = maybe_shape((max(max_contact_pairs, 1), _B), collider_static_config.link_pair_pruning_supported)
+    prune_shape = maybe_shape((max(max_contact_pairs, 1), _B), collider_static_config.has_prunable_contacts)
 
     return ColliderState(
         sort_buffer=get_sort_buffer(solver),
@@ -760,6 +782,7 @@ def get_collider_state(
         contact_proj_v=V(dtype=gs.qd_float, shape=prune_shape),
         contact_keep=V(dtype=gs.qd_int, shape=prune_shape),
         contact_hull_stack=V(dtype=gs.qd_int, shape=prune_shape),
+        contact_lex_idx=V(dtype=gs.qd_int, shape=prune_shape),
     )
 
 
@@ -838,13 +861,20 @@ class ColliderStaticConfig(metaclass=AutoInitMeta):
     has_non_box_plane_convex_convex: bool
     has_convex_specialization: bool
     has_nonconvex_nonterrain: bool
-    # True when link-pair contact pruning can ever do useful work. False when every link has at most one convex geom
-    # and no terrain is present, because each (link_a, link_b) bucket then holds at most one geom-pair's contacts
-    # (capped at n_contacts_per_pair) and the 2D hull would be at best a marginal reduction. Lets us skip the pruning
-    # kernel call and its scratch buffers entirely.
-    link_pair_pruning_supported: bool
+    # True when link-pair contact pruning can ever do useful work. False when every link has at most one convex geom and
+    # no terrain is present (each (link_a, link_b) bucket then holds at most one geom-pair's contacts, capped at
+    # n_contacts_per_convex_pair, so the 2D hull is at best a marginal reduction), or when use_contact_island is True
+    # (the contact-island path consumes contact_data in physical layout and does not honor the sort_idx indirection).
+    # Lets us skip the pruning kernel call and its scratch buffers entirely.
+    has_prunable_contacts: bool
+    # True when func_clamp_prune_and_sort_contacts should also spatial-sort contacts by x-position. Gated by both
+    # narrowphase configuration (only meaningful when has_non_box_plane_convex_convex on GPU) and use_contact_island
+    # (the island path does not honor the resulting sort_idx permutation).
+    spatial_sort_supported: bool
     # maximum number of contact pairs per collision pair
-    n_contacts_per_pair: int
+    n_contacts_per_convex_pair: int
+    # maximum number of contact pairs per nonconvex (vertex-vs-SDF) collision pair; >= n_contacts_per_convex_pair
+    n_contacts_per_nonconvex_pair: int
     # ccd algorithm
     ccd_algorithm: int
 
@@ -2107,6 +2137,10 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     enable_joint_limit: bool
     box_box_detection: bool
     sparse_solve: bool
+    # Whether the CPU skyline-envelope Cholesky (and its DOF reorder) is active. Set by the solver to sparse_solve
+    # and CPU backend and not requires_grad: the differentiable adjoint solve reuses nt_H with natural, dense
+    # indexing, so it cannot follow the envelope/permutation; assembly-level sparsity still applies under grad.
+    sparse_envelope: bool
     integrator: int
     solver_type: int
     requires_grad: bool
@@ -2114,11 +2148,18 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     parallel_init: bool = False  # parallelize init over (constraints, envs) when GPU is not saturated by envs alone
     broadphase_traversal: int = 0
     enable_tiled_cholesky_mass_matrix: bool = False
+    mass_matrix_fits_shared: bool = False
     enable_tiled_cholesky_hessian: bool = False
+    hessian_fits_shared: bool = False
     # Register-tile width for the Hessian Cholesky kernels: 16 (Tile16x16) or 32 (Tile32x32). Selected at build time
     # based on n_dofs: 32 wins for large problems (e.g. dex_hand, n_dofs=62); 16 wins when n_dofs is small or lands in a
     # padding-unfavorable band (e.g. g1_fall, n_dofs=35).
     cholesky_tile_size: int = 32
+    # When True, the warm-start factor+solve in ``func_solve_init`` is dispatched through
+    # ``func_cholesky_and_solve_fused_tiled`` (single kernel, L kept in shared memory) instead of the separate
+    # ``func_cholesky_factor_direct_tiled`` + ``func_cholesky_solve_tiled`` pair. Requires
+    # ``enable_tiled_cholesky_hessian`` for the fused kernel to be available.
+    enable_fused_factor_solve_init: bool = False
     # When True, some constraint-state tensors (eg Jaref, efc_D, ...) are allocated with ``layout=(1, 0)``,
     # i.e. (_B, len_constraints_) physical storage. This unlocks coalesced cross-lane reads for the
     # subgroup-cooperative refinement in the linesearch and contiguous per-thread access.

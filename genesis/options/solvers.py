@@ -450,7 +450,12 @@ class RigidOptions(Options):
     noslip_tolerance : float, optional
         Tolerance for the noslip solver. Defaults to 1e-6.
     sparse_solve : bool, optional
-        Whether to exploit sparsity in the constraint system. Defaults to False.
+        Whether to exploit sparsity (skyline-envelope Cholesky) in the constraint solver.
+
+        Defaults to None, which resolves automatically: enabled on the CPU backend (and not under MuJoCo compatibility)
+        when the scene has block structure - at least two DOF-carrying bodies or at least two free joints - so the
+        Hessian band stays much tighter than its dimension. Never enabled on GPU, where the dense tiled factorization
+        is faster. Set True or False to override the automatic choice; True is ignored with a warning on GPU.
     contact_resolve_time : float, optional
         Please note that this option will be deprecated in a future version. Use 'constraint_timeconst'
         instead.
@@ -507,8 +512,8 @@ class RigidOptions(Options):
     ls_tolerance: PositiveFloat = 1e-2
     noslip_iterations: NonNegativeInt = 0
     noslip_tolerance: PositiveFloat = 1e-6
-    contact_pruning_tolerance: PositiveFloat | None = None
-    sparse_solve: StrictBool = False
+    contact_pruning_tolerance: PositiveFloat | None = 0.02
+    sparse_solve: StrictBool | None = None
     constraint_timeconst: PositiveFloat = 0.01
     use_contact_island: StrictBool = False
     box_box_detection: StrictBool = False
@@ -546,6 +551,14 @@ class RigidOptions(Options):
                     "'contact_pruning_tolerance' is not supported when 'enable_mujoco_compatibility' is True"
                 )
             # User did not explicitly request pruning, silently disable to guarantee mujoco compatibility
+            self.contact_pruning_tolerance = None
+        if self.contact_pruning_tolerance is not None and self.use_contact_island:
+            if "contact_pruning_tolerance" in self.model_fields_set:
+                gs.raise_exception(
+                    "'contact_pruning_tolerance' is not supported when 'use_contact_island' is True. The contact "
+                    "island path consumes contacts in physical layout and does not honor the logical permutation "
+                    "that link-pair pruning produces."
+                )
             self.contact_pruning_tolerance = None
 
 

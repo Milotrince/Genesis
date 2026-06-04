@@ -485,7 +485,7 @@ class ContactDepthProbeSensor(
     ViscoelasticHysteresisMixin[ContactDepthProbeMetadata],
     KinematicTactileSensorMixin[ContactDepthProbeMetadata],
     RigidSensorMixin[ContactDepthProbeMetadata],
-    SimpleSensor[ContactDepthProbeOptions, ContactDepthProbeMetadata, tuple],
+    SimpleSensor[ContactDepthProbeOptions, None, ContactDepthProbeMetadata, tuple],
 ):
     """
     Returns contact depth in meters per probe.
@@ -511,6 +511,7 @@ class ContactDepthProbeSensor(
     @classmethod
     def _update_current_timestep_data(
         cls,
+        shared_context: None,
         shared_metadata: ContactDepthProbeMetadata,
         current_ground_truth_data_T: torch.Tensor,
         ground_truth_data_timeline: "TensorRingBuffer | None",
@@ -568,7 +569,7 @@ class ContactProbeMetadata(ContactDepthProbeMetadata):
     release_threshold_row: torch.Tensor = make_tensor_field((0,))
 
 
-class ContactProbeSensor(ContactDepthProbeSensor, SimpleSensor[ContactProbeOptions, ContactProbeMetadata, tuple]):
+class ContactProbeSensor(ContactDepthProbeSensor, SimpleSensor[ContactProbeOptions, None, ContactProbeMetadata, tuple]):
     """
     Returns boolean contact per probe with optional Schmitt-trigger hysteresis. Shares the depth-probe kernel.
 
@@ -639,7 +640,7 @@ class ContactProbeSensor(ContactDepthProbeSensor, SimpleSensor[ContactProbeOptio
         self._draw_debug_probes(context, self._tactile_color_groups_fn(mask))
 
 
-class KinematicTaxelData(NamedTuple):
+class KinematicTaxelReturnType(NamedTuple):
     """
     Parameters
     ----------
@@ -829,7 +830,7 @@ class KinematicTaxelSensor(
     KinematicTactileSensorMixin[KinematicTaxelMetadata],
     ProbesWithNormalSensorMixin[KinematicTaxelMetadata],
     RigidSensorMixin[KinematicTaxelMetadata],
-    SimpleSensor[KinematicTaxelOptions, KinematicTaxelMetadata, KinematicTaxelData],
+    SimpleSensor[KinematicTaxelOptions, None, KinematicTaxelMetadata, KinematicTaxelReturnType],
 ):
     """Kinematic taxels: spring-damper force and torque per probe from contact geometry and relative motion."""
 
@@ -837,16 +838,23 @@ class KinematicTaxelSensor(
     # ``ProbeSensorMixin._taxel_channel_groups`` for how this drives dead-taxel cache-col -> probe mapping.
     _taxel_channel_groups: int = 2
 
-    def __init__(self, sensor_options: KinematicTaxelOptions, sensor_idx: int, sensor_manager: "SensorManager"):
-        super().__init__(sensor_options, sensor_idx, sensor_manager)
+    def __init__(
+        self,
+        options: KinematicTaxelOptions,
+        idx: int,
+        shared_context,
+        shared_metadata,
+        manager: "SensorManager",
+    ):
+        super().__init__(options, idx, shared_context, shared_metadata, manager)
         # Grid eligibility for spatial crosstalk: requires a 2D probe layout with non-degenerate spacing. Strict
         # regularity (uniform normals, orthogonal tangents, exact rectangle) is reported separately as a warning.
         # Flat pos/normals are already populated by ProbeSensorMixin / ProbesWithNormalSensorMixin.
         is_grid = len(self._probe_layout_shape) == 2
         _, _, self._use_grid_crosstalk, is_grid_regular, grid_normal, grid_tangent_u, grid_tangent_v, grid_spacing = (
             normalize_grid_probe_layout(
-                np.asarray(sensor_options.probe_local_pos, dtype=gs.np_float),
-                np.asarray(sensor_options.probe_local_normal, dtype=gs.np_float),
+                np.asarray(options.probe_local_pos, dtype=gs.np_float),
+                np.asarray(options.probe_local_normal, dtype=gs.np_float),
                 is_grid,
             )
         )
@@ -910,6 +918,7 @@ class KinematicTaxelSensor(
     @classmethod
     def _update_current_timestep_data(
         cls,
+        shared_context: None,
         shared_metadata: KinematicTaxelMetadata,
         current_ground_truth_data_T: torch.Tensor,
         ground_truth_data_timeline: "TensorRingBuffer | None",

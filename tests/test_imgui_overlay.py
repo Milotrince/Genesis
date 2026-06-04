@@ -1,12 +1,15 @@
 """Screenshot integration test for ImGuiOverlayPlugin."""
 
+import os
+
+import numpy as np
 import pytest
 
 import genesis as gs
 from genesis.ext.pyrender.overlay import ImGuiOverlayPlugin
 
 from .conftest import IS_INTERACTIVE_VIEWER_AVAILABLE
-from .utils import rgb_array_to_png_bytes
+from .utils import assert_allclose, rgb_array_to_png_bytes
 
 try:
     import imgui_bundle  # noqa: F401
@@ -71,11 +74,25 @@ def _apply_deterministic_imgui_overrides(monkeypatch):
 
     monkeypatch.setattr(ImGuiOverlayPlugin, "_init_imgui", _init_imgui_deterministic)
 
+    # The Scene tab prints each FileMorph's resolved path, an absolute machine-specific location, via text_wrapped.
+    # Reduce it to its basename for two reasons: the captured frame must be reproducible across the snapshot host and
+    # CI runners, and the panel auto-resizes its height to fit the wrapped path - so a long path (two wrapped lines)
+    # makes the panel taller than the basename (one line). The substitution must happen before the panel first
+    # renders, otherwise build() lays out the long path and the auto-resized window stays one frame behind when
+    # captured, giving a taller, non-reproducible frame. Hook the plugin's entity capture to apply it up front.
+    orig_capture = ImGuiOverlayPlugin._capture_pending_entities_kwargs
 
-@pytest.mark.required
-@pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason="Interactive viewer not supported on this platform.")
-@pytest.mark.skipif(not _IMGUI_BUNDLE_AVAILABLE, reason="imgui-bundle not installed (no Python 3.10 wheels).")
-def test_imgui_overlay_screenshot(png_snapshot, monkeypatch):
+    def _capture_pending_entities_basename(self):
+        orig_capture(self)
+        for entity_kwargs in self._pending_entities_kwargs.values():
+            morph = entity_kwargs["morph"]
+            if isinstance(morph, gs.morphs.FileMorph):
+                morph.file = os.path.basename(morph.file)
+
+    monkeypatch.setattr(ImGuiOverlayPlugin, "_capture_pending_entities_kwargs", _capture_pending_entities_basename)
+
+
+def _build_default_scene(*, enable_gui):
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
             # Keep ``res`` small enough to fit the virtual display area of GitHub-hosted Apple M1 macos-15 runners:
@@ -91,6 +108,7 @@ def test_imgui_overlay_screenshot(png_snapshot, monkeypatch):
             # which is not byte-identical across software / hardware renderers; disable it so the captured
             # frame contains only the deterministic ImGui overlay.
             enable_help_text=False,
+            enable_gui=enable_gui,
         ),
         vis_options=gs.options.VisOptions(
             shadow=False,
@@ -133,6 +151,14 @@ def test_imgui_overlay_screenshot(png_snapshot, monkeypatch):
         ),
         name="panda",
     )
+    return scene
+
+
+@pytest.mark.required
+@pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason="Interactive viewer not supported on this platform.")
+@pytest.mark.skipif(not _IMGUI_BUNDLE_AVAILABLE, reason="imgui-bundle not installed (no Python 3.10 wheels).")
+def test_control_panel(png_snapshot, monkeypatch):
+    scene = _build_default_scene(enable_gui=False)
 
     _apply_deterministic_imgui_overrides(monkeypatch)
 
@@ -151,3 +177,62 @@ def test_imgui_overlay_screenshot(png_snapshot, monkeypatch):
     pyrender_viewer.on_draw()
     rgb = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
     assert rgb_array_to_png_bytes(rgb) == png_snapshot
+
+
+@pytest.mark.required
+@pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason="Interactive viewer not supported on this platform.")
+@pytest.mark.skipif(not _IMGUI_BUNDLE_AVAILABLE, reason="imgui-bundle not installed (no Python 3.10 wheels).")
+@pytest.mark.parametrize("performance_mode", [False, True])
+def test_editing_controls(png_snapshot, monkeypatch):
+    # The scene-editing controls (Rebuild Scene, Add Entity, per-entity scale & remove) render enabled in normal
+    # mode and disabled (greyed) in performance mode, where the InteractiveScene advertises no editing features.
+    # They live in the Scene tab, so select it to capture this mode-dependent gating.
+    scene = _build_default_scene(enable_gui=True)
+
+    _apply_deterministic_imgui_overrides(monkeypatch)
+
+    plugin = next(p for p in scene.viewer.plugins if isinstance(p, ImGuiOverlayPlugin))
+    plugin._panel_width = 420
+    plugin._active_tab = "Scene"
+
+    scene.build()
+
+    pyrender_viewer = scene.viewer._pyrender_viewer
+    pyrender_viewer.switch_to()
+    pyrender_viewer.on_draw()
+    rgb = pyrender_viewer._renderer.jit.read_color_buf(*pyrender_viewer._viewport_size, rgba=False)
+    assert rgb_array_to_png_bytes(rgb) == png_snapshot
+
+
+@pytest.mark.required
+@pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason="Interactive viewer not supported on this platform.")
+@pytest.mark.skipif(not _IMGUI_BUNDLE_AVAILABLE, reason="imgui-bundle not installed (no Python 3.10 wheels).")
+@pytest.mark.parametrize("performance_mode", [False])
+def test_scene_rebuild():
+    # enable_gui makes the overlay own an InteractiveScene and rebuild the scene in place: the same Scene
+    # object (and its viewer) stay valid across a rebuild, driven entirely through scene.step() with no
+    # manual InteractiveScene. A Rebuild click only queues the request; scene.step() applies it on its thread.
+    scene = _build_default_scene(enable_gui=True)
+    scene.build()
+
+    scene_id = id(scene)
+    plugin = next(p for p in scene.viewer.plugins if isinstance(p, ImGuiOverlayPlugin))
+    interactive = plugin.interactive_scene
+    assert interactive is not None
+    names_before = [entity.name for entity in scene.entities]
+    # The rebuild must reuse the live window rather than closing and reopening it.
+    window_before = scene.viewer._pyrender_viewer
+    # Move the camera off its default so the rebuild has to restore the exact viewpoint (including roll),
+    # not reset it to the ViewerOptions default.
+    scene.viewer.set_camera_pose(pos=np.array([2.0, 1.3, 1.7]), lookat=np.array([0.1, -0.2, 0.4]))
+    camera_pose_before = scene.viewer.camera_pose.copy()
+
+    interactive.rebuild(entities_kwargs=plugin._pending_entities_kwargs)
+    scene.step()
+
+    assert id(scene) == scene_id
+    assert scene.viewer is not None and scene.viewer.is_alive()
+    assert scene.viewer._pyrender_viewer is window_before
+    assert [entity.name for entity in scene.entities] == names_before
+    assert_allclose(scene.viewer.camera_pose, camera_pose_before, atol=1e-4)
+    scene.step()

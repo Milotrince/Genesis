@@ -87,16 +87,23 @@ class ProbeSensorMixin(Generic[ProbeSensorSharedMetadataT]):
     # Number of channel groups per probe in the cache layout. Used by the per-cache-col probe-index builder.
     _taxel_channel_groups: int = 1
 
-    def __init__(self, sensor_options: "SensorOptions", sensor_idx: int, sensor_manager: "SensorManager"):
+    def __init__(
+        self,
+        options: "SensorOptions",
+        idx: int,
+        shared_context,
+        shared_metadata,
+        manager: "SensorManager",
+    ):
         # `_get_return_format` runs inside `super().__init__`, so `_probe_local_pos` / `_n_probes` /
         # `_probe_layout_shape` must already be set. ``_probe_layout_shape`` is the input layout sans the trailing
         # ``xyz`` axis: ``(N,)`` for a flat probe list or ``(M, N)`` for a 2D grid. Probe-axis storage is flat.
-        raw_pos = torch.tensor(sensor_options.probe_local_pos, dtype=gs.tc_float, device=gs.device)
+        raw_pos = torch.tensor(options.probe_local_pos, dtype=gs.tc_float, device=gs.device)
         self._probe_layout_shape = raw_pos.shape[:-1]
         self._n_probes = int(np.prod(self._probe_layout_shape))
         self._probe_local_pos = raw_pos.reshape(self._n_probes, 3).contiguous()
         self._debug_objects: list = []
-        super().__init__(sensor_options, sensor_idx, sensor_manager)
+        super().__init__(options, idx, shared_context, shared_metadata, manager)
 
     def build(self) -> None:
         super().build()
@@ -489,8 +496,15 @@ ProbesWithNormalSensorSharedMetadataT = TypeVar(
 class ProbesWithNormalSensorMixin(ProbeSensorMixin[ProbesWithNormalSensorSharedMetadataT]):
     """Probe sensor whose probes carry a per-probe outward normal in link-local frame."""
 
-    def __init__(self, sensor_options: "SensorOptions", sensor_idx: int, sensor_manager: "SensorManager"):
-        super().__init__(sensor_options, sensor_idx, sensor_manager)
+    def __init__(
+        self,
+        options: "SensorOptions",
+        idx: int,
+        shared_context,
+        shared_metadata,
+        manager: "SensorManager",
+    ):
+        super().__init__(options, idx, shared_context, shared_metadata, manager)
         raw_normal = torch.tensor(self._options.probe_local_normal, dtype=gs.tc_float, device=gs.device)
         if raw_normal.ndim == 1:
             self._probe_local_normal = raw_normal.expand(self._n_probes, 3).contiguous()
