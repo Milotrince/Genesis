@@ -70,6 +70,7 @@ class ActuationAudioSource(AudioSource):
         self._pitch_slope = col("pitch_slope")
         self._idle_freq = col("idle_freq")
         self._idle_gain = col("idle_gain")
+        self._idle_velocity_gain = col("idle_velocity_gain")
         self._friction_gain = col("friction_gain")
         self._friction_freq = col("friction_freq").clamp(max=self._nyquist)
         self._friction_bw = col("friction_bandwidth").clamp(min=gs.EPS)
@@ -80,14 +81,18 @@ class ActuationAudioSource(AudioSource):
         self._click_decay = col("click_decay").clamp(min=gs.EPS)
         self._slew = col("slew_coeff")
         harm = torch.zeros((n_emit, n_partials), dtype=gs.tc_float, device=gs.device)
+        idle_harm = torch.zeros((n_emit, n_partials), dtype=gs.tc_float, device=gs.device)
         for i, p in enumerate(rows):
             hg = p.harmonic_gains[:n_partials]
             harm[i, : len(hg)] = torch.tensor(hg, dtype=gs.tc_float, device=gs.device)
+            ihg = p.idle_harmonic_gains[:n_partials]
+            idle_harm[i, : len(ihg)] = torch.tensor(ihg, dtype=gs.tc_float, device=gs.device)
         self._harm = harm  # (n_emit, n_partials)
+        self._idle_harm = idle_harm  # (n_emit, n_partials), overtone gains of the idle hum
 
         # Persistent synthesis state.
         self._phase = torch.zeros((B, n_emit, n_partials), dtype=gs.tc_float, device=gs.device)
-        self._idle_phase = torch.zeros((B, n_emit), dtype=gs.tc_float, device=gs.device)
+        self._idle_phase = torch.zeros((B, n_emit, n_partials), dtype=gs.tc_float, device=gs.device)
         self._ty1 = torch.zeros((B, n_emit), dtype=gs.tc_float, device=gs.device)
         self._ty2 = torch.zeros((B, n_emit), dtype=gs.tc_float, device=gs.device)
         self._ay1 = torch.zeros((B, n_emit), dtype=gs.tc_float, device=gs.device)
@@ -145,7 +150,9 @@ class ActuationAudioSource(AudioSource):
 
         load_amp = self._load_gain * tau_f.abs() + self._power_gain * (tau_f * omega_f).abs()  # (B, n_emit)
         f0 = (self._pitch_slope * omega_f.abs()).clamp(max=self._nyquist)
-        idle_amp = self._idle_gain * (tau_f.abs() > 1e-3).to(gs.tc_float)
+        # Static (torque-on) idle floor + a motion-driven term so the hum tracks joint speed instead of droning
+        # constantly while the joint merely holds.
+        idle_amp = self._idle_gain * (tau_f.abs() > 1e-3).to(gs.tc_float) + self._idle_velocity_gain * omega_f.abs()
         friction_amp = self._friction_gain * omega_f.abs()
         # Reversal click: velocity changed sign since last step (backlash takeup).
         sign_flip = (torch.sign(omega_f) * torch.sign(self._prev_omega)) < 0.0
@@ -160,14 +167,14 @@ class ActuationAudioSource(AudioSource):
         ay1, ay2 = self._ay1.clone(), self._ay2.clone()
         noise = torch.randn((B, n_emit, K), dtype=gs.tc_float, device=gs.device)
         dphase = 2.0 * torch.pi * f0.unsqueeze(-1) * self._harm_mult * dt_sub  # (B, n_emit, n_partials)
-        didle = 2.0 * torch.pi * self._idle_freq * dt_sub  # (n_emit,)
+        didle = 2.0 * torch.pi * self._idle_freq.unsqueeze(-1) * self._harm_mult * dt_sub  # (n_emit, n_partials)
         out = torch.empty((B, n_emit, K), dtype=gs.tc_float, device=gs.device)
         for k in range(K):
             phase = phase + dphase
             whine = load_amp * (self._harm * torch.sin(phase)).sum(dim=-1)  # (B, n_emit)
 
-            idle_phase = idle_phase + didle
-            idle = idle_amp * torch.sin(idle_phase)
+            idle_phase = idle_phase + didle  # (B, n_emit, n_partials)
+            idle = idle_amp * (self._idle_harm * torch.sin(idle_phase)).sum(dim=-1)  # (B, n_emit)
 
             ty = ft1 * ty1 - ft2 * ty2 + friction_amp * noise[:, :, k]
             ty2, ty1 = ty1, ty

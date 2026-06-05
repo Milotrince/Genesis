@@ -44,6 +44,18 @@ class ActuationSourceProperties(NamedTuple):
         Frequency (Hz) of the idle electrical hum (PWM / magnetostriction). Default ``120``.
     idle_gain : float
         Amplitude of the idle hum while the motor is energized (``|tau| > 0``). ``0`` disables it. Default ``0``.
+        This is the *static* component: with ``|tau|`` roughly constant while the joint holds, it produces a
+        constant tone. Pair with ``idle_velocity_gain`` (and a small/zero ``idle_gain``) to drive the hum by motion
+        instead, so a held joint is quiet rather than droning.
+    idle_velocity_gain : float
+        Adds a joint-speed-proportional term ``idle_velocity_gain * |omega|`` to the idle hum amplitude, so the hum's
+        fixed-pitch lines are driven by *motion* rather than just holding torque. Keeps the hum quiet while the joint
+        is still (no constant ambient drone) and makes faster motion louder. Default ``0``.
+    idle_harmonic_gains : tuple[float, ...]
+        Relative gains of the idle hum's partials (fundamental, 2x, 3x, ...) at ``idle_freq``. Truncated /
+        zero-padded to ``n_partials`` (shares the whine's partial count). A real servo hum is harmonic-rich, so
+        ``(1.0, 0.6, 0.4)`` etc. reproduces the buzzy overtone stack rather than a pure sine. Default ``(1.0,)``
+        (a single sine, matching the previous behavior).
     friction_gain : float
         Amplitude of the velocity-scaled bearing/friction hiss (broadband). ``0`` disables it. Default ``0``.
     friction_freq : float
@@ -71,6 +83,8 @@ class ActuationSourceProperties(NamedTuple):
     harmonic_gains: tuple[float, ...] = (1.0, 0.5, 0.25)
     idle_freq: float = 120.0
     idle_gain: float = 0.0
+    idle_velocity_gain: float = 0.0
+    idle_harmonic_gains: tuple[float, ...] = (1.0,)
     friction_gain: float = 0.0
     friction_freq: float = 1200.0
     friction_bandwidth: float = 800.0

@@ -519,12 +519,29 @@ class ContactAudio(RigidSensorOptionsMixin["ContactAudioSensor"], SimpleSensorOp
         response (the "received" waveform), whose spectrum reveals the object's resonances and how the contact damps
         them. Combine with ``roughness_gain=0`` to isolate the active response from passive scrape noise. Default
         ``None`` (passive contact-mic mode).
+    velocity_gate_ref : float
+        If ``> 0``, scale the synthesized output by a soft gate that tracks how fast the *sensor's own link* (the
+        attached body) is moving, so the sensor goes quiet when that body is nearly still. The contact-force synthesis
+        alone clicks on every tap/regrip even when the body barely moves; this gate suppresses those when the body is
+        not actually in motion. The gate gain is ``motion / (motion + velocity_gate_ref)`` (0 at rest, 0.5 at
+        ``velocity_gate_ref``, ->1 when fast), where ``motion = |linear_vel| + velocity_gate_ang_weight*|angular_vel|``
+        of the sensor link (m/s-equivalent). ``0`` (default) disables the gate entirely (unchanged behavior).
+    velocity_gate_ang_weight : float
+        Weight converting the sensor link's angular speed (rad/s) to a linear-equivalent (m/s) in the gate's motion
+        metric, roughly the body's radius. Only used when ``velocity_gate_ref > 0``. Default ``0``.
+    velocity_gate_smooth : float
+        One-pole smoothing coefficient in ``(0, 1]`` applied to the gate gain across physics steps (1 = no smoothing,
+        smaller = slower/heavier) so the gain cannot step abruptly and create its own clicks. Only used when
+        ``velocity_gate_ref > 0``. Default ``1.0``.
     """
 
     properties_dict: dict[int, ContactAudioProperties] = Field(default_factory=dict)
     audio_substeps: PositiveInt = 20
     n_modes: PositiveInt = 8
     excitation: ExcitationSignal | None = None
+    velocity_gate_ref: float = Field(default=0.0, ge=0.0)
+    velocity_gate_ang_weight: float = Field(default=0.0, ge=0.0)
+    velocity_gate_smooth: float = Field(default=1.0, gt=0.0, le=1.0)
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)

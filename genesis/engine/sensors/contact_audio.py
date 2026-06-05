@@ -93,6 +93,15 @@ class ContactAudioSensorMetadata(RigidSensorMetadataMixin, SimpleSensorMetadata)
     # sensor can pull each contact mic's structure-borne output as a radiation source (read one step late).
     last_block: torch.Tensor = make_tensor_field((0, 0, 0))
 
+    # Optional sensor-link velocity gate (scales the output toward 0 when the attached body is nearly still). Per-
+    # sensor parameters (n_sensors,) plus a persistent smoothed gain (B, n_sensors). has_velocity_gate gates the per-
+    # step velocity read off when no sensor in the class uses it.
+    has_velocity_gate: bool = False
+    gate_ref: torch.Tensor = make_tensor_field((0,))
+    gate_ang_w: torch.Tensor = make_tensor_field((0,))
+    gate_smooth: torch.Tensor = make_tensor_field((0,))
+    gate_state: torch.Tensor = make_tensor_field((0, 0))
+
 
 class ContactAudioSensor(
     RigidSensorMixin[ContactAudioSensorMetadata],
@@ -228,6 +237,15 @@ class ContactAudioSensor(
         if exc is not None:
             sm.has_excitation = True
 
+        # Per-sensor velocity-gate parameters + persistent smoothed gain (per env, per sensor).
+        sm.gate_ref = concat_with_tensor(sm.gate_ref, self._options.velocity_gate_ref)
+        sm.gate_ang_w = concat_with_tensor(sm.gate_ang_w, self._options.velocity_gate_ang_weight)
+        sm.gate_smooth = concat_with_tensor(sm.gate_smooth, self._options.velocity_gate_smooth)
+        grown = concat_with_tensor(sm.gate_state, 0.0, expand=(batch_size, 1), dim=1)
+        sm.gate_state = grown.contiguous()
+        if self._options.velocity_gate_ref > 0.0:
+            sm.has_velocity_gate = True
+
         # Publish this contact mic's structure-borne output as a radiation source so the airborne SpatialAudio mic can
         # render it through the AudioManager registry. One entry per class (covers all ContactAudio sensors via the
         # shared `last_block`); the callables read the latest tensors after build-time growth.
@@ -261,6 +279,7 @@ class ContactAudioSensor(
             "last_block",
             "exc_t",
             "exc_phase",
+            "gate_state",
         ):
             getattr(shared_metadata, name)[envs_idx] = 0.0
 
@@ -514,6 +533,25 @@ class ContactAudioSensor(
         sm.tex_y1.copy_(ty1)
         sm.tex_y2.copy_(ty2)
         sm.prev_force.copy_(f_normal)
+
+        # Optional sensor-link velocity gate: scale the output toward 0 when the attached body is nearly still, so the
+        # contact-force synthesis does not click on every tap/regrip while the body is not actually moving. Applied
+        # before publishing so the radiation source (SpatialAudio) and the direct read are both gated.
+        if sm.has_velocity_gate:
+            v_lin_all = solver.get_links_vel()
+            v_ang_all = solver.get_links_ang()
+            if solver.n_envs == 0:
+                v_lin_all, v_ang_all = v_lin_all[None], v_ang_all[None]
+            v_lin = v_lin_all[:, sensor_links, :].norm(dim=-1)  # (B, n_sensors)
+            v_ang = v_ang_all[:, sensor_links, :].norm(dim=-1)
+            motion = v_lin + sm.gate_ang_w.view(1, -1) * v_ang
+            ref = sm.gate_ref.view(1, -1)
+            target = motion / (motion + ref).clamp(min=gs.EPS)  # soft knee in [0, 1)
+            new_state = sm.gate_state + sm.gate_smooth.view(1, -1) * (target - sm.gate_state)
+            sm.gate_state.copy_(new_state)
+            mult = torch.where(ref > 0.0, new_state, torch.ones_like(new_state))  # (B, n_sensors)
+            out = out * mult.unsqueeze(-1)
+
         # Expose the raw synthesized block (pre hardware-imperfection) as a radiation source for SpatialAudio.
         sm.last_block.copy_(out)
 
