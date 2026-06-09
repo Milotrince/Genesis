@@ -1,3 +1,4 @@
+from .audio import *
 from .camera import *
 from .options import *
 from .options import Raycaster as Lidar
