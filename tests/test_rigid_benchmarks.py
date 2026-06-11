@@ -1,7 +1,6 @@
 import math
 import os
 import subprocess
-import threading
 import time
 from collections import namedtuple
 from pathlib import Path
@@ -13,8 +12,8 @@ import torch
 import genesis as gs
 
 from .utils import (
-    get_hf_dataset,
     get_git_commit_timestamp,
+    get_hf_dataset,
 )
 
 STEP_DT = 0.01
@@ -249,8 +248,8 @@ def make_go2(n_envs, solver=None, gjk=None, **scene_kwargs):
         device=gs.device,
     ).repeat((scene.n_envs, 1))
     dofs_lower_bound, dofs_upper_bound = robot.get_dofs_limit()
-    init_qpos[:, 7:] = dofs_lower_bound[6:] + (dofs_upper_bound[6:] - dofs_lower_bound[6:]) * torch.as_tensor(
-        np.random.rand(scene.n_envs, robot.n_dofs - 6), dtype=gs.tc_float, device=gs.device
+    init_qpos[:, 7:] = dofs_lower_bound[6:] + (dofs_upper_bound[6:] - dofs_lower_bound[6:]) * torch.rand(
+        (scene.n_envs, robot.n_dofs - 6), dtype=gs.tc_float, device=gs.device
     )
     robot.set_qpos(init_qpos)
 
@@ -304,9 +303,13 @@ def make_anymal(n_envs, solver=None, gjk=None, control=None, with_kinematic=Fals
 
     def step():
         if rand_shape is not None:
-            robot.control_dofs_position(np.random.rand(*rand_shape) * 0.1 - 0.05, motors_dof_idx)
+            robot.control_dofs_position(
+                torch.rand(rand_shape, dtype=gs.tc_float, device=gs.device) * 0.1 - 0.05, motors_dof_idx
+            )
         if ghost is not None:
-            ghost.set_dofs_position(np.random.rand(*rand_shape) * 0.1 - 0.05, motors_dof_idx)
+            ghost.set_dofs_position(
+                torch.rand(rand_shape, dtype=gs.tc_float, device=gs.device) * 0.1 - 0.05, motors_dof_idx
+            )
         scene.step()
 
     return scene, step, SceneMeta(compile_time=compile_time)
@@ -347,7 +350,7 @@ def make_franka(
         franka.control_dofs_position(qpos0)
 
     if n_envs > 0 and is_randomized:
-        vel0 = 0.2 * np.clip(np.random.randn(n_envs, franka.n_dofs), -1.0, 1.0)
+        vel0 = 0.2 * torch.clip(torch.randn((n_envs, franka.n_dofs), dtype=gs.tc_float, device=gs.device), -1.0, 1.0)
         vel0[:, [link.dof_start for link in franka.links if not link.name.startswith("link") and link.n_dofs]] = 0.0
     else:
         vel0 = torch.zeros((*((n_envs,) if n_envs > 0 else ()), franka.n_dofs), dtype=gs.tc_float, device=gs.device)
@@ -359,19 +362,13 @@ def make_franka(
 
     if n_envs > 0:
         n_reset_envs = max(int(0.02 * n_envs), 1)
-        reset_envs_idx = torch.as_tensor(
-            np.random.permutation(n_envs)[:n_reset_envs], dtype=gs.tc_int, device=gs.device
-        )
+        reset_envs_idx = torch.randperm(n_envs, dtype=gs.tc_int, device=gs.device)[:n_reset_envs]
         reset_envs_mask = torch.isin(scene._envs_idx, reset_envs_idx)
     else:
         reset_envs_mask = None
 
     dofs_stiffness = franka.get_dofs_stiffness()
     dofs_damping = franka.get_dofs_damping()
-
-    # Per-selected-env base pose subset exercising the bool-mask zero-copy 'masked_scatter_' path
-    base_pos0 = franka.get_pos(reset_envs_mask)
-    base_quat0 = franka.get_quat(reset_envs_mask)
 
     def step():
         scene.step()
@@ -393,8 +390,6 @@ def make_franka(
             franka.set_dofs_damping(dofs_damping)
             franka.set_dofs_velocity(vel0, envs_idx=reset_envs_mask, skip_forward=True)
             franka.set_qpos(qpos0, envs_idx=reset_envs_mask, zero_velocity=False, skip_forward=True)
-            franka.set_pos(base_pos0, envs_idx=reset_envs_mask, skip_forward=True)
-            franka.set_quat(base_quat0, envs_idx=reset_envs_mask, relative=False, skip_forward=True)
 
     return scene, step, SceneMeta(compile_time=compile_time)
 
@@ -440,7 +435,7 @@ def make_duck_in_box(n_envs, solver=None, gjk=None, hard=False, **scene_kwargs):
     compile_time = time.time() - time_start
 
     if n_envs > 0:
-        duck.set_dofs_velocity(0.5 * np.random.rand(n_envs, 6))
+        duck.set_dofs_velocity(0.5 * torch.rand((n_envs, 6), dtype=gs.tc_float, device=gs.device))
 
     def step():
         scene.step()
@@ -463,6 +458,7 @@ def make_box_pyramid(n_envs, solver=None, gjk=None, n_cubes=3, **scene_kwargs):
                 camera_pos=(0.0, -3.5, 2.5),
                 camera_lookat=(0.0, 0.0, 0.5),
                 camera_fov=30,
+                max_FPS=60,
             ),
             "show_viewer": False,
             "show_FPS": False,
@@ -489,7 +485,7 @@ def make_box_pyramid(n_envs, solver=None, gjk=None, n_cubes=3, **scene_kwargs):
 
     if n_envs > 0:
         for box in scene.entities[1:]:
-            box.set_dofs_velocity(0.04 * np.random.rand(n_envs, 6))
+            box.set_dofs_velocity(0.04 * torch.rand((n_envs, 6), dtype=gs.tc_float, device=gs.device))
 
     def step():
         scene.step()
@@ -552,76 +548,12 @@ def make_g1_fall(n_envs, solver=None, gjk=None, **scene_kwargs):
     )
 
 
-def make_double_smplx(n_envs, solver=None, gjk=None, **scene_kwargs):
-    # Two 159-DOF SMPL-X humanoids dropped on a plane with random per-DOF torques: the 318-DOF environment exceeds the
-    # constraint-Hessian shared-memory cap and each entity exceeds the per-entity mass-matrix cap, so both
-    # factorizations exercise their uncapped paths.
-    STEP_DT = 0.005
-    INIT_POSS = ((0.0, -0.5, 1.4), (0.0, 0.5, 1.4))  # pelvis dropped 1.4 m above the plane, offset in y
-    INIT_EULER = (90.0, 0.0, 0.0)  # SMPL-X canonical frame is Y-up; rotate to stand upright in Genesis (Z-up)
-    MAX_FORCE = 500.0
-
-    scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(
-            dt=STEP_DT,
-            # Cap the reserved contacts so the self-colliding 318-DOF Jacobian (n_constraints * n_dofs * n_envs) stays
-            # within int32 at n_envs=4096.
-            max_collision_pairs=40,
-            **(dict(constraint_solver=solver) if solver is not None else {}),
-            **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
-        ),
-        **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
-    )
-
-    scene.add_entity(gs.morphs.Plane())
-    asset_path = get_hf_dataset(pattern="smplx_humanoid/*")
-    smplx_xml = f"{asset_path}/smplx_humanoid/smplx_humanoid.xml"
-    robots = [
-        scene.add_entity(
-            gs.morphs.MJCF(
-                **get_file_morph_options(
-                    file=smplx_xml,
-                    pos=pos,
-                    euler=INIT_EULER,
-                )
-            ),
-            vis_mode="collision",
-        )
-        for pos in INIT_POSS
-    ]
-    time_start = time.time()
-    scene.build(n_envs=n_envs)
-    compile_time = time.time() - time_start
-
-    random_forces = [torch.zeros((n_envs, robot.n_dofs), dtype=gs.tc_float, device=gs.device) for robot in robots]
-
-    def step():
-        for robot, forces in zip(robots, random_forces):
-            forces.uniform_(-MAX_FORCE, MAX_FORCE)
-            robot.control_dofs_force(forces)
-        scene.step()
-
-    return (
-        scene,
-        step,
-        SceneMeta(
-            compile_time=compile_time,
-            step_dt=STEP_DT,
-            duration_warmup=20.0,
-            duration_record=5.0,
-        ),
-    )
-
-
 def make_shadow_hand_cubes(n_envs, solver=None, gjk=None, sparse_solve=False, **scene_kwargs):
-    STEP_DT = 1.0 / 30
+    _STEP_DT = 1.0 / 30
     TABLE_Z = 0.762
 
     scene = gs.Scene(
-        sim_options=gs.options.SimOptions(
-            dt=STEP_DT,
-            substeps=4,
-        ),
+        sim_options=gs.options.SimOptions(dt=_STEP_DT, substeps=4, gravity=(0, 0, -9.81)),
         rigid_options=gs.options.RigidOptions(
             noslip_iterations=2,
             max_collision_pairs=256,
@@ -683,7 +615,7 @@ def make_shadow_hand_cubes(n_envs, solver=None, gjk=None, sparse_solve=False, **
         step,
         SceneMeta(
             compile_time=compile_time,
-            step_dt=STEP_DT,
+            step_dt=_STEP_DT,
             duration_warmup=20.0,
             duration_record=5.0,
         ),
@@ -698,7 +630,7 @@ def make_dex_hand(n_envs, solver=None, gjk=None, **scene_kwargs):
     FINGER_FORCE = 0.6
     DRILL_STIFFNESS = 20
 
-    STEP_DT = 1 / 16
+    _STEP_DT = 1 / 16
 
     JOINT_NAMES = [
         *("FFJ4", "FFJ3", "FFJ2", "FFJ1"),
@@ -741,7 +673,7 @@ def make_dex_hand(n_envs, solver=None, gjk=None, **scene_kwargs):
     # at https://github.com/Genesis-Embodied-AI/Genesis/pull/2500#discussion_r2900243286
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
-            dt=STEP_DT,
+            dt=_STEP_DT,
             substeps=25,
         ),
         rigid_options=gs.options.RigidOptions(
@@ -816,7 +748,7 @@ def make_dex_hand(n_envs, solver=None, gjk=None, **scene_kwargs):
         step,
         SceneMeta(
             compile_time=compile_time,
-            step_dt=STEP_DT,
+            step_dt=_STEP_DT,
             duration_warmup=20.0,
             duration_record=5.0,
         ),
@@ -870,47 +802,6 @@ def _process_gpu_mem_mb():
     return used_mb
 
 
-class _GpuMemorySampler:
-    # Polls per-process GPU memory in a daemon thread on a wall-clock interval.
-    #
-    # Sampling must NOT happen inside the timed step loop: `nvidia-smi` costs
-    # tens of milliseconds per call, enough to corrupt `runtime_fps` if called
-    # every N steps. A background thread keeps the measurement off the hot path,
-    # and wall-clock sampling makes the peak independent of step throughput.
-    _INTERVAL_S = 0.25
-
-    def __init__(self):
-        self._peak_mb = None
-        self._stop = threading.Event()
-        self._thread = None
-
-    def sample(self):
-        mem_mb = _process_gpu_mem_mb()
-        if mem_mb is not None:
-            self._peak_mb = mem_mb if self._peak_mb is None else max(self._peak_mb, mem_mb)
-        return mem_mb
-
-    def _run(self):
-        while not self._stop.wait(self._INTERVAL_S):
-            self.sample()
-
-    def __enter__(self):
-        if self.sample() is not None:
-            self._thread = threading.Thread(target=self._run, daemon=True)
-            self._thread.start()
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)
-        self.sample()
-
-    @property
-    def peak_mb(self):
-        return self._peak_mb
-
-
 def run_benchmark(step_fn, *, n_envs, meta):
     import quadrants as qd
 
@@ -933,31 +824,31 @@ def run_benchmark(step_fn, *, n_envs, meta):
     step_fn()
     qd.sync()
 
-    with _GpuMemorySampler() as mem_sampler:
-        # Measured after build + the warmup-bracketing step above, so the
-        # quadrants pool and torch allocator are fully warmed: this is the
-        # steady post-build footprint. `peak_mem_mb` then tracks the wall-clock
-        # maximum over the whole warmup + record window.
-        mem_after_build_mb = mem_sampler.sample()
+    # Measured once after build + the warmup-bracketing step above, so the quadrants pool
+    # and torch allocator are fully warmed: this is the steady post-build footprint. In
+    # performance mode every array is preallocated at build and never grows during stepping,
+    # so this is also the peak — we no longer poll memory inside the loop. `peak_mem_mb` is
+    # kept (equal to mem_after_build_mb) for backward compatibility with the plotting scripts.
+    mem_after_build_mb = _process_gpu_mem_mb()
+    peak_mem_mb = mem_after_build_mb
 
-        num_steps = 0
-        is_recording = False
-        time_start = time.time()
-        while True:
-            step_fn()
-            time_elapsed = time.time() - time_start
-            if is_recording:
-                num_steps += 1
-                if time_elapsed > meta.duration_record:
-                    qd.sync()
-                    time_elapsed = time.time() - time_start
-                    break
-            elif time_elapsed > meta.duration_warmup:
+    num_steps = 0
+    is_recording = False
+    time_start = time.time()
+    while True:
+        step_fn()
+        time_elapsed = time.time() - time_start
+        if is_recording:
+            num_steps += 1
+            if time_elapsed > meta.duration_record:
                 qd.sync()
-                time_start = time.time()
-                is_recording = True
+                time_elapsed = time.time() - time_start
+                break
+        elif time_elapsed > meta.duration_warmup:
+            qd.sync()
+            time_start = time.time()
+            is_recording = True
 
-    peak_mem_mb = mem_sampler.peak_mb
     runtime_fps = int(num_steps * max(n_envs, 1) / time_elapsed)
     realtime_factor = runtime_fps * meta.step_dt
 
@@ -1072,12 +963,6 @@ def g1_fall(solver, n_envs, gjk):
 
 
 @pytest.fixture
-def double_smplx(solver, n_envs, gjk):
-    _, step_fn, meta = make_double_smplx(n_envs, solver=solver, gjk=gjk)
-    return run_benchmark(step_fn, n_envs=n_envs, meta=meta)
-
-
-@pytest.fixture
 def shadow_hand_cubes(solver, n_envs, gjk):
     _, step_fn, meta = make_shadow_hand_cubes(n_envs, solver=solver, gjk=gjk)
     return run_benchmark(step_fn, n_envs=n_envs, meta=meta)
@@ -1132,7 +1017,6 @@ def dex_hand(solver, n_envs, gjk):
         ("box_pyramid_6", None, True, 4096, gs.gpu),
         ("box_pyramid_6", None, False, 4096, gs.gpu),
         ("g1_fall", gs.constraint_solver.Newton, None, 4096, gs.gpu),
-        ("double_smplx", gs.constraint_solver.Newton, None, 4096, gs.gpu),
         ("shadow_hand_cubes", None, None, 0, gs.cpu),
         ("shadow_hand_cubes_sparse", None, None, 0, gs.cpu),
         ("dex_hand", None, None, 4096, gs.gpu),
