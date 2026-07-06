@@ -186,6 +186,11 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
     # Subclasses whose `_update_shared_cache` bypasses the rings (e.g. cameras handling rendering lazily) explicitly set
     # this to ``False``.
     uses_ring_pipeline: ClassVar[bool] = True
+    # Whether instances of this class use the manager's single-dtype per-class cache (and thus appear in
+    # `scene.read_sensors()`). Sensors that own their own storage and are read only via `sensor.read()` — currently the
+    # camera sensors, which hold multi-dtype image buffers — set this to ``False`` so the manager skips cache-size
+    # accounting for them and excludes them from `read_sensors()`.
+    uses_manager_cache: ClassVar[bool] = True
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)

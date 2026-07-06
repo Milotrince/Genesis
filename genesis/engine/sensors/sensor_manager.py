@@ -155,6 +155,19 @@ class SensorManager:
             intermediate_dtype_by_class[sensor_cls] = intermediate_dtype
             return_dtype_by_class[sensor_cls] = return_dtype
 
+            if not sensor_cls.uses_manager_cache:
+                # Cameras own their multi-dtype `image_cache` and are read via `sensor.read()`. Register the dtype (so
+                # the paired intermediate cache exists for the empty per-step / reset slices) but contribute zero size,
+                # and assign an empty per-class slice. This avoids allocating a dead per-camera buffer and keeps
+                # `step()` / `reset()` slicing valid without special-casing them there.
+                cache_size_per_dtype.setdefault(intermediate_dtype, 0)
+                empty_at = cache_size_per_dtype[intermediate_dtype]
+                self._cache_slices_by_type[sensor_cls] = slice(empty_at, empty_at)
+                self._entity_slice_in_class[sensor_cls] = {}
+                self._max_history_by_class[sensor_cls] = 0
+                delay_depth_by_class[sensor_cls] = 1
+                continue
+
             cache_size_per_dtype.setdefault(intermediate_dtype, 0)
             cls_cache_start_idx = cache_size_per_dtype[intermediate_dtype]
             entity_offsets: dict[int, list[int]] = {}
@@ -447,6 +460,9 @@ class SensorManager:
 
         result: dict[int, torch.Tensor] = {}
         for sensor_cls, sensors in self._sensors_by_type.items():
+            if not sensor_cls.uses_manager_cache:
+                # Cameras store multi-dtype images in their own cache; read them via `sensor.read()`, not here.
+                continue
             entity_slice_map = self._entity_slice_in_class.get(sensor_cls, {})
             if entity_idx is None:
                 cls_slice = self._cache_slices_by_type[sensor_cls]

@@ -50,6 +50,19 @@ class BaseCameraOptions(KinematicSensorOptionsMixin[SensorT]):
         The global entity index of the RigidEntity to which this sensor is attached. -1 or None for static sensors.
     link_idx_local : int, optional
         The local index of the RigidLink of the RigidEntity to which this sensor is attached.
+    render_rgb : bool
+        Whether the sensor produces an RGB image. Read from ``sensor.read().rgb`` as ``uint8`` of shape (H, W, 3).
+        Default is True.
+    render_depth : bool
+        Whether the sensor produces a depth image. Read from ``sensor.read().depth`` as ``float32`` of shape (H, W).
+        This is the *rendered* (planar Z) depth from the render backend, distinct from the raycast/Euclidean-range
+        depth produced by ``gs.sensors.DepthCamera``. Default is False.
+    render_segmentation : bool
+        Whether the sensor produces a segmentation map. Read from ``sensor.read().segmentation`` as ``int32`` of shape
+        (H, W), holding per-pixel object/link/geom indices (see ``VisOptions.segmentation_level``). Default is False.
+    render_normal : bool
+        Whether the sensor produces a surface-normal image. Read from ``sensor.read().normal`` as ``float32`` of shape
+        (H, W, 3). Default is False.
     """
 
     res: PositiveVec2IType = (512, 512)
@@ -59,12 +72,21 @@ class BaseCameraOptions(KinematicSensorOptionsMixin[SensorT]):
     fov: ValidFloat = Field(default=60.0, gt=0, lt=180)
     lights: list[dict[str, Any]] = []
     offset_T: Matrix4x4Type | None = None
+    render_rgb: StrictBool = True
+    render_depth: StrictBool = False
+    render_segmentation: StrictBool = False
+    render_normal: StrictBool = False
 
     def model_post_init(self, context: Any) -> None:
         if self.history_length > 0:
             gs.raise_exception(
                 "Camera sensors do not support `history_length`. The camera read path renders lazily on read() "
                 "and bypasses the shared sensor cache that backs the history buffer."
+            )
+        if not (self.render_rgb or self.render_depth or self.render_segmentation or self.render_normal):
+            gs.raise_exception(
+                "Camera sensor has no enabled modalities. Enable at least one of "
+                "`render_rgb`, `render_depth`, `render_segmentation`, `render_normal`."
             )
 
 

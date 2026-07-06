@@ -47,9 +47,76 @@ if TYPE_CHECKING:
 
 
 class CameraReturnType(NamedTuple):
-    """Camera sensor return data."""
+    """
+    Camera sensor return data.
 
-    rgb: torch.Tensor
+    Only the modalities enabled on the sensor options are populated; the rest are ``None``. ``rgb`` is kept first for
+    backward compatibility with code that unpacks or accesses ``.rgb``.
+    """
+
+    rgb: Optional[torch.Tensor] = None
+    depth: Optional[torch.Tensor] = None
+    segmentation: Optional[torch.Tensor] = None
+    normal: Optional[torch.Tensor] = None
+
+
+# Ordered to match the render backends' return tuple `(rgb, depth, segmentation, normal)` (see
+# `Rasterizer.render_camera`, `vis.Camera.render`, and `BatchRenderer.render` which returns in `IMAGE_TYPE` order).
+_CAMERA_MODALITIES = ("rgb", "depth", "segmentation", "normal")
+
+
+def _modality_dtype(name: str) -> torch.dtype:
+    """Per-pixel dtype for a modality: uint8 color, float32 depth/normal, int32 segmentation indices."""
+    if name == "rgb":
+        return torch.uint8
+    if name == "segmentation":
+        return torch.int32
+    return torch.float32
+
+
+def _modality_shape(name: str, B: int, w: int, h: int) -> tuple[int, ...]:
+    """Cache buffer shape for a modality. rgb/normal are 3-channel; depth/segmentation are single-channel."""
+    if name in ("rgb", "normal"):
+        return (B, h, w, 3)
+    return (B, h, w)
+
+
+def _enabled_modalities(options) -> tuple[str, ...]:
+    return tuple(name for name in _CAMERA_MODALITIES if getattr(options, f"render_{name}"))
+
+
+def _allocate_image_cache(options, B: int, w: int, h: int) -> Dict[str, torch.Tensor]:
+    """Allocate one zero buffer per enabled modality, keyed by modality name."""
+    return {
+        name: torch.zeros(_modality_shape(name, B, w, h), dtype=_modality_dtype(name), device=gs.device)
+        for name in _enabled_modalities(options)
+    }
+
+
+def _to_cache_tensor(arr, dtype: torch.dtype) -> torch.Tensor:
+    """Convert a rendered array (numpy, possibly with negative strides, or torch/CUDA) to a contiguous typed tensor."""
+    if isinstance(arr, torch.Tensor):
+        return arr.to(dtype=dtype, device=gs.device).contiguous()
+    return torch.from_numpy(np.ascontiguousarray(arr)).to(dtype=dtype, device=gs.device)
+
+
+def _store_render_into_cache(cache: Dict[str, torch.Tensor], render_tuple, dst=slice(None)):
+    """
+    Scatter a backend render tuple `(rgb, depth, segmentation, normal)` into the per-modality cache at index `dst`.
+
+    Only modalities present in `cache` and non-None in `render_tuple` are written. A single-env render (missing the
+    batch dim) is unsqueezed to match the cache's leading batch dimension.
+    """
+    for name, arr in zip(_CAMERA_MODALITIES, render_tuple):
+        if name not in cache or arr is None:
+            continue
+        buf = cache[name]
+        target = buf[dst]
+        t = _to_cache_tensor(arr, buf.dtype)
+        if t.ndim == target.ndim - 1:
+            # Single-environment render missing the batch dim; add it to match the destination slice.
+            t = t.unsqueeze(0)
+        buf[dst] = t
 
 
 class MinimalVisualizerWrapper:
@@ -127,6 +194,40 @@ class BatchRendererCameraWrapper(BaseCameraWrapper):
             return quat
         return quat[None].expand((n_envs, -1))
 
+    # Pinhole intrinsics, mirroring `genesis.vis.camera.Camera` (f/cx/cy), needed by `distance_center_to_plane`.
+    @property
+    def f(self):
+        return 0.5 * self.res[1] / np.tan(np.deg2rad(0.5 * self.fov))
+
+    @property
+    def cx(self):
+        return 0.5 * self.res[0]
+
+    @property
+    def cy(self):
+        return 0.5 * self.res[1]
+
+    def distance_center_to_plane(self, center_dis):
+        """
+        Convert Euclidean center distance (range along the ray) to planar Z depth.
+
+        The batch renderer calls this per camera when ``use_rasterizer=False`` so depth output matches the planar
+        z-buffer convention used elsewhere. Mirrors ``genesis.vis.camera.Camera.distance_center_to_plane``.
+        """
+        width, height = self.res
+        fx = fy = self.f
+        cx = self.cx
+        cy = self.cy
+        v, u = torch.meshgrid(
+            torch.arange(height, dtype=torch.int32, device=gs.device),
+            torch.arange(width, dtype=torch.int32, device=gs.device),
+            indexing="ij",
+        )
+        xd = (u + 0.5 - cx) / fx
+        yd = (v + 0.5 - cy) / fy
+        scale_inv = torch.rsqrt(xd**2 + yd**2 + 1.0)
+        return center_dis * scale_inv
+
 
 # ========================== Shared Metadata ==========================
 
@@ -143,8 +244,9 @@ class RasterizerCameraSharedMetadata(KinematicSensorMetadataMixin, SharedSensorM
     lights: Optional[List[Dict[str, Any]]] = None
     # List of RasterizerCameraSensor instances
     sensors: Optional[List["RasterizerCameraSensor"]] = None
-    # {sensor_idx: np.ndarray with shape (B, H, W, 3)}
-    image_cache: Optional[Dict[int, np.ndarray]] = None
+    # {sensor_idx: {modality_name: torch.Tensor}}; rgb (B,H,W,3) uint8, depth (B,H,W) f32, segmentation (B,H,W) i32,
+    # normal (B,H,W,3) f32. Only enabled modalities are allocated (see `_allocate_image_cache`).
+    image_cache: Optional[Dict[int, Dict[str, "torch.Tensor"]]] = None
     # Track when rasterizer cameras were last updated
     last_render_timestep: int = -1
 
@@ -172,8 +274,9 @@ class RaytracerCameraSharedMetadata(KinematicSensorMetadataMixin, SharedSensorMe
     lights: Optional[List[Any]] = None
     # List of RaytracerCameraSensor instances
     sensors: Optional[List["RaytracerCameraSensor"]] = None
-    # {sensor_idx: np.ndarray with shape (B, H, W, 3)}
-    image_cache: Optional[Dict[int, np.ndarray]] = None
+    # {sensor_idx: {modality_name: torch.Tensor}}; rgb (B,H,W,3) uint8, depth (B,H,W) f32, segmentation (B,H,W) i32,
+    # normal (B,H,W,3) f32. Only enabled modalities are allocated (see `_allocate_image_cache`).
+    image_cache: Optional[Dict[int, Dict[str, "torch.Tensor"]]] = None
     # Track when raytracer cameras were last updated
     last_render_timestep: int = -1
 
@@ -195,8 +298,9 @@ class BatchRendererCameraSharedMetadata(KinematicSensorMetadataMixin, SharedSens
     lights: Optional[Any] = None
     # List of BatchRendererCameraSensor instances
     sensors: Optional[List["BatchRendererCameraSensor"]] = None
-    # {sensor_idx: np.ndarray with shape (B, H, W, 3)}
-    image_cache: Optional[Dict[int, np.ndarray]] = None
+    # {sensor_idx: {modality_name: torch.Tensor}}; rgb (B,H,W,3) uint8, depth (B,H,W) f32, segmentation (B,H,W) i32,
+    # normal (B,H,W,3) f32. Only enabled modalities are allocated (see `_allocate_image_cache`).
+    image_cache: Optional[Dict[int, Dict[str, "torch.Tensor"]]] = None
     # Track when batch was last rendered
     last_render_timestep: int = -1
     # MinimalVisualizerWrapper instance
@@ -226,6 +330,10 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
     """
 
     uses_ring_pipeline: ClassVar[bool] = False
+    # Cameras store multi-dtype images (uint8 rgb / float32 depth+normal / int32 seg) in their own `image_cache` and are
+    # read via `sensor.read()`. The manager's per-class cache is single-dtype, so cameras opt out of it entirely; this
+    # also excludes them from `scene.read_sensors()`.
+    uses_manager_cache: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -241,6 +349,9 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
 
     # ========================== Cache Integration (shared) ==========================
 
+    # NOTE: `_get_return_format`/`_get_cache_dtype` are vestigial for cameras. Because `uses_manager_cache = False`, the
+    # manager skips cache-size accounting for camera classes, so these values are not used to size any buffer; camera
+    # output lives in the multi-dtype `image_cache` instead. They are kept only to satisfy the `Sensor` contract.
     def _get_return_format(self) -> tuple[tuple[int, ...], ...]:
         w, h = self._options.res
         return ((h, w, 3),)
@@ -357,28 +468,33 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
 # ========================== Camera Sensor Helpers ==========================
 def _camera_read_from_image_cache(sensor, cached_image, envs_idx, *, to_numpy: bool) -> CameraReturnType:
     """
-    Shared helper to convert a cached RGB image array into CameraReturnType with correct env handling.
+    Convert a per-modality image cache into a CameraReturnType with correct env handling.
 
     Parameters
     ----------
     sensor : any camera sensor with _manager and _return_data_class
-    cached_image : np.ndarray | torch.Tensor
-        Image cache for this camera, shaped (B, H, W, 3) or (H, W, 3) depending on n_envs.
+    cached_image : dict[str, torch.Tensor]
+        Per-modality image cache for this camera; each buffer is shaped (B, H, W[, 3]). Only enabled modalities are
+        present; the rest of the returned NamedTuple stays None.
     envs_idx : None | int | sequence
         Environment index/indices to select.
     to_numpy : bool
-        If True and cached_image is a torch Tensor, convert to numpy first.
+        If True, convert each returned buffer to numpy.
     """
-    if to_numpy and isinstance(cached_image, torch.Tensor):
-        cached_image = tensor_to_array(cached_image)
+    n_envs = sensor._manager._sim.n_envs
 
-    if envs_idx is None:
-        if sensor._manager._sim.n_envs == 0:
-            return sensor._return_data_class(rgb=cached_image[0])
-        return sensor._return_data_class(rgb=cached_image)
-    if isinstance(envs_idx, (int, np.integer)):
-        return sensor._return_data_class(rgb=cached_image[envs_idx])
-    return sensor._return_data_class(rgb=cached_image[envs_idx])
+    def select_envs(buf):
+        if envs_idx is None:
+            buf = buf[0] if n_envs == 0 else buf
+        elif isinstance(envs_idx, (int, np.integer)):
+            buf = buf[envs_idx]
+        else:
+            buf = buf[envs_idx]
+        if to_numpy and isinstance(buf, torch.Tensor):
+            buf = tensor_to_array(buf)
+        return buf
+
+    return sensor._return_data_class(**{name: select_envs(buf) for name, buf in cached_image.items()})
 
 
 # ========================== Rasterizer Camera Sensor ==========================
@@ -448,7 +564,7 @@ class RasterizerCameraSensor(
 
         _B = max(self._manager._sim.n_envs, 1)
         w, h = self._options.res
-        self._shared_metadata.image_cache[self._idx] = torch.zeros((_B, h, w, 3), dtype=torch.uint8, device=gs.device)
+        self._shared_metadata.image_cache[self._idx] = _allocate_image_cache(self._options, _B, w, h)
 
     def _ensure_camera_registered(self):
         """Register this camera with the renderer (no-op if already registered)."""
@@ -561,8 +677,12 @@ class RasterizerCameraSensor(
                     poses[:, :3, 3] -= envs_offset[context.rendered_envs_idx]
                     context.jit.update_buffer(node, "model", poses.transpose((0, 2, 1)))
 
-        rgb_arr, _, _, _ = self._shared_metadata.renderer.render_camera(
-            self._camera_wrapper, rgb=True, depth=False, segmentation=False, normal=False
+        render_out = self._shared_metadata.renderer.render_camera(
+            self._camera_wrapper,
+            rgb=self._options.render_rgb,
+            depth=self._options.render_depth,
+            segmentation=self._options.render_segmentation,
+            normal=self._options.render_normal,
         )
 
         # Restore original geometry transforms with offsets for the interactive viewer
@@ -571,13 +691,9 @@ class RasterizerCameraSensor(
             node.mesh.primitives[0].poses = poses
             context.jit.update_buffer(node, "model", poses.transpose((0, 2, 1)))
 
-        # Ensure contiguous layout because the rendered array may have negative strides.
-        rgb_tensor = torch.from_numpy(np.ascontiguousarray(rgb_arr)).to(dtype=torch.uint8, device=gs.device)
-
-        if len(rgb_tensor.shape) == 3:
-            # Single environment rendered - add batch dimension.
-            rgb_tensor = rgb_tensor.unsqueeze(0)
-        self._shared_metadata.image_cache[self._idx][:] = rgb_tensor
+        # Scatter each requested modality into the per-modality cache. `_store_render_into_cache` handles negative
+        # strides, dtype casting, and adding the batch dim for single-environment renders.
+        _store_render_into_cache(self._shared_metadata.image_cache[self._idx], render_out)
 
 
 # ========================== Raytracer Camera Sensor ==========================
@@ -611,6 +727,12 @@ class RaytracerCameraSensor(
         if renderer is None:
             gs.raise_exception(
                 "RaytracerCameraSensor requires the scene to be created with `renderer=gs.renderers.RayTracer(...)`."
+            )
+
+        if self._options.render_depth or self._options.render_segmentation or self._options.render_normal:
+            gs.logger.warning(
+                "Raytracer camera sensor: only RGB is path-traced. `depth`, `segmentation` and `normal` are produced "
+                "by the rasterizer fallback (geometry-correct, but not path-traced) and require an OpenGL context."
             )
 
         # Multi-environment rendering is not yet supported for Raytracer cameras
@@ -687,7 +809,7 @@ class RaytracerCameraSensor(
 
         _B = max(n_envs, 1)
         w, h = self._options.res
-        self._shared_metadata.image_cache[self._idx] = torch.zeros((_B, h, w, 3), dtype=torch.uint8, device=gs.device)
+        self._shared_metadata.image_cache[self._idx] = _allocate_image_cache(self._options, _B, w, h)
 
     @gs.assert_built
     def move_to_attach(self):
@@ -720,19 +842,20 @@ class RaytracerCameraSensor(
         if self._link is not None:
             self._camera_obj.move_to_attach()
 
-        rgb_arr, _, _, _ = self._camera_obj.render(
-            rgb=True,
-            depth=False,
-            segmentation=False,
+        # Only RGB is path-traced; depth/segmentation/normal come from the rasterizer fallback inside `Camera.render`
+        # (see `RaytracerCameraSensor.build` for the warning). `colorize_seg=False` yields the int32 index map, which is
+        # the desired numeric sensor output.
+        render_out = self._camera_obj.render(
+            rgb=self._options.render_rgb,
+            depth=self._options.render_depth,
+            segmentation=self._options.render_segmentation,
             colorize_seg=False,
-            normal=False,
+            normal=self._options.render_normal,
             antialiasing=False,
             force_render=True,
         )
-        # Ensure contiguous layout because the rendered array may have negative strides.
-        rgb_tensor = torch.from_numpy(np.ascontiguousarray(rgb_arr)).to(dtype=torch.uint8, device=gs.device)
-
-        self._shared_metadata.image_cache[self._idx][0] = rgb_tensor
+        # Raytracer camera sensors reject n_envs > 1, so the render is a single (non-batched) frame -> store into slot 0.
+        _store_render_into_cache(self._shared_metadata.image_cache[self._idx], render_out, dst=0)
 
 
 # ========================== Batch Renderer Camera Sensor ==========================
@@ -810,7 +933,7 @@ class BatchRendererCameraSensor(
 
         _B = max(self._manager._sim.n_envs, 1)
         w, h = self._options.res
-        self._shared_metadata.image_cache[self._idx] = torch.zeros((_B, h, w, 3), dtype=torch.uint8, device=gs.device)
+        self._shared_metadata.image_cache[self._idx] = _allocate_image_cache(self._options, _B, w, h)
 
     def _render_current_state(self):
         """Perform the actual render for the current state."""
@@ -822,18 +945,31 @@ class BatchRendererCameraSensor(
 
         self._shared_metadata.renderer.update_scene(force_render=True)
 
-        rgb_arr, *_ = self._shared_metadata.renderer.render(
-            rgb=True, depth=False, segmentation=False, normal=False, antialiasing=False, force_render=True
+        # The batch renderer renders ALL cameras in a single pass with one set of flags, so request the union of the
+        # modalities across all batch camera sensors, then write only each sensor's own requested buffers below.
+        union = {name: any(getattr(s._options, f"render_{name}") for s in sensors) for name in _CAMERA_MODALITIES}
+        render_out = self._shared_metadata.renderer.render(
+            rgb=union["rgb"],
+            depth=union["depth"],
+            segmentation=union["segmentation"],
+            normal=union["normal"],
+            antialiasing=False,
+            force_render=True,
         )
 
-        # rgb_arr might be a tuple of arrays (one per camera) or a single array
-        if isinstance(rgb_arr, (tuple, list)):
-            rgb_arrs = [torch.as_tensor(arr).to(dtype=torch.uint8, device=gs.device) for arr in rgb_arr]
-        else:
-            rgb_arrs = torch.as_tensor(rgb_arr).to(dtype=torch.uint8, device=gs.device)
-
-        for sensor, rgb_arr in zip(sensors, rgb_arrs):
-            sensor._shared_metadata.image_cache[sensor._idx][:] = rgb_arr
+        # render_out is `(rgb, depth, segmentation, normal)`, each either None (not requested) or a per-camera sequence
+        # of arrays (one entry per camera in `sensors`). Regroup into a per-sensor render tuple and scatter.
+        per_camera = []
+        for arrs in render_out:
+            if arrs is None:
+                per_camera.append([None] * len(sensors))
+            elif isinstance(arrs, (tuple, list)):
+                per_camera.append(list(arrs))
+            else:
+                per_camera.append([arrs])
+        for cam_i, sensor in enumerate(sensors):
+            sensor_render = tuple(per_camera[mod_i][cam_i] for mod_i in range(len(_CAMERA_MODALITIES)))
+            _store_render_into_cache(sensor._shared_metadata.image_cache[sensor._idx], sensor_render)
             sensor._stale = False
 
         self._shared_metadata.last_render_timestep = self._manager._sim.scene.t

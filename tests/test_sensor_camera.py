@@ -699,3 +699,149 @@ def test_camera_lookat_entity(show_viewer, png_snapshot):
             if sys.platform == "darwin" and scene.visualizer.is_software:
                 pytest.xfail("Flaky on MacOS with Apple Software Renderer. Nothing but the background was rendered.")
             raise
+
+
+def _modality_scene(res, **cam_kwargs):
+    """A small scene with several distinct entities and one rasterizer camera; returns (scene, camera)."""
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(morph=gs.morphs.Plane())
+    scene.add_entity(
+        morph=gs.morphs.Sphere(radius=0.5, pos=(0.0, 0.0, 2.0)),
+        surface=gs.surfaces.Smooth(color=(1.0, 0.5, 0.5)),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(size=(0.3, 0.3, 0.3), pos=(1.0, 1.0, 1.0)),
+        surface=gs.surfaces.Rough(color=(0.5, 1.0, 0.5)),
+    )
+    camera = scene.add_sensor(
+        gs.sensors.RasterizerCameraOptions(
+            res=res,
+            pos=(3.0, 0.0, 2.0),
+            lookat=(0.0, 0.0, 1.0),
+            up=(0.0, 0.0, 1.0),
+            fov=60.0,
+            near=0.1,
+            far=100.0,
+            lights=[{"pos": (2.0, 2.0, 5.0), "color": (1.0, 1.0, 1.0), "intensity": 5.0}],
+            **cam_kwargs,
+        )
+    )
+    return scene, camera
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_rasterizer_modalities(n_envs):
+    """Rasterizer camera sensor returns rgb/depth/segmentation/normal with the right shapes, dtypes, and content."""
+    CAM_RES = (128, 96)  # (width, height)
+    W, H = CAM_RES
+    scene, camera = _modality_scene(
+        CAM_RES, render_rgb=True, render_depth=True, render_segmentation=True, render_normal=True
+    )
+    scene.build(n_envs=n_envs)
+    camera._shared_metadata.context.shadow = False
+    for _ in range(3):
+        scene.step()
+
+    data = camera.read()
+    batch = () if n_envs == 0 else (n_envs,)
+    assert data.rgb.shape == (*batch, H, W, 3) and data.rgb.dtype == torch.uint8
+    assert data.depth.shape == (*batch, H, W) and data.depth.dtype == torch.float32
+    assert data.segmentation.shape == (*batch, H, W) and data.segmentation.dtype == torch.int32
+    assert data.normal.shape == (*batch, H, W, 3) and data.normal.dtype == torch.float32
+
+    depth = data.depth
+    finite = depth[torch.isfinite(depth)]
+    assert (finite > 0).all(), "depth must be positive"
+    assert (finite < 99.0).any(), "expected geometry closer than the far plane"
+    assert torch.unique(data.segmentation).numel() > 1, "expected multiple segmentation ids"
+
+
+@pytest.mark.required
+def test_rasterizer_modality_defaults_rgb_only():
+    """Default options request only RGB; the other modalities read back as None."""
+    scene, camera = _modality_scene((64, 64))
+    scene.build(n_envs=0)
+    camera._shared_metadata.context.shadow = False
+    scene.step()
+    data = camera.read()
+    assert data.rgb is not None
+    assert data.depth is None and data.segmentation is None and data.normal is None
+    # Camera sensors are read via sensor.read(), never through read_sensors().
+    assert scene.read_sensors() == {}
+
+
+@pytest.mark.required
+def test_camera_modalities_require_at_least_one():
+    with pytest.raises(gs.GenesisException, match="at least one"):
+        gs.sensors.RasterizerCameraOptions(
+            render_rgb=False, render_depth=False, render_segmentation=False, render_normal=False
+        )
+
+
+@pytest.mark.slow
+@pytest.mark.required
+def test_rasterizer_modalities_match_add_camera():
+    """Rendered depth/segmentation from the sensor match a scene.add_camera render of the same pose."""
+    CAM_RES = (128, 96)
+    scene, sensor = _modality_scene(CAM_RES, render_rgb=False, render_depth=True, render_segmentation=True)
+    ref = scene.add_camera(
+        res=CAM_RES, pos=(3.0, 0.0, 2.0), lookat=(0.0, 0.0, 1.0), up=(0.0, 0.0, 1.0), fov=60.0, near=0.1, far=100.0
+    )
+    scene.build(n_envs=0)
+    sensor._shared_metadata.context.shadow = False
+    scene.step()
+
+    data = sensor.read()
+    _, ref_depth, ref_seg, _ = ref.render(rgb=False, depth=True, segmentation=True, force_render=True)
+
+    sensor_depth = tensor_to_array(data.depth)
+    ref_depth = tensor_to_array(ref_depth)
+    # Silhouette/edge pixels can differ between two independent rasterizations; require the vast majority to agree.
+    close_frac = float((np.abs(sensor_depth - ref_depth) < 0.05).mean())
+    assert close_frac > 0.95, f"sensor vs add_camera depth agreement too low: {close_frac:.3f}"
+
+    # Segmentation is a foreground/background structure: the non-background masks should overlap almost perfectly.
+    sensor_fg = tensor_to_array(data.segmentation) > 0
+    ref_fg = tensor_to_array(ref_seg) > 0
+    iou = float((sensor_fg & ref_fg).sum()) / float((sensor_fg | ref_fg).sum())
+    assert iou > 0.95, f"sensor vs add_camera segmentation IoU too low: {iou:.3f}"
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("backend", [gs.cuda])
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.skipif(not ENABLE_MADRONA, reason=SKIP_NO_MADRONA)
+def test_batch_renderer_modalities(n_envs):
+    """Batch renderer camera sensors support all four modalities, incl. cameras requesting different subsets."""
+    CAM_RES = (128, 96)
+    W, H = CAM_RES
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(morph=gs.morphs.Plane())
+    scene.add_entity(
+        morph=gs.morphs.Sphere(radius=0.5, pos=(0.0, 0.0, 1.0)),
+        surface=gs.surfaces.Default(color=(1.0, 0.5, 0.5)),
+    )
+    common = dict(res=CAM_RES, pos=(-2.0, 0.0, 1.5), lookat=(0.0, 0.0, 1.0), up=(0.0, 0.0, 1.0), fov=70.0)
+    cam_all = scene.add_sensor(
+        gs.sensors.BatchRendererCameraOptions(
+            **common, render_rgb=True, render_depth=True, render_segmentation=True, render_normal=True
+        )
+    )
+    # A second camera in the same batch requesting only depth exercises the per-sensor modality union path.
+    cam_depth = scene.add_sensor(
+        gs.sensors.BatchRendererCameraOptions(**common, render_rgb=False, render_depth=True)
+    )
+    scene.build(n_envs=n_envs)
+    scene.step()
+
+    batch = () if n_envs == 0 else (n_envs,)
+    data_all = cam_all.read()
+    assert data_all.rgb.shape == (*batch, H, W, 3) and data_all.rgb.dtype == torch.uint8
+    assert data_all.depth.shape == (*batch, H, W) and data_all.depth.dtype == torch.float32
+    assert data_all.segmentation.shape == (*batch, H, W) and data_all.segmentation.dtype == torch.int32
+    assert data_all.normal.shape == (*batch, H, W, 3) and data_all.normal.dtype == torch.float32
+
+    data_depth = cam_depth.read()
+    assert data_depth.rgb is None and data_depth.segmentation is None and data_depth.normal is None
+    assert data_depth.depth.shape == (*batch, H, W)
