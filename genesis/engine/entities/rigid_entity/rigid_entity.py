@@ -2146,6 +2146,22 @@ class KinematicEntity(Entity):
             return f"{len(self.morphs)} morph variants"
         return f"{self.main_morph}"
 
+    def set_active_variant(self, variant_idx, envs_idx=None):
+        """Rebind which heterogeneous geometry variant each environment simulates, at runtime.
+
+        Only valid for entities built with a heterogeneous morph list (`morph=[m0, m1, ...]`). Variant 0
+        is the primary morph and 1..N are the additional variants. `variant_idx` is a single index applied
+        to all selected environments, or one index per selected environment. The joint configuration is
+        preserved; this changes the active geometry, collision shape and inertial per environment.
+        """
+        if not self._enable_heterogeneous:
+            gs.raise_exception(
+                "set_active_variant is only supported for heterogeneous entities (built with morph=[...])."
+            )
+        if not self._solver.is_built:
+            gs.raise_exception("set_active_variant can only be called after the scene is built.")
+        self._solver.set_active_variant(self, variant_idx, envs_idx)
+
     @property
     def n_joints(self):
         """The number of `RigidJoint` in the entity."""

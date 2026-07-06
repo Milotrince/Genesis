@@ -7455,6 +7455,54 @@ def test_heterogeneous_aabb(tol):
     assert_allclose(aabb_size_sphere, vaabb_size_sphere, tol=1e-3)  # Allow small tolerance for decimation
 
 
+def test_heterogeneous_runtime_variant_rebind(tol):
+    """Rebinding a heterogeneous variant at runtime updates per-env geometry, inertial and physics."""
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    big, small = 0.04, 0.02
+    het_obj = scene.add_entity(
+        morph=(
+            gs.morphs.Box(size=(big,) * 3, pos=(0.0, 0.0, 0.1)),
+            gs.morphs.Box(size=(small,) * 3, pos=(0.0, 0.0, 0.1)),
+        ),
+    )
+    # 4 envs, balanced: envs 0-1 -> variant 0 (big), envs 2-3 -> variant 1 (small).
+    scene.build(n_envs=4)
+
+    mass = het_obj.get_mass()
+    assert_allclose(mass[0], mass[1], tol=tol)
+    assert_allclose(mass[2], mass[3], tol=tol)
+    assert_allclose(mass[0], mass[2] * (big / small) ** 3, tol=tol)
+    aabb = het_obj.get_AABB()
+    assert_allclose(aabb[0], aabb[1], tol=gs.EPS)
+    assert_allclose(aabb[2], aabb[3], tol=gs.EPS)
+
+    # Rebind only env 0 to the small variant; the other envs must be untouched.
+    het_obj.set_active_variant(1, envs_idx=[0])
+    mass = het_obj.get_mass()
+    assert_allclose(mass[0], mass[2], tol=tol)  # env 0 is now the small variant
+    assert_allclose(mass[1], mass[3] * (big / small) ** 3, tol=tol)  # env 1 still big
+    aabb = het_obj.get_AABB()
+    assert_allclose(aabb[0], aabb[2], tol=gs.EPS)  # env 0 now matches the small variant
+    with pytest.raises(AssertionError):
+        assert_allclose(aabb[0], aabb[1], tol=1e-3)
+
+    # A per-env variant assignment sets a known mix: envs 0-1 big, envs 2-3 small.
+    het_obj.set_active_variant((0, 0, 1, 1), envs_idx=(0, 1, 2, 3))
+    mass = het_obj.get_mass()
+    assert_allclose(mass[0], mass[1], tol=tol)
+    assert_allclose(mass[0], mass[2] * (big / small) ** 3, tol=tol)
+
+    # Drop the boxes and let them settle; each must rest on its own half-extent, proving the
+    # runtime-bound geometry collides correctly per environment (a tunnelling box would not rest here).
+    for _ in range(300):
+        scene.step()
+    z = het_obj.get_pos()[..., 2]
+    assert torch.isfinite(z).all()
+    assert_allclose(z[[0, 1]], big / 2, tol=1e-2)
+    assert_allclose(z[[2, 3]], small / 2, tol=1e-2)
+
+
 # 30s
 @pytest.mark.slow  # ~250s
 @pytest.mark.parametrize("backend", [gs.gpu])  # Grasping physics requires GPU
