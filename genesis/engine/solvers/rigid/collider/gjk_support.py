@@ -85,17 +85,21 @@ def support_driver(
     v_ = qd.Vector.zero(gs.qd_float, 3)
     vid = -1
 
+    # GJK does not yet thread the per-env geom scale (it is not the default CCD); pass unit scale so the
+    # shared support leaves stay exact. Per-env scale is handled on the MPR path (see mpr.support_driver).
+    scale = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+
     geom_type = geoms_info.type[i_g]
     if geom_type == gs.GEOM_TYPE.SPHERE:
-        v, v_, vid = support_field._func_support_sphere(geoms_info, direction, i_g, pos, quat, shrink_sphere)
+        v, v_, vid = support_field._func_support_sphere(geoms_info, direction, i_g, pos, quat, shrink_sphere, scale)
     elif geom_type == gs.GEOM_TYPE.ELLIPSOID:
-        v = support_field._func_support_ellipsoid(geoms_info, direction, i_g, pos, quat)
+        v = support_field._func_support_ellipsoid(geoms_info, direction, i_g, pos, quat, scale)
     elif geom_type == gs.GEOM_TYPE.CAPSULE:
-        v = support_field._func_support_capsule(geoms_info, direction, i_g, pos, quat, shrink_sphere)
+        v = support_field._func_support_capsule(geoms_info, direction, i_g, pos, quat, shrink_sphere, scale)
     elif geom_type == gs.GEOM_TYPE.CYLINDER:
-        v = support_field._func_support_cylinder(geoms_info, direction, i_g, pos, quat, shrink_sphere)
+        v = support_field._func_support_cylinder(geoms_info, direction, i_g, pos, quat, shrink_sphere, scale)
     elif geom_type == gs.GEOM_TYPE.BOX:
-        v, v_, vid = support_field._func_support_box(geoms_info, direction, i_g, pos, quat)
+        v, v_, vid = support_field._func_support_box(geoms_info, direction, i_g, pos, quat, scale)
     elif geom_type == gs.GEOM_TYPE.TERRAIN:
         if qd.static(collider_static_config.has_terrain):
             v, vid = support_field._func_support_prism(collider_state, direction, i_b)
@@ -103,7 +107,7 @@ def support_driver(
         # If mujoco-compatible, do exhaustive search for the vertex
         v, vid = support_mesh(geoms_info, verts_info, gjk_state, gjk_info, direction, i_g, pos, quat, i_b, i_o)
     else:
-        v, v_, vid = support_field._func_support_world(support_field_info, direction, i_g, pos, quat)
+        v, v_, vid = support_field._func_support_world(support_field_info, direction, i_g, pos, quat, scale)
     return v, v_, vid
 
 

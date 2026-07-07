@@ -7570,6 +7570,40 @@ def test_geom_scale_requires_option():
         box.set_scale((2.0, 2.0, 2.0))
 
 
+@pytest.mark.parametrize("backend", [gs.gpu])
+def test_geom_scale_collision(tol):
+    """Per-env scale is honored by the support-based collision path (box-box MPR, sphere-plane)."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_geom_scaling=True,
+            gravity=(0.0, 0.0, -10.0),
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    # Fixed platform with its top surface at z = 0.1.
+    scene.add_entity(gs.morphs.Box(size=(0.6, 0.6, 0.1), pos=(0.0, 0.0, 0.05), fixed=True))
+    faller = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.6)))
+    sphere = scene.add_entity(gs.morphs.Sphere(radius=0.05, pos=(2.0, 0.0, 0.6)))
+    # env 0 is the unscaled control; env 1 scales the faller (box-box MPR) and sphere (plane-special support).
+    scene.build(n_envs=2)
+
+    faller.set_scale((1.0, 1.0, 3.0), envs_idx=[1])
+    sphere.set_scale(2.0, envs_idx=[1])
+    for _ in range(600):
+        scene.step()
+
+    fz = faller.get_pos()[..., 2]
+    sz = sphere.get_pos()[..., 2]
+    assert torch.isfinite(fz).all() and torch.isfinite(sz).all()
+    # Faller rests on the platform top (0.1) plus its half-height: 0.15 unscaled, 0.25 with z-scale 3.
+    assert_allclose(fz[0], 0.15, tol=8e-3)
+    assert_allclose(fz[1], 0.25, tol=8e-3)
+    # Sphere rests on the plane at its radius: 0.05 unscaled, 0.10 with uniform scale 2.
+    assert_allclose(sz[0], 0.05, tol=8e-3)
+    assert_allclose(sz[1], 0.10, tol=8e-3)
+
+
 # 30s
 @pytest.mark.slow  # ~250s
 @pytest.mark.parametrize("backend", [gs.gpu])  # Grasping physics requires GPU

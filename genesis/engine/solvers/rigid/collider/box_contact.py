@@ -142,29 +142,7 @@ def func_plane_box_contact(
     if qd.static(static_rigid_sim_config.enable_geom_scaling):
         box_scale = geoms_state.scale[i_gb, i_b]
 
-    v1 = qd.Vector([0.0, 0.0, 0.0], dt=gs.qd_float)
-    if qd.static(static_rigid_sim_config.enable_geom_scaling):
-        # Support point of the scaled box along the -plane-normal direction, computed in the box frame.
-        d_box = gu.qd_inv_transform_by_quat(normal, gb_quat)
-        half = qd.Vector(
-            [
-                0.5 * geoms_info.data[i_gb][0] * box_scale[0],
-                0.5 * geoms_info.data[i_gb][1] * box_scale[1],
-                0.5 * geoms_info.data[i_gb][2] * box_scale[2],
-            ],
-            dt=gs.qd_float,
-        )
-        v_local = qd.Vector(
-            [
-                half[0] if d_box[0] >= 0.0 else -half[0],
-                half[1] if d_box[1] >= 0.0 else -half[1],
-                half[2] if d_box[2] >= 0.0 else -half[2],
-            ],
-            dt=gs.qd_float,
-        )
-        v1 = gu.qd_transform_by_trans_quat(v_local, gb_pos, gb_quat)
-    else:
-        v1, _, _ = support_field._func_support_box(geoms_info, normal, i_gb, gb_pos, gb_quat)
+    v1, _, _ = support_field._func_support_box(geoms_info, normal, i_gb, gb_pos, gb_quat, box_scale)
     penetration = normal.dot(v1 - ga_pos)
 
     if penetration > 0.0:

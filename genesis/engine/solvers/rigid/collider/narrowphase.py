@@ -812,6 +812,7 @@ def func_contact_mpr_terrain(
                 i_b,
                 ga_pos_terrain_frame,
                 ga_quat_terrain_frame,
+                geoms_state.scale[i_ga, i_b],
             )
             collider_state.xyz_max_min[3 * i_m + i_axis, i_b] = v1[i_axis]
 
@@ -909,6 +910,8 @@ def func_contact_mpr_terrain(
                                         ga_quat_tf,
                                         gb_pos_terrain_frame,
                                         gb_quat_terrain_frame,
+                                        geoms_state.scale[i_ga, i_b],
+                                        geoms_state.scale[i_gb, i_b],
                                     )
                                     if is_col:
                                         snap_fired = False
@@ -1338,6 +1341,7 @@ def func_convex_convex_contact(
                         i_b,
                         gb_pos_current,
                         gb_quat_current,
+                        geoms_state.scale[i_gb, i_b],
                     )
                     penetration = normal.dot(v1 - ga_pos_current)
                     contact_pos = v1 - 0.5 * penetration * normal
@@ -1383,6 +1387,8 @@ def func_convex_convex_contact(
                                     ga_quat_current,
                                     gb_pos_current,
                                     gb_quat_current,
+                                    geoms_state.scale[i_ga, i_b],
+                                    geoms_state.scale[i_gb, i_b],
                                 )
                                 is_mpr_updated = True
 
@@ -1756,6 +1762,7 @@ def _func_multicontact_run_detection(
             i_b,
             gb_pos,
             gb_quat,
+            geoms_state.scale[i_gb, i_b],
         )
         penetration = normal.dot(v1 - ga_pos)
         contact_pos = v1 - 0.5 * penetration * normal
@@ -1793,6 +1800,8 @@ def _func_multicontact_run_detection(
                             ga_quat,
                             gb_pos,
                             gb_quat,
+                            geoms_state.scale[i_ga, i_b],
+                            geoms_state.scale[i_gb, i_b],
                         )
                         is_mpr_updated = True
 
@@ -2425,6 +2434,7 @@ def _func_narrowphase_contact0(
                     i_b,
                     gb_pos,
                     gb_quat,
+                    geoms_state.scale[i_gb, i_b],
                 )
                 penetration = normal.dot(v1 - ga_pos)
                 contact_pos = v1 - 0.5 * penetration * normal
@@ -2493,6 +2503,8 @@ def _func_narrowphase_contact0(
                                 ga_quat,
                                 gb_pos,
                                 gb_quat,
+                                geoms_state.scale[i_ga, i_b],
+                                geoms_state.scale[i_gb, i_b],
                             )
                             is_mpr_updated = True
 
