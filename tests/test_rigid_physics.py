@@ -7503,6 +7503,73 @@ def test_heterogeneous_runtime_variant_rebind(tol):
     assert_allclose(z[[2, 3]], small / 2, tol=1e-2)
 
 
+def test_geom_scale(tol):
+    """Per-environment runtime geom scale rescales inertia, AABB and box-vs-plane collision per env."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_geom_scaling=True,
+            gravity=(0.0, 0.0, -10.0),
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    box = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0.0, 0.0, 0.3),
+        ),
+    )
+    cylinder = scene.add_entity(
+        gs.morphs.Cylinder(
+            radius=0.05,
+            height=0.2,
+            pos=(1.0, 0.0, 0.3),
+        ),
+    )
+    # 4 envs: scale envs 0-1 non-uniformly by (2, 1, 3); leave envs 2-3 at unit scale.
+    scene.build(n_envs=4)
+
+    scene.step()
+    mass0 = box.get_mass()
+    box.set_scale((2.0, 1.0, 3.0), envs_idx=[0, 1])
+    scene.step()
+
+    # Mass scales by det(S) = 6 on the scaled envs and is unchanged elsewhere.
+    mass1 = box.get_mass()
+    assert_allclose(mass1[[0, 1]], mass0[[0, 1]] * 6.0, tol=tol)
+    assert_allclose(mass1[[2, 3]], mass0[[2, 3]], tol=tol)
+
+    # AABB scales per-axis on the scaled envs (unit box -> extents (0.2, 0.1, 0.3)); unit envs unchanged.
+    ext = box.get_AABB()[:, 1] - box.get_AABB()[:, 0]
+    assert_allclose(ext[[0, 1]], (0.2, 0.1, 0.3), tol=1e-3)
+    assert_allclose(ext[[2, 3]], (0.1, 0.1, 0.1), tol=1e-3)
+    assert_allclose(box.get_scale()[[0, 1]], (2.0, 1.0, 3.0), tol=tol)
+    assert_allclose(box.get_scale()[[2, 3]], (1.0, 1.0, 1.0), tol=tol)
+
+    # Drop: scaled boxes rest on their scaled half-height (0.15), unit boxes on 0.05.
+    for _ in range(400):
+        scene.step()
+    z = box.get_pos()[..., 2]
+    assert torch.isfinite(z).all()
+    assert_allclose(z[[0, 1]], 0.15, tol=6e-3)
+    assert_allclose(z[[2, 3]], 0.05, tol=6e-3)
+
+    # A non-uniform radial scale of a radial primitive is not representable and must raise; uniform is fine.
+    with pytest.raises(gs.GenesisException):
+        cylinder.set_scale((2.0, 1.0, 1.0))
+    cylinder.set_scale((2.0, 2.0, 3.0))
+
+
+def test_geom_scale_requires_option():
+    """set_scale must raise when the scene was not built with enable_geom_scaling."""
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)))
+    scene.build(n_envs=2)
+    with pytest.raises(gs.GenesisException):
+        box.set_scale((2.0, 2.0, 2.0))
+
+
 # 30s
 @pytest.mark.slow  # ~250s
 @pytest.mark.parametrize("backend", [gs.gpu])  # Grasping physics requires GPU
