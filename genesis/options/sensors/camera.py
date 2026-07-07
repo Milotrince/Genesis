@@ -78,11 +78,6 @@ class BaseCameraOptions(KinematicSensorOptionsMixin[SensorT]):
     render_normal: StrictBool = False
 
     def model_post_init(self, context: Any) -> None:
-        if self.history_length > 0:
-            gs.raise_exception(
-                "Camera sensors do not support `history_length`. The camera read path renders lazily on read() "
-                "and bypasses the shared sensor cache that backs the history buffer."
-            )
         if not (self.render_rgb or self.render_depth or self.render_segmentation or self.render_normal):
             gs.raise_exception(
                 "Camera sensor has no enabled modalities. Enable at least one of "

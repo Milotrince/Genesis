@@ -657,7 +657,9 @@ class Scene(RBC):
         Returns
         -------
         dict[Type[Sensor], torch.Tensor]
-            For each sensor class present in the scene, a tensor of shape (B, [history,] class_cache_size).
+            For each ring-pipeline sensor class present in the scene, a tensor of shape (B, [history,] class_cache_size).
+            Camera sensors are excluded (their multi-modality output has no single-tensor representation); read them via
+            ``camera.read()``.
         """
         return self._sim._sensor_manager.read_sensors(entity_idx=None, envs_idx=envs_idx)
 

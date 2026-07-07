@@ -771,6 +771,113 @@ def test_rasterizer_modality_defaults_rgb_only():
     assert scene.read_sensors() == {}
 
 
+@pytest.mark.slow
+@pytest.mark.required
+def test_camera_coexists_with_ring_pipeline_sensor():
+    # A float32 depth camera (non-ring) shares the float32 buffer with an IMU (ring-pipeline). The camera columns must
+    # stay out of the IMU's transform timeline ring, both sensors must read correctly, and read_sensors() must return
+    # the IMU but not the camera.
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(morph=gs.morphs.Plane())
+    box = scene.add_entity(morph=gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 1.0)))
+    imu = scene.add_sensor(gs.sensors.IMU(entity_idx=box.idx))
+    camera = scene.add_sensor(
+        gs.sensors.RasterizerCameraOptions(
+            res=(48, 48),
+            pos=(2.0, 0.0, 1.0),
+            lookat=(0.0, 0.0, 1.0),
+            up=(0.0, 0.0, 1.0),
+            render_rgb=False,
+            render_depth=True,
+        )
+    )
+    scene.build(n_envs=0)
+    camera._shared_metadata.context.shadow = False
+    scene.step()
+
+    depth = camera.read().depth
+    assert depth.shape == (48, 48) and depth.dtype == torch.float32
+    assert torch.isfinite(depth).any()
+
+    bulk = scene.read_sensors()
+    assert gs.sensors.types.IMU in bulk  # ring-pipeline sensor is aggregated
+    assert gs.sensors.types.RasterizerCameraOptions not in bulk  # camera is read via camera.read()
+    assert imu.read() is not None
+
+
+@pytest.mark.slow
+@pytest.mark.required
+def test_camera_read_after_reset_rerenders():
+    # Camera storage now lives in the shared manager cache, which reset() zeroes; a read at the same timestep as a
+    # preceding reset must re-render rather than return the zeroed cache.
+    scene, camera = _modality_scene((64, 48))
+    scene.build(n_envs=0)
+    camera._shared_metadata.context.shadow = False
+    scene.step()
+    before = camera.read().rgb.clone()
+    assert before.float().std() > 1.0  # a real rendered frame, not a blank buffer
+
+    scene.reset()
+    after = camera.read().rgb
+    assert after.float().std() > 1.0, "read after reset returned a blank/zeroed frame instead of re-rendering"
+
+
+@pytest.mark.slow
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_camera_history(n_envs):
+    CAM_RES = (64, 48)
+    W, H = CAM_RES
+    scene, camera = _modality_scene(CAM_RES, render_depth=True, history_length=3)
+    scene.build(n_envs=n_envs)
+    camera._shared_metadata.context.shadow = False
+    sphere = scene.entities[1]
+
+    # Distinct sphere heights per step so consecutive snapshots differ. A read between steps must not disturb the
+    # per-step capture, so interleave a read to guard the eager-render dedup.
+    for z in (2.0, 1.4, 0.8, 0.6):
+        sphere.set_pos([0.0, 0.0, z] if n_envs == 0 else [[0.0, 0.0, z]] * n_envs)
+        scene.step()
+        camera.read()
+
+    data = camera.read()
+    batch = () if n_envs == 0 else (n_envs,)
+    # History adds a leading dimension of length 3 in front of the modality shape.
+    assert data.rgb.shape == (*batch, 3, H, W, 3) and data.rgb.dtype == torch.uint8
+    assert data.depth.shape == (*batch, 3, H, W) and data.depth.dtype == torch.float32
+
+    depth_hist = data.depth if n_envs == 0 else data.depth[0]  # (3, H, W), newest-first
+    assert (depth_hist[0] != depth_hist[1]).any()
+    assert (depth_hist[1] != depth_hist[2]).any()
+
+
+@pytest.mark.slow
+@pytest.mark.required
+def test_camera_delay():
+    scene, camera = _modality_scene((64, 48), delay=0.02)  # 2 steps at the default dt=0.01
+    scene.build(n_envs=0)
+    camera._shared_metadata.context.shadow = False
+    assert camera._delay_ts == 2
+    sphere = scene.entities[1]
+
+    # Step-1 frame (undelayed ground truth) is what a 2-step delayed read must reproduce two steps later. Reading each
+    # step exercises the interleaved read/step path that a naive scene.t dedup would corrupt.
+    sphere.set_pos([0.0, 0.0, 2.0])
+    scene.step()
+    frame_step1 = camera.read_ground_truth().rgb.clone()
+
+    sphere.set_pos([0.0, 0.0, 1.2])
+    scene.step()
+    camera.read()
+    sphere.set_pos([0.0, 0.0, 0.6])
+    scene.step()
+
+    delayed = camera.read().rgb  # measured, delayed by 2 steps
+    current = camera.read_ground_truth().rgb  # undelayed, current step
+    assert_equal(delayed, frame_step1)  # ZOH reproduces the exact frame from 2 steps ago
+    assert (delayed != current).any()  # the delay actually shifted the observed frame
+
+
 @pytest.mark.required
 def test_camera_modalities_require_at_least_one():
     with pytest.raises(gs.GenesisException, match="at least one"):
@@ -829,9 +936,7 @@ def test_batch_renderer_modalities(n_envs):
         )
     )
     # A second camera in the same batch requesting only depth exercises the per-sensor modality union path.
-    cam_depth = scene.add_sensor(
-        gs.sensors.BatchRendererCameraOptions(**common, render_rgb=False, render_depth=True)
-    )
+    cam_depth = scene.add_sensor(gs.sensors.BatchRendererCameraOptions(**common, render_rgb=False, render_depth=True))
     scene.build(n_envs=n_envs)
     scene.step()
 

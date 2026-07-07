@@ -85,38 +85,11 @@ def _enabled_modalities(options) -> tuple[str, ...]:
     return tuple(name for name in _CAMERA_MODALITIES if getattr(options, f"render_{name}"))
 
 
-def _allocate_image_cache(options, B: int, w: int, h: int) -> Dict[str, torch.Tensor]:
-    """Allocate one zero buffer per enabled modality, keyed by modality name."""
-    return {
-        name: torch.zeros(_modality_shape(name, B, w, h), dtype=_modality_dtype(name), device=gs.device)
-        for name in _enabled_modalities(options)
-    }
-
-
 def _to_cache_tensor(arr, dtype: torch.dtype) -> torch.Tensor:
     """Convert a rendered array (numpy, possibly with negative strides, or torch/CUDA) to a contiguous typed tensor."""
     if isinstance(arr, torch.Tensor):
         return arr.to(dtype=dtype, device=gs.device).contiguous()
     return torch.from_numpy(np.ascontiguousarray(arr)).to(dtype=dtype, device=gs.device)
-
-
-def _store_render_into_cache(cache: Dict[str, torch.Tensor], render_tuple, dst=slice(None)):
-    """
-    Scatter a backend render tuple `(rgb, depth, segmentation, normal)` into the per-modality cache at index `dst`.
-
-    Only modalities present in `cache` and non-None in `render_tuple` are written. A single-env render (missing the
-    batch dim) is unsqueezed to match the cache's leading batch dimension.
-    """
-    for name, arr in zip(_CAMERA_MODALITIES, render_tuple):
-        if name not in cache or arr is None:
-            continue
-        buf = cache[name]
-        target = buf[dst]
-        t = _to_cache_tensor(arr, buf.dtype)
-        if t.ndim == target.ndim - 1:
-            # Single-environment render missing the batch dim; add it to match the destination slice.
-            t = t.unsqueeze(0)
-        buf[dst] = t
 
 
 class MinimalVisualizerWrapper:
@@ -244,9 +217,6 @@ class RasterizerCameraSharedMetadata(KinematicSensorMetadataMixin, SharedSensorM
     lights: Optional[List[Dict[str, Any]]] = None
     # List of RasterizerCameraSensor instances
     sensors: Optional[List["RasterizerCameraSensor"]] = None
-    # {sensor_idx: {modality_name: torch.Tensor}}; rgb (B,H,W,3) uint8, depth (B,H,W) f32, segmentation (B,H,W) i32,
-    # normal (B,H,W,3) f32. Only enabled modalities are allocated (see `_allocate_image_cache`).
-    image_cache: Optional[Dict[int, Dict[str, "torch.Tensor"]]] = None
     # Track when rasterizer cameras were last updated
     last_render_timestep: int = -1
 
@@ -260,7 +230,6 @@ class RasterizerCameraSharedMetadata(KinematicSensorMetadataMixin, SharedSensorM
             self.context.destroy()
             self.context = None
         self.lights = None
-        self.image_cache = None
         self.sensors = None
 
 
@@ -274,9 +243,6 @@ class RaytracerCameraSharedMetadata(KinematicSensorMetadataMixin, SharedSensorMe
     lights: Optional[List[Any]] = None
     # List of RaytracerCameraSensor instances
     sensors: Optional[List["RaytracerCameraSensor"]] = None
-    # {sensor_idx: {modality_name: torch.Tensor}}; rgb (B,H,W,3) uint8, depth (B,H,W) f32, segmentation (B,H,W) i32,
-    # normal (B,H,W,3) f32. Only enabled modalities are allocated (see `_allocate_image_cache`).
-    image_cache: Optional[Dict[int, Dict[str, "torch.Tensor"]]] = None
     # Track when raytracer cameras were last updated
     last_render_timestep: int = -1
 
@@ -285,7 +251,6 @@ class RaytracerCameraSharedMetadata(KinematicSensorMetadataMixin, SharedSensorMe
 
         self.renderer = None
         self.sensors = None
-        self.image_cache = None
 
 
 @dataclass
@@ -298,9 +263,6 @@ class BatchRendererCameraSharedMetadata(KinematicSensorMetadataMixin, SharedSens
     lights: Optional[Any] = None
     # List of BatchRendererCameraSensor instances
     sensors: Optional[List["BatchRendererCameraSensor"]] = None
-    # {sensor_idx: {modality_name: torch.Tensor}}; rgb (B,H,W,3) uint8, depth (B,H,W) f32, segmentation (B,H,W) i32,
-    # normal (B,H,W,3) f32. Only enabled modalities are allocated (see `_allocate_image_cache`).
-    image_cache: Optional[Dict[int, Dict[str, "torch.Tensor"]]] = None
     # Track when batch was last rendered
     last_render_timestep: int = -1
     # MinimalVisualizerWrapper instance
@@ -311,7 +273,6 @@ class BatchRendererCameraSharedMetadata(KinematicSensorMetadataMixin, SharedSens
 
         self.renderer = None
         self.sensors = None
-        self.image_cache = None
         self.visualizer_wrapper = None
 
 
@@ -320,20 +281,24 @@ class BatchRendererCameraSharedMetadata(KinematicSensorMetadataMixin, SharedSens
 
 class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensorMetadata, CameraReturnType]):
     """
-    Base class for camera sensors that render RGB images into an internal image_cache.
+    Base class for camera sensors that render multi-modality images into the shared sensor cache.
 
-    This class centralizes:
-    - Attachment handling via KinematicSensorMixin
-    - The _stale flag used for auto-render-on-read
-    - Common Sensor cache integration (shape/dtype)
-    - Shared read() method returning torch tensors
+    Cameras are first-class sensors: their enabled modalities (rgb uint8 / depth float32 / segmentation int32 / normal
+    float32) are declared per-instance via `_get_return_format` / `_get_cache_dtype`, and the manager lays each out in
+    its own dtype's per-class cache. They therefore flow through the same delay / jitter / history / return machinery as
+    every other sensor.
+
+    `uses_ring_pipeline = False` means cameras don't use the `_apply_transform` recurrence timeline rings (they render
+    directly, with no stateful transform), so no dead timeline rings are allocated - but they still get delay / jitter /
+    history through the per-class return-space ring. Rendering is hybrid: lazy (on `read()`) when no delay/history is
+    requested (the manager's no-ring alias fast path), eager (every step, inside `_update_shared_cache`) when a
+    delay/history ring exists, since those inherently require capturing every past frame.
+
+    This class centralizes attachment handling (via KinematicSensorMixin), the `_stale` render-dedup flag, and the
+    render->cache scatter; subclasses implement the backend-specific `_render_current_state`.
     """
 
     uses_ring_pipeline: ClassVar[bool] = False
-    # Cameras store multi-dtype images (uint8 rgb / float32 depth+normal / int32 seg) in their own `image_cache` and are
-    # read via `sensor.read()`. The manager's per-class cache is single-dtype, so cameras opt out of it entirely; this
-    # also excludes them from `scene.read_sensors()`.
-    uses_manager_cache: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -343,36 +308,79 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
         shared_metadata,
         manager: "SensorManager",
     ):
-        # `uses_ring_pipeline = False` triggers the generic delay / jitter / history rejection in `Sensor.__init__`.
         super().__init__(options, idx, shared_context, shared_metadata, manager)
+        self._enabled: tuple[str, ...] = _enabled_modalities(options)
         self._stale: bool = True
 
     # ========================== Cache Integration (shared) ==========================
 
-    # NOTE: `_get_return_format`/`_get_cache_dtype` are vestigial for cameras. Because `uses_manager_cache = False`, the
-    # manager skips cache-size accounting for camera classes, so these values are not used to size any buffer; camera
-    # output lives in the multi-dtype `image_cache` instead. They are kept only to satisfy the `Sensor` contract.
     def _get_return_format(self) -> tuple[tuple[int, ...], ...]:
+        # One shape per enabled modality, batch dim dropped (the manager prepends B). Order follows `_CAMERA_MODALITIES`
+        # (the backends' render-tuple order), matching `_get_cache_dtype` field-for-field.
         w, h = self._options.res
-        return ((h, w, 3),)
+        return tuple(_modality_shape(name, 1, w, h)[1:] for name in _enabled_modalities(self._options))
 
-    @classmethod
-    def _get_cache_dtype(cls) -> torch.dtype:
-        return torch.uint8
+    def _get_cache_dtype(self):
+        # Per-modality dtype tuple aligned 1:1 with `_get_return_format`: uint8 rgb / float32 depth+normal / int32 seg.
+        return tuple(_modality_dtype(name) for name in _enabled_modalities(self._options))
 
     @classmethod
     def _update_shared_cache(
         cls,
         shared_context: None,
         shared_metadata: SharedSensorMetadata,
-        current_ground_truth_data_T: torch.Tensor,
-        ground_truth_data_timeline: "TensorRingBuffer | None",
-        measured_data_timeline: "TensorRingBuffer | None",
-        intermediate_cache: torch.Tensor,
+        ground_truth_slices: dict,
+        ground_truth_data_timelines: dict,
+        measured_data_timelines: dict,
+        intermediates: dict,
     ):
-        # No per-step cache update for cameras (handled lazily on read()). `BaseCameraSensor` declares
-        # `uses_ring_pipeline = False`, so the manager passes both timeline rings as ``None`` here.
-        pass
+        # Hybrid render timing. Render eagerly (every step) only when this class has a delay/history return ring, which
+        # inherently needs every past frame captured; the render scatters into the manager cache slices, which the ring
+        # then snapshots below (in `SensorManager.step`). With no ring, this is a no-op and rendering happens lazily on
+        # `read()` into the aliased cache - preserving the "don't render if nobody reads" optimization.
+        #
+        # Force staleness before rendering rather than reusing the `scene.t`-based dedup: this hook runs during
+        # `sim.step()` while `scene.t` is still pre-increment, and an interleaved `read()` at the post-increment `t`
+        # would otherwise make the dedup skip this step's render and snapshot a stale frame. `_stale` is still used to
+        # dedup the batch renderer's single all-camera pass within this loop.
+        sensors = shared_metadata.sensors
+        if not sensors:
+            return
+        manager = sensors[0]._manager
+        if cls not in manager._measured_return_timeline_ring:
+            return
+        shared_metadata.last_render_timestep = -1
+        for sensor in sensors:
+            sensor._stale = True
+        for sensor in sensors:
+            sensor._ensure_rendered_for_current_state()
+
+    def _scatter_render_into_manager_cache(self, render_tuple):
+        """
+        Scatter a backend render tuple `(rgb, depth, segmentation, normal)` into this sensor's columns of the manager's
+        per-dtype intermediate + ground-truth caches. Cameras have no measured/GT distinction, so both receive the same
+        rendered data. Only enabled, non-None modalities are written.
+        """
+        manager = self._manager
+        batch = max(manager._sim.n_envs, 1)
+        w, h = self._options.res
+        by_name = dict(zip(_CAMERA_MODALITIES, render_tuple))
+        for i, name in enumerate(self._enabled):
+            arr = by_name.get(name)
+            if arr is None:
+                continue
+            dtype = self._field_dtypes[i]
+            field_slice = self._field_intermediate_slice[i]
+            start = self._cache_idx_by_dtype[dtype]
+            cols = slice(start + field_slice.start, start + field_slice.stop)
+            tensor = _to_cache_tensor(arr, dtype)
+            if tensor.ndim == len(_modality_shape(name, batch, w, h)) - 1:
+                # Single-environment render missing the batch dim; add it to match the (B, ...) cache layout.
+                tensor = tensor.unsqueeze(0)
+            flat = tensor.reshape(batch, -1)
+            manager._intermediate_cache[dtype][:, cols] = flat
+            # GT cache is stored transposed (cols, B); mirror the same data since cameras have no GT/measured split.
+            manager._ground_truth_intermediate_cache[dtype][cols, :] = flat.T
 
     def _draw_debug(self, context: "RasterizerContext"):
         """No debug drawing for cameras."""
@@ -418,10 +426,6 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
 
     # ========================== Shared read() ==========================
 
-    def _get_image_cache_entry(self):
-        """Return this sensor's entry in the shared image cache."""
-        return self._shared_metadata.image_cache[self._idx]
-
     def _ensure_rendered_for_current_state(self):
         """Ensure this camera has an up-to-date render before reading.
         Base handles staleness and timestamps; subclasses implement _render_current_state().
@@ -449,52 +453,52 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
         # Mark as fresh
         self._stale = False
 
-    def _sanitize_envs_idx(self, envs_idx):
-        """Sanitize envs_idx to valid indices."""
-        if envs_idx is None:
-            return None
-        if isinstance(envs_idx, (int, np.integer)):
-            return envs_idx
-        return np.asarray(envs_idx)
+    def _is_eager(self) -> bool:
+        # Eager (delay/history) cameras are rendered every step into the return-space ring by `_update_shared_cache`;
+        # `read()` then just samples the ring and must NOT re-render. Lazy (no-ring) cameras render on read into the
+        # aliased cache.
+        return type(self) in self._manager._measured_return_timeline_ring
 
     @gs.assert_built
     def read(self, envs_idx=None) -> CameraReturnType:
-        """Render if needed, then read the cached image from the backend-specific cache."""
-        self._ensure_rendered_for_current_state()
-        cached_image = self._get_image_cache_entry()
-        return _camera_read_from_image_cache(self, cached_image, envs_idx, to_numpy=False)
+        """Read this camera's modalities from the shared sensor cache, rendering first on the lazy (no-ring) path."""
+        if not self._is_eager():
+            self._ensure_rendered_for_current_state()
+        return self._camera_format(self._manager.get_cloned_from_cache(self), envs_idx)
 
+    @gs.assert_built
+    def read_ground_truth(self, envs_idx=None) -> CameraReturnType:
+        """Ground-truth read. Cameras have no measured/GT split, but the GT path is delay-free (undelayed frame)."""
+        if not self._is_eager():
+            self._ensure_rendered_for_current_state()
+        return self._camera_format(self._manager.get_cloned_from_cache(self, is_ground_truth=True), envs_idx)
 
-# ========================== Camera Sensor Helpers ==========================
-def _camera_read_from_image_cache(sensor, cached_image, envs_idx, *, to_numpy: bool) -> CameraReturnType:
-    """
-    Convert a per-modality image cache into a CameraReturnType with correct env handling.
+    @classmethod
+    def reset(cls, shared_metadata: SharedSensorMetadata, shared_ground_truth_cache, envs_idx):
+        # The shared cache backing cameras is zeroed on reset; invalidate render staleness so the next read re-renders
+        # instead of returning the zeroed cache (cameras own no separate storage anymore).
+        shared_metadata.last_render_timestep = -1
+        if shared_metadata.sensors is not None:
+            for sensor in shared_metadata.sensors:
+                sensor._stale = True
 
-    Parameters
-    ----------
-    sensor : any camera sensor with _manager and _return_data_class
-    cached_image : dict[str, torch.Tensor]
-        Per-modality image cache for this camera; each buffer is shaped (B, H, W[, 3]). Only enabled modalities are
-        present; the rest of the returned NamedTuple stays None.
-    envs_idx : None | int | sequence
-        Environment index/indices to select.
-    to_numpy : bool
-        If True, convert each returned buffer to numpy.
-    """
-    n_envs = sensor._manager._sim.n_envs
-
-    def select_envs(buf):
-        if envs_idx is None:
-            buf = buf[0] if n_envs == 0 else buf
-        elif isinstance(envs_idx, (int, np.integer)):
-            buf = buf[envs_idx]
-        else:
-            buf = buf[envs_idx]
-        if to_numpy and isinstance(buf, torch.Tensor):
-            buf = tensor_to_array(buf)
-        return buf
-
-    return sensor._return_data_class(**{name: select_envs(buf) for name, buf in cached_image.items()})
+    def _camera_format(self, fields, envs_idx=None) -> CameraReturnType:
+        """
+        Pack the per-field return blocks into a ``CameraReturnType`` keyed by enabled modality name (disabled
+        modalities stay ``None``), reshaping each to its image shape and applying env selection. Mirrors the historic
+        env-indexing semantics: ``envs_idx=None`` returns the batch (or the sole frame when ``n_envs==0``); an int index
+        selects and squeezes a single env; a sequence gathers those envs.
+        """
+        n_envs = self._manager._sim.n_envs
+        named: Dict[str, "torch.Tensor"] = {}
+        for name, shape, field in zip(self._enabled, self._return_shapes, fields):
+            buf = field.reshape((field.shape[0], *shape))  # (B, [H,] h, w[, 3])
+            if envs_idx is None:
+                buf = buf[0] if n_envs == 0 else buf
+            else:
+                buf = buf[envs_idx]
+            named[name] = buf
+        return CameraReturnType(**named)
 
 
 # ========================== Rasterizer Camera Sensor ==========================
@@ -536,7 +540,6 @@ class RasterizerCameraSensor(
         if self._shared_metadata.sensors is None:
             self._shared_metadata.sensors = []
             self._shared_metadata.lights = gs.List()
-            self._shared_metadata.image_cache = {}
 
             # If a viewer is active, reuse its windowed OpenGL context for both offscreen and onscreen rendering, rather
             # than creating a separate headless context which is fragile.
@@ -561,10 +564,6 @@ class RasterizerCameraSensor(
         # (visualizer isn't built yet at sensor.build() time)
         if self._shared_metadata.renderer.offscreen:
             self._ensure_camera_registered()
-
-        _B = max(self._manager._sim.n_envs, 1)
-        w, h = self._options.res
-        self._shared_metadata.image_cache[self._idx] = _allocate_image_cache(self._options, _B, w, h)
 
     def _ensure_camera_registered(self):
         """Register this camera with the renderer (no-op if already registered)."""
@@ -691,9 +690,8 @@ class RasterizerCameraSensor(
             node.mesh.primitives[0].poses = poses
             context.jit.update_buffer(node, "model", poses.transpose((0, 2, 1)))
 
-        # Scatter each requested modality into the per-modality cache. `_store_render_into_cache` handles negative
-        # strides, dtype casting, and adding the batch dim for single-environment renders.
-        _store_render_into_cache(self._shared_metadata.image_cache[self._idx], render_out)
+        # Scatter each requested modality into this sensor's columns of the shared manager cache.
+        self._scatter_render_into_manager_cache(render_out)
 
 
 # ========================== Raytracer Camera Sensor ==========================
@@ -746,7 +744,6 @@ class RaytracerCameraSensor(
         if self._shared_metadata.sensors is None:
             self._shared_metadata.sensors = []
             self._shared_metadata.lights = []
-            self._shared_metadata.image_cache = {}
             self._shared_metadata.renderer = renderer
 
         self._shared_metadata.sensors.append(self)
@@ -807,10 +804,6 @@ class RaytracerCameraSensor(
                 offset_T = pos_lookat_up_to_T(pos, lookat, up)
             self._camera_obj.attach(self._link, offset_T)
 
-        _B = max(n_envs, 1)
-        w, h = self._options.res
-        self._shared_metadata.image_cache[self._idx] = _allocate_image_cache(self._options, _B, w, h)
-
     @gs.assert_built
     def move_to_attach(self):
         # Bypass original implementation since it will be handled by visualizer
@@ -854,8 +847,9 @@ class RaytracerCameraSensor(
             antialiasing=False,
             force_render=True,
         )
-        # Raytracer camera sensors reject n_envs > 1, so the render is a single (non-batched) frame -> store into slot 0.
-        _store_render_into_cache(self._shared_metadata.image_cache[self._idx], render_out, dst=0)
+        # Raytracer camera sensors reject n_envs > 1, so the render is a single (non-batched) frame; the scatter helper
+        # adds the missing batch dim.
+        self._scatter_render_into_manager_cache(render_out)
 
 
 # ========================== Batch Renderer Camera Sensor ==========================
@@ -894,7 +888,6 @@ class BatchRendererCameraSensor(
         if self._shared_metadata.sensors is None:
             self._shared_metadata.sensors = []
             self._shared_metadata.lights = gs.List()
-            self._shared_metadata.image_cache = {}
             self._shared_metadata.last_render_timestep = -1
 
             all_sensors = self._manager._sensors_by_type[type(self)]
@@ -931,10 +924,6 @@ class BatchRendererCameraSensor(
             self._shared_metadata.visualizer_wrapper._cameras = [s._camera_obj for s in self._shared_metadata.sensors]
             self._shared_metadata.renderer.build()
 
-        _B = max(self._manager._sim.n_envs, 1)
-        w, h = self._options.res
-        self._shared_metadata.image_cache[self._idx] = _allocate_image_cache(self._options, _B, w, h)
-
     def _render_current_state(self):
         """Perform the actual render for the current state."""
         sensors = self._shared_metadata.sensors or [self]
@@ -969,7 +958,7 @@ class BatchRendererCameraSensor(
                 per_camera.append([arrs])
         for cam_i, sensor in enumerate(sensors):
             sensor_render = tuple(per_camera[mod_i][cam_i] for mod_i in range(len(_CAMERA_MODALITIES)))
-            _store_render_into_cache(sensor._shared_metadata.image_cache[sensor._idx], sensor_render)
+            sensor._scatter_render_into_manager_cache(sensor_render)
             sensor._stale = False
 
         self._shared_metadata.last_render_timestep = self._manager._sim.scene.t

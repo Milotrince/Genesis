@@ -327,7 +327,7 @@ def test_destroy_after_failed_camera_build(monkeypatch, raise_before_build):
     shared_metadata = camera._shared_metadata
 
     # Inject a bug either at build entry (no metadata population) or after the original build
-    # has populated renderer / context / sensors / image_cache.
+    # has populated renderer / context / sensors.
     original_build = RasterizerCameraSensor.build
 
     def buggy_build(self):
@@ -346,7 +346,6 @@ def test_destroy_after_failed_camera_build(monkeypatch, raise_before_build):
         assert shared_metadata.renderer is not None
         assert shared_metadata.context is not None
         assert shared_metadata.sensors is not None
-        assert shared_metadata.image_cache is not None
 
     # Track shared_metadata.destroy() invocations via instance-level shadow. Assigning to the
     # instance __dict__ takes precedence over class-level lookup for this instance only, so
@@ -369,7 +368,6 @@ def test_destroy_after_failed_camera_build(monkeypatch, raise_before_build):
     assert shared_metadata.renderer is None
     assert shared_metadata.context is None
     assert shared_metadata.sensors is None
-    assert shared_metadata.image_cache is None
 
 
 @pytest.mark.required

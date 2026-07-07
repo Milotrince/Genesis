@@ -132,8 +132,8 @@ class Entity(RBC):
         Returns
         -------
         dict[Type[Sensor], torch.Tensor]
-            For each sensor class with at least one sensor on this entity, a tensor of shape
-            (B, [history,] entity_cache_size_for_class).
+            For each ring-pipeline sensor class with at least one sensor on this entity, a tensor of shape
+            (B, [history,] entity_cache_size_for_class). Camera sensors are excluded; read them via ``camera.read()``.
         """
         return self._sim._sensor_manager.read_sensors(entity_idx=self._idx, envs_idx=envs_idx)
 
