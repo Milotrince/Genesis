@@ -170,7 +170,7 @@ def test_rasterizer_non_batched(n_envs, show_viewer):
     def _get_camera_world_pos(sensor):
         renderer = sensor._shared_metadata.renderer
         context = sensor._shared_metadata.context
-        node = renderer._camera_nodes[sensor._idx]
+        node = renderer._camera_nodes[sensor.camera.uid]
         pose = context._scene.get_pose(node)
         if pose.ndim == 3:
             pose = pose[0]
@@ -321,7 +321,7 @@ def test_rasterizer_attached_batched(show_viewer, png_snapshot, tol):
     link_T = trans_quat_to_T(sphere_pos, sphere_quat)
     expected_T = link_T @ offset_T
 
-    camera_node = camera._shared_metadata.renderer._camera_nodes[camera._idx]
+    camera_node = camera._shared_metadata.renderer._camera_nodes[camera.camera.uid]
     actual_pose = camera._shared_metadata.context._scene.get_pose(camera_node)
     assert_allclose(actual_pose, expected_T, tol=tol)
 
@@ -803,6 +803,46 @@ def test_camera_coexists_with_ring_pipeline_sensor():
     assert gs.sensors.types.IMU in bulk  # ring-pipeline sensor is aggregated
     assert gs.sensors.types.RasterizerCameraOptions not in bulk  # camera is read via camera.read()
     assert imu.read() is not None
+
+
+@pytest.mark.required
+def test_camera_sensor_intrinsics_extrinsics():
+    # The sensor delegates camera matrices to its owned vis.Camera; they must match a scene.add_camera of the same
+    # pose/params (intrinsics/projection are exact; extrinsics matches the shared static world pose).
+    CAM_RES = (128, 96)
+    W, H = CAM_RES
+    common = dict(res=CAM_RES, pos=(3.0, 0.0, 2.0), lookat=(0.0, 0.0, 1.0), up=(0.0, 0.0, 1.0), fov=60.0)
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(morph=gs.morphs.Plane())
+    sensor = scene.add_sensor(gs.sensors.RasterizerCameraOptions(near=0.1, far=100.0, **common))
+    ref = scene.add_camera(near=0.1, far=100.0, **common)
+    scene.build(n_envs=0)
+    sensor._shared_metadata.context.shadow = False
+    scene.step()
+    sensor.read()
+
+    assert_allclose(sensor.intrinsics, ref.intrinsics, atol=1e-6)
+    assert_allclose(sensor.projection_matrix, ref.projection_matrix, atol=1e-6)
+    assert_allclose(sensor.extrinsics, ref.extrinsics, atol=1e-4)
+    assert_allclose(sensor.cx, W / 2, atol=1e-6)
+    assert_allclose(sensor.cy, H / 2, atol=1e-6)
+
+
+@pytest.mark.slow
+@pytest.mark.required
+def test_camera_sensor_set_pose_moves_detached():
+    # A detached sensor camera can be re-posed at runtime via the delegated set_pose; the next read re-renders.
+    scene, camera = _modality_scene((64, 48))
+    scene.build(n_envs=0)
+    camera._shared_metadata.context.shadow = False
+    scene.step()
+    frame_a = camera.read().rgb.clone()
+    pos_a = camera.get_pos().clone()
+
+    camera.set_pose(pos=(0.0, 3.0, 2.0), lookat=(0.0, 0.0, 1.0), up=(0.0, 0.0, 1.0))
+    assert (camera.get_pos() != pos_a).any()
+    frame_b = camera.read().rgb
+    assert (frame_a != frame_b).any(), "re-posing a detached camera must change the rendered frame"
 
 
 @pytest.mark.slow
