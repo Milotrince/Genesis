@@ -138,7 +138,33 @@ def func_plane_box_contact(
     plane_dir = gu.qd_transform_by_quat(plane_dir, ga_quat)
     normal = -plane_dir.normalized()
 
-    v1, _, _ = support_field._func_support_box(geoms_info, normal, i_gb, gb_pos, gb_quat)
+    box_scale = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+        box_scale = geoms_state.scale[i_gb, i_b]
+
+    v1 = qd.Vector([0.0, 0.0, 0.0], dt=gs.qd_float)
+    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+        # Support point of the scaled box along the -plane-normal direction, computed in the box frame.
+        d_box = gu.qd_inv_transform_by_quat(normal, gb_quat)
+        half = qd.Vector(
+            [
+                0.5 * geoms_info.data[i_gb][0] * box_scale[0],
+                0.5 * geoms_info.data[i_gb][1] * box_scale[1],
+                0.5 * geoms_info.data[i_gb][2] * box_scale[2],
+            ],
+            dt=gs.qd_float,
+        )
+        v_local = qd.Vector(
+            [
+                half[0] if d_box[0] >= 0.0 else -half[0],
+                half[1] if d_box[1] >= 0.0 else -half[1],
+                half[2] if d_box[2] >= 0.0 else -half[2],
+            ],
+            dt=gs.qd_float,
+        )
+        v1 = gu.qd_transform_by_trans_quat(v_local, gb_pos, gb_quat)
+    else:
+        v1, _, _ = support_field._func_support_box(geoms_info, normal, i_gb, gb_pos, gb_quat)
     penetration = normal.dot(v1 - ga_pos)
 
     if penetration > 0.0:
@@ -168,7 +194,10 @@ def func_plane_box_contact(
                 # Plane-box pairs are sized with the convex cap (they are not in the large-contact mask), so the
                 # emission must stay within it to avoid overflowing a buffer allocated as a convex pair.
                 if n_con < qd.static(collider_static_config.n_contacts_per_convex_pair):
-                    pos_corner = gu.qd_transform_by_trans_quat(verts_info.init_pos[i_v], gb_pos, gb_quat)
+                    corner = verts_info.init_pos[i_v]
+                    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                        corner = box_scale * corner
+                    pos_corner = gu.qd_transform_by_trans_quat(corner, gb_pos, gb_quat)
                     penetration = normal.dot(pos_corner - ga_pos)
                     if penetration > 0.0:
                         contact_pos = pos_corner - 0.5 * penetration * normal
