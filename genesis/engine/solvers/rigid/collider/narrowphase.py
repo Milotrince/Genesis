@@ -119,6 +119,13 @@ def func_add_polytope_vertex_contacts_sdf(
     margin = qd.min(qd.min(gb_cell[0], gb_cell[1]), gb_cell[2])
     synthetic_pen_max = 1e-4
 
+    # Per-env scale of geom A (the vertex provider). B is the SDF provider (baked at unit scale), so this path
+    # is correct for a scaled A against an unscaled B (plane/terrain/static); scaling the SDF provider is not
+    # supported. Identity when scale == 1.
+    scale_a = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+        scale_a = geoms_state.scale[i_ga, i_b]
+
     # Bounding-sphere-vs-SDF coarse reject at A's centre. Every point of A lies within rbound_a of
     # geoms_info.center[i_ga], so when B's SDF at A's centre exceeds rbound_a no point of A can reach B's surface and
     # the O(n_verts) scan is skipped. rbound_a is the tight sphere around A's AABB centred at geoms_info.center[i_ga]
@@ -128,10 +135,10 @@ def func_add_polytope_vertex_contacts_sdf(
     # distance and silently miss a contact. A directional/SAT bound that uses the SDF gradient at A's centre would be
     # tighter but is unsafe on nonconvex B: the centre gradient is a local linearisation, so an A vertex on the
     # opposite side can still reach a different feature of B that the centre points away from.
-    center_local = geoms_info.center[i_ga]
+    center_local = scale_a * geoms_info.center[i_ga]
     rbound_a_sq = gs.qd_float(0.0)
     for k in qd.static(range(8)):
-        delta = geoms_init_AABB[i_ga, k] - center_local
+        delta = scale_a * geoms_init_AABB[i_ga, k] - center_local
         d_sq = delta.dot(delta)
         if d_sq > rbound_a_sq:
             rbound_a_sq = d_sq
@@ -155,7 +162,7 @@ def func_add_polytope_vertex_contacts_sdf(
         # picking up rim verts whose grad is tilted relative to the surface and would inject torque; a 1:1:16 rod
         # recovers a radius near rbound_a/n_max so the buffer spreads along the long axis instead of collapsing onto
         # the deepest tip and letting the body pivot about a single contact patch.
-        ext = geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0]
+        ext = scale_a * (geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0])
         ext_max = qd.max(qd.max(ext[0], ext[1]), ext[2])
         ext_sum_other = ext[0] + ext[1] + ext[2] - ext_max
         needle_extent = ext_max - gs.qd_float(2.0) * ext_sum_other
@@ -166,14 +173,16 @@ def func_add_polytope_vertex_contacts_sdf(
             top_pen[k] = -gs.qd_float(1e30)
             top_iv[k] = -1
         for i_v in range(geoms_info.vert_start[i_ga], geoms_info.vert_end[i_ga]):
-            vertex_pos = gu.qd_transform_by_trans_quat(verts_info.init_pos[i_v], ga_pos, ga_quat)
+            vertex_pos = gu.qd_transform_by_trans_quat(scale_a * verts_info.init_pos[i_v], ga_pos, ga_quat)
             if func_point_in_geom_aabb(geoms_state, i_gb, i_b, vertex_pos):
                 pen_v = -sdf.sdf_func_world_local(geoms_info, sdf_info, vertex_pos, i_gb, gb_pos, gb_quat)
                 if pen_v > -margin:
                     close_idx = -1
                     for k in range(n_max):
                         if close_idx < 0 and top_iv[k] >= 0:
-                            other_pos = gu.qd_transform_by_trans_quat(verts_info.init_pos[top_iv[k]], ga_pos, ga_quat)
+                            other_pos = gu.qd_transform_by_trans_quat(
+                                scale_a * verts_info.init_pos[top_iv[k]], ga_pos, ga_quat
+                            )
                             if (vertex_pos - other_pos).norm() < diversity_radius:
                                 close_idx = k
                     if close_idx >= 0:
@@ -239,7 +248,7 @@ def func_add_polytope_vertex_contacts_sdf(
                 # direction the constraint will push them apart, and it is much larger than the per-vertex SDF
                 # "distance to nearest surface" for crossed thin geoms where most A verts sit on A's outer skin one
                 # radial gap away from B's lateral surface.
-                half_ext_a = (geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0]) * gs.qd_float(0.5)
+                half_ext_a = scale_a * (geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0]) * gs.qd_float(0.5)
                 half_ext_b = (geoms_init_AABB[i_gb, 7] - geoms_init_AABB[i_gb, 0]) * gs.qd_float(0.5)
                 d_local_a = gu.qd_inv_transform_by_quat(closing_normal, ga_quat)
                 d_local_b = gu.qd_inv_transform_by_quat(closing_normal, gb_quat)
@@ -276,7 +285,7 @@ def func_add_polytope_vertex_contacts_sdf(
         for k in range(n_max):
             if top_iv[k] >= 0:
                 i_v = top_iv[k]
-                vertex_pos = gu.qd_transform_by_trans_quat(verts_info.init_pos[i_v], ga_pos, ga_quat)
+                vertex_pos = gu.qd_transform_by_trans_quat(scale_a * verts_info.init_pos[i_v], ga_pos, ga_quat)
                 pen_v = top_pen[k]
                 grad_v = sdf.sdf_func_grad_world_local(
                     geoms_info,
@@ -320,7 +329,10 @@ def func_add_polytope_vertex_contacts_sdf(
                     # but fix its sign from A's normal (the grad's sign inverts once the vertex tunnels past B's thin
                     # wall). When the grad is smoothed (coarse grid across the thin wall), use A's vertex normal
                     # directly rather than the vertical reference, which is what was leaving the side walls unsupported.
-                    a_vnormal = gu.qd_normalize(gu.qd_transform_by_quat(verts_info.init_normal[i_v], ga_quat), EPS)
+                    # A surface normal transforms by the inverse-transpose of the scale (1 / scale for a diagonal S).
+                    a_vnormal = gu.qd_normalize(
+                        gu.qd_transform_by_quat(verts_info.init_normal[i_v] / scale_a, ga_quat), EPS
+                    )
                     if grad_norm > 0.5:
                         normal_v = gu.qd_normalize(grad_v, EPS)
                         if normal_v.dot(a_vnormal) > 0.0:

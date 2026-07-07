@@ -7604,6 +7604,42 @@ def test_geom_scale_collision(tol):
     assert_allclose(sz[1], 0.10, tol=8e-3)
 
 
+@pytest.mark.parametrize("backend", [gs.gpu])
+def test_geom_scale_nonconvex(tol):
+    """Per-env scale is honored by the nonconvex-mesh SDF-polytope collision path."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_geom_scaling=True,
+            gravity=(0.0, 0.0, -10.0),
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    duck = scene.add_entity(
+        gs.morphs.Mesh(
+            file="meshes/duck.obj",
+            scale=0.1,
+            convexify=False,
+            pos=(0.0, 0.0, 0.5),
+        ),
+    )
+    # env 0 is the unscaled control; env 1 scales the nonconvex mesh uniformly by 1.5.
+    scene.build(n_envs=2)
+
+    duck.set_scale(1.5, envs_idx=[1])
+    for _ in range(500):
+        scene.step()
+
+    aabb = duck.get_AABB()
+    min_z = aabb[:, 0, 2]
+    ext_z = aabb[:, 1, 2] - aabb[:, 0, 2]
+    assert torch.isfinite(duck.get_pos()).all()
+    # Both rest on the plane (lowest point ~ 0): the scaled nonconvex mesh collides without tunneling.
+    assert_allclose(min_z, 0.0, tol=0.02)
+    # env 1 is 1.5x taller.
+    assert float(ext_z[1]) > float(ext_z[0]) * 1.3
+
+
 # 30s
 @pytest.mark.slow  # ~250s
 @pytest.mark.parametrize("backend", [gs.gpu])  # Grasping physics requires GPU
