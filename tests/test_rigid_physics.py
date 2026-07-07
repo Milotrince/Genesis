@@ -7668,6 +7668,68 @@ def test_geom_scale_nonconvex(tol):
     assert float(ext_z[1]) > float(ext_z[0]) * 1.3
 
 
+def test_link_mass_api_scaled(tol):
+    """link.get_mass / entity.set_mass / link.set_mass track the per-env runtime mass under scaling."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5)))
+    scene.build(n_envs=4)
+    scene.step()
+
+    link = box.links[0]
+    # With scaling enabled, per-link mass is per-env even before any scale is applied.
+    base = link.get_mass()
+    assert base.shape == (4,)
+    assert_allclose(base, base[0], tol=tol)
+
+    # link.get_mass reflects the per-env runtime mass after a non-uniform scale (det(S) = 6 on envs 0-1).
+    box.set_scale((2.0, 1.0, 3.0), envs_idx=[0, 1])
+    scene.step()
+    scaled = link.get_mass()
+    assert_allclose(scaled[[0, 1]], base[[0, 1]] * 6.0, tol=tol)
+    assert_allclose(scaled[[2, 3]], base[[2, 3]], tol=tol)
+    # Single-link entity: entity mass equals the link mass on every env.
+    assert_allclose(box.get_mass(), scaled, tol=tol)
+
+    # entity.set_mass distributes a scalar target across links; get_mass must return it on every env,
+    # including the scaled ones (the ratio uses the current per-env mass, not the stale build-time value).
+    box.set_mass(2.0)
+    assert_allclose(box.get_mass(), 2.0, tol=tol)
+    assert_allclose(link.get_mass(), 2.0, tol=tol)
+
+    # link.set_mass accepts an explicit per-env vector.
+    target = np.array([1.0, 2.0, 3.0, 4.0])
+    link.set_mass(target)
+    assert_allclose(link.get_mass(), target, tol=tol)
+
+
+def test_link_mass_api_heterogeneous(tol):
+    """link.get_mass returns the per-env mass of each environment's bound variant."""
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    big, small = 0.04, 0.02
+    het = scene.add_entity(
+        morph=(
+            gs.morphs.Box(size=(big,) * 3, pos=(0.0, 0.0, 0.1)),
+            gs.morphs.Box(size=(small,) * 3, pos=(0.0, 0.0, 0.1)),
+        ),
+    )
+    # Balanced: envs 0-1 -> big, envs 2-3 -> small.
+    scene.build(n_envs=4)
+    scene.step()
+
+    m = het.links[0].get_mass()
+    assert m.shape == (4,)
+    assert_allclose(m[0], m[1], tol=tol)
+    assert_allclose(m[2], m[3], tol=tol)
+    assert_allclose(m[0], m[2] * (big / small) ** 3, tol=tol)
+    # Single-link variants: entity mass equals link mass per env.
+    assert_allclose(het.get_mass(), m, tol=tol)
+
+
 # 30s
 @pytest.mark.slow  # ~250s
 @pytest.mark.parametrize("backend", [gs.gpu])  # Grasping physics requires GPU
