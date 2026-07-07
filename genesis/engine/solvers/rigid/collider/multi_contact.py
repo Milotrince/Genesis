@@ -33,6 +33,8 @@ def func_multi_contact(
     quat_b: qd.types.vector(4),
     i_b,
     i_f,
+    scale_a: qd.types.vector(3),
+    scale_b: qd.types.vector(3),
 ):
     """
     Multi-contact detection algorithm based on Sutherland-Hodgman polygon clipping algorithm. For the two geometric
@@ -100,7 +102,19 @@ def func_multi_contact(
         elif geom_type == gs.GEOM_TYPE.MESH:
             quat = quat_a if i_g0 == 0 else quat_b
             nnorms = func_potential_mesh_normals(
-                geoms_info, verts_info, faces_info, gjk_state, gjk_info, i_g, quat, i_b, nface, v1i, v2i, v3i
+                geoms_info,
+                verts_info,
+                faces_info,
+                gjk_state,
+                gjk_info,
+                i_g,
+                quat,
+                i_b,
+                nface,
+                v1i,
+                v2i,
+                v3i,
+                scale_a if i_g0 == 0 else scale_b,
             )
 
         for i_n in range(nnorms):
@@ -135,11 +149,12 @@ def func_multi_contact(
             v2i = v12i if is_edge_face else v22i
 
             nnorms = 0
+            edge_scale = scale_a if is_edge_face else scale_b
             if geom_type == gs.GEOM_TYPE.BOX:
                 pos = pos_a if is_edge_face else pos_b
                 quat = quat_a if is_edge_face else quat_b
                 nnorms = func_potential_box_edge_normals(
-                    geoms_info, gjk_state, gjk_info, i_g, pos, quat, i_b, nface, v1, v2, v1i, v2i
+                    geoms_info, gjk_state, gjk_info, i_g, pos, quat, i_b, nface, v1, v2, v1i, v2i, edge_scale
                 )
             elif geom_type == gs.GEOM_TYPE.MESH:
                 pos = pos_a if is_edge_face else pos_b
@@ -159,6 +174,7 @@ def func_multi_contact(
                     v2,
                     v1i,
                     v2i,
+                    edge_scale,
                 )
 
             if is_edge_face:
@@ -228,11 +244,24 @@ def func_multi_contact(
                 if geom_type == gs.GEOM_TYPE.BOX:
                     pos = pos_a if k == 0 else pos_b
                     quat = quat_a if k == 0 else quat_b
-                    nface = func_box_face(geoms_info, gjk_state, i_g, pos, quat, i_b, k, normal_face_idx)
+                    nface = func_box_face(
+                        geoms_info, gjk_state, i_g, pos, quat, i_b, k, normal_face_idx, scale_a if k == 0 else scale_b
+                    )
                 elif geom_type == gs.GEOM_TYPE.MESH:
                     pos = pos_a if k == 0 else pos_b
                     quat = quat_a if k == 0 else quat_b
-                    nface = func_mesh_face(verts_info, faces_info, gjk_state, i_g, pos, quat, i_b, k, normal_face_idx)
+                    nface = func_mesh_face(
+                        verts_info,
+                        faces_info,
+                        gjk_state,
+                        i_g,
+                        pos,
+                        quat,
+                        i_b,
+                        k,
+                        normal_face_idx,
+                        scale_a if k == 0 else scale_b,
+                    )
 
             if k == 0:
                 nface1 = nface
@@ -512,6 +541,7 @@ def func_potential_mesh_normals(
     v1,
     v2,
     v3,
+    scale: qd.types.vector(3),
 ):
     """
     For a simplex defined on a mesh with three vertices [v1, v2, v3],
@@ -553,11 +583,12 @@ def func_potential_mesh_normals(
             compute_normal = compute_normal and (has_vs[j] == 1)
 
         if compute_normal:
-            v1pos = verts_info.init_pos[face[0]]
-            v2pos = verts_info.init_pos[face[1]]
-            v3pos = verts_info.init_pos[face[2]]
+            v1pos = scale * verts_info.init_pos[face[0]]
+            v2pos = scale * verts_info.init_pos[face[1]]
+            v3pos = scale * verts_info.init_pos[face[2]]
 
-            # Compute the face normal
+            # Compute the face normal. Under a diagonal scale the cross product of scaled edges yields the
+            # correct (inverse-transpose) face-normal direction after normalization.
             n = (v2pos - v1pos).cross(v3pos - v1pos)
             n = n.normalized()
             n = gu.qd_transform_by_quat(n, quat)
@@ -618,6 +649,7 @@ def func_potential_box_edge_normals(
     v2,
     v1i,
     v2i,
+    scale: qd.types.vector(3),
 ):
     """
     For a simplex defined on a box with two vertices [v1, v2],
@@ -659,7 +691,7 @@ def func_potential_box_edge_normals(
                 bv = gs.qd_vec3(x, -y, z)
             elif i == 2:
                 bv = gs.qd_vec3(x, y, -z)
-            ev = gu.qd_transform_by_trans_quat(bv, pos, quat)
+            ev = gu.qd_transform_by_trans_quat(scale * bv, pos, quat)
             r = func_safe_normalize(gjk_info, ev - v1)
 
             gjk_state.contact_normals[i_b, i].endverts = ev
@@ -686,6 +718,7 @@ def func_potential_mesh_edge_normals(
     v2,
     v1i,
     v2i,
+    scale: qd.types.vector(3),
 ):
     """
     For a simplex defined on a mesh with two vertices [v1, v2],
@@ -731,7 +764,7 @@ def func_potential_mesh_edge_normals(
                 t_v2i = face[v2_idx]
 
                 # Compute the edge normal
-                v2_pos = verts_info.init_pos[t_v2i]
+                v2_pos = scale * verts_info.init_pos[t_v2i]
                 v2_pos = gu.qd_transform_by_trans_quat(v2_pos, pos, quat)
                 t_res = func_safe_normalize(gjk_info, v2_pos - v1)
 
@@ -812,6 +845,7 @@ def func_box_face(
     i_b,
     i_o,
     face_idx,
+    scale: qd.types.vector(3),
 ):
     """
     Get the face vertices of the box geometry.
@@ -854,7 +888,7 @@ def func_box_face(
 
     # Transform the vertices to the global coordinates
     for i in range(nface):
-        v = gs.qd_vec3(vs[3 * i + 0], vs[3 * i + 1], vs[3 * i + 2]) * 0.5
+        v = scale * (gs.qd_vec3(vs[3 * i + 0], vs[3 * i + 1], vs[3 * i + 2]) * 0.5)
         v = gu.qd_transform_by_trans_quat(v, pos, quat)
         if i_o == 0:
             gjk_state.contact_faces[i_b, i].vert1 = v
@@ -875,6 +909,7 @@ def func_mesh_face(
     i_b,
     i_o,
     face_idx,
+    scale: qd.types.vector(3),
 ):
     """
     Get the face vertices of the mesh.
@@ -886,7 +921,7 @@ def func_mesh_face(
     nvert = 3
     for i in range(nvert):
         i_v = faces_info[face_idx].verts_idx[i]
-        v = verts_info.init_pos[i_v]
+        v = scale * verts_info.init_pos[i_v]
         v = gu.qd_transform_by_trans_quat(v, pos, quat)
         if i_o == 0:
             gjk_state.contact_faces[i_b, i].vert1 = v

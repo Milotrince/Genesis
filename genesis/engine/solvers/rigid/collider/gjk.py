@@ -356,6 +356,11 @@ def func_gjk_contact(
                         # (2) Both of the geometries should be discrete,
                         # (3) [enable_mujoco_multi_contact] should be True. Default to False.
                         if i_f >= 0 and func_is_discrete_geoms(geoms_info, i_ga, i_gb, i_b):
+                            mc_scale_a = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+                            mc_scale_b = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+                            if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                                mc_scale_a = gjk_state.geom_scale[i_b, 0]
+                                mc_scale_b = gjk_state.geom_scale[i_b, 1]
                             func_multi_contact(
                                 geoms_info,
                                 verts_info,
@@ -370,6 +375,8 @@ def func_gjk_contact(
                                 quat_b,
                                 i_b,
                                 i_f,
+                                mc_scale_a,
+                                mc_scale_b,
                             )
                             gjk_state.multi_contact_flag[i_b] = True
     else:
