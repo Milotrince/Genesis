@@ -2309,6 +2309,9 @@ class KinematicEntity(Entity):
             init = torch.as_tensor(vgeom.init_vverts, dtype=gs.tc_float, device=gs.device)
             pos = vgeoms_pos[..., vgeom.idx, :].unsqueeze(-2)
             quat = vgeoms_quat[..., vgeom.idx, :].unsqueeze(-2)
+            vscale = vgeom._vscale(envs_idx)
+            if vscale is not None:
+                init = vscale * init
             parts.append(gu.transform_by_trans_quat(init, pos, quat))
         tensor = torch.cat(parts, dim=-2)
         return tensor[0] if self._solver.n_envs == 0 else tensor

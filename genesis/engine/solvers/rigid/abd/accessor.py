@@ -602,6 +602,22 @@ def kernel_set_geoms_scale(
 
 
 @qd.kernel(fastcache=True)
+def kernel_set_vgeoms_scale(
+    scale: qd.types.ndarray(),
+    vgeoms_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    vgeoms_state: array_class.VGeomsState,
+    static_rigid_sim_config: qd.template(),
+):
+    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_vg_, i_b_ in qd.ndrange(vgeoms_idx.shape[0], envs_idx.shape[0]):
+        i_vg, i_b = vgeoms_idx[i_vg_], envs_idx[i_b_]
+        vgeoms_state.scale[i_vg, i_b] = qd.Vector(
+            [scale[i_b_, i_vg_, 0], scale[i_b_, i_vg_, 1], scale[i_b_, i_vg_, 2]], dt=gs.qd_float
+        )
+
+
+@qd.kernel(fastcache=True)
 def kernel_set_links_inertial(
     inertial_mass: qd.types.ndarray(),
     inertial_pos: qd.types.ndarray(),

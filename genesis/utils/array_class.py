@@ -2145,6 +2145,9 @@ def get_vgeoms_info(solver):
 class VGeomsState:
     pos: qd.Tensor
     quat: qd.Tensor
+    # Per-environment visual-geometry scale (diagonal, about the vgeom frame origin), default (1, 1, 1).
+    # Mirrors GeomsState.scale; read only when static config 'enable_geom_scaling' is set (see set_vgeoms_scale).
+    scale: qd.Tensor
 
 
 def get_vgeoms_state(solver):
@@ -2153,6 +2156,7 @@ def get_vgeoms_state(solver):
     return VGeomsState(
         pos=V(dtype=gs.qd_vec3, shape=shape),
         quat=V(dtype=gs.qd_vec4, shape=shape),
+        scale=V(dtype=gs.qd_vec3, shape=shape),
     )
 
 

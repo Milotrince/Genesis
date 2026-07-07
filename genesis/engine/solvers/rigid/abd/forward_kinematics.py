@@ -1270,8 +1270,11 @@ def kernel_update_vverts_for_vgeoms(
         for i_vv in range(v_start, v_end):
             i_state = vverts_info.vverts_state_idx[i_vv]
             if i_state >= 0:
+                init_pos = vverts_info.init_pos[i_vv]
+                if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                    init_pos = vgeoms_state.scale[i_vg, i_b] * init_pos
                 vverts_state.pos[i_state, i_b] = gu.qd_transform_by_trans_quat(
-                    vverts_info.init_pos[i_vv], vgeoms_state.pos[i_vg, i_b], vgeoms_state.quat[i_vg, i_b]
+                    init_pos, vgeoms_state.pos[i_vg, i_b], vgeoms_state.quat[i_vg, i_b]
                 )
 
 

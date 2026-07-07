@@ -663,9 +663,15 @@ def kernel_init_vgeom_fields(
     vgeoms_color: qd.types.ndarray(),
     # Quadrants variables
     vgeoms_info: array_class.VGeomsInfo,
+    vgeoms_state: array_class.VGeomsState,
     static_rigid_sim_config: qd.template(),
 ):
     n_vgeoms = vgeoms_pos.shape[0]
+    _B = vgeoms_state.pos.shape[1]
+
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_vg, i_b in qd.ndrange(n_vgeoms, _B):
+        vgeoms_state.scale[i_vg, i_b] = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
 
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_vg in range(n_vgeoms):
@@ -920,6 +926,12 @@ def kernel_update_vgeoms_render_T(
         geom_T = gu.qd_trans_quat_to_T(
             vgeoms_state.pos[i_g, i_b] + rigid_global_info.envs_offset[i_b], vgeoms_state.quat[i_g, i_b], EPS
         )
+        if qd.static(static_rigid_sim_config.enable_geom_scaling):
+            # Bake the scale into the rotation block (R @ diag(scale)) so the mesh renders scaled about its frame.
+            scale = vgeoms_state.scale[i_g, i_b]
+            for i in qd.static(range(3)):
+                for j in qd.static(range(3)):
+                    geom_T[i, j] = geom_T[i, j] * scale[j]
         if (qd.abs(geom_T) < 1e20).all():
             for J in qd.static(qd.grouped(qd.ndrange(4, 4))):
                 vgeoms_render_T[(i_g, i_b, *J)] = qd.cast(geom_T[J], qd.float32)

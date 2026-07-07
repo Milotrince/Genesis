@@ -583,6 +583,7 @@ class KinematicSolver(Solver):
                 vgeoms_vface_end=np.array([vgeom.vface_end for vgeom in vgeoms], dtype=gs.np_int),
                 vgeoms_color=np.array([vgeom._color for vgeom in vgeoms], dtype=gs.np_float),
                 vgeoms_info=self.vgeoms_info,
+                vgeoms_state=self.vgeoms_state,
                 static_rigid_sim_config=self._static_rigid_sim_config,
             )
 

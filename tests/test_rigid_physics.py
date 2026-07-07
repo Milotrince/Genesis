@@ -7730,6 +7730,38 @@ def test_link_mass_api_heterogeneous(tol):
     assert_allclose(het.get_mass(), m, tol=tol)
 
 
+@pytest.mark.parametrize("backend", [gs.gpu])
+def test_geom_scale_visual(tol):
+    """Per-env scale is mirrored onto visual geometry: get_vAABB / get_vverts rescale per env."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5)))
+    scene.build(n_envs=2)
+    scene.step()
+
+    ext0 = torch.diff(box.get_vAABB(), dim=-2)[:, 0]  # (n_envs, 3) visual extents, both unit
+    assert_allclose(ext0[0], ext0[1], tol=1e-3)
+
+    box.set_scale((2.0, 1.0, 3.0), envs_idx=[1])
+    scene.step()
+
+    # Visual AABB: env 0 unchanged, env 1 scaled per axis.
+    ext1 = torch.diff(box.get_vAABB(), dim=-2)[:, 0]
+    assert_allclose(ext1[0], ext0[0], tol=1e-3)
+    assert_allclose(ext1[1] / ext0[1], (2.0, 1.0, 3.0), tol=2e-2)
+
+    # get_vverts reflects the same scale (env 1 world-vert bbox is the per-axis-scaled env 0 bbox).
+    vv = box.get_vverts()
+    vext = vv.max(dim=-2).values - vv.min(dim=-2).values
+    assert_allclose(vext[1] / vext[0], (2.0, 1.0, 3.0), tol=2e-2)
+
+    # Visual and collision geometry stay consistent under scale.
+    assert_allclose(torch.diff(box.get_AABB(), dim=-2)[1, 0], ext1[1], tol=1e-2)
+
+
 # 30s
 @pytest.mark.slow  # ~250s
 @pytest.mark.parametrize("backend", [gs.gpu])  # Grasping physics requires GPU

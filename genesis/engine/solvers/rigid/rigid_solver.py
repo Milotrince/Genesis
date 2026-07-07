@@ -140,6 +140,7 @@ from .abd.accessor import (
     kernel_wake_up_entities_on_new_contact,
     kernel_set_geoms_friction_ratio,
     kernel_set_geoms_scale,
+    kernel_set_vgeoms_scale,
     kernel_set_links_inertial,
     kernel_set_qpos,
     kernel_set_global_sol_params,
@@ -2562,6 +2563,15 @@ class RigidSolver(KinematicSolver):
         geoms_idx = np.array([geom.idx for geom in geoms], dtype=gs.np_int)
         geoms_scale = np.ascontiguousarray(np.broadcast_to(scale[:, None, :], (n_sel, len(geoms_idx), 3)))
         kernel_set_geoms_scale(geoms_scale, geoms_idx, envs_idx_np, self.geoms_state, self._static_rigid_sim_config)
+
+        # 1b. Mirror the scale onto the entity's visual geometry so vverts/vAABB and rendering rescale too.
+        vgeoms = entity.vgeoms
+        if vgeoms:
+            vgeoms_idx = np.array([vgeom.idx for vgeom in vgeoms], dtype=gs.np_int)
+            vgeoms_scale = np.ascontiguousarray(np.broadcast_to(scale[:, None, :], (n_sel, len(vgeoms_idx), 3)))
+            kernel_set_vgeoms_scale(
+                vgeoms_scale, vgeoms_idx, envs_idx_np, self.vgeoms_state, self._static_rigid_sim_config
+            )
 
         # 2. Recompute per-link inertial from the baseline (unit-scale) inertial via the covariance transform:
         #    mass *= det(S), com -> S com, and (with the link-frame tensor I0) C0 = 0.5 tr(I0) Id - I0,
