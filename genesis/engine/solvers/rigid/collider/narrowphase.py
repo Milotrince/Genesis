@@ -1430,6 +1430,11 @@ def func_convex_convex_contact(
                     # TODO: Add support of smooth refinement to differentiable contact.
                     if qd.static(collider_static_config.ccd_algorithm != CCD_ALGORITHM_CODE.MJ_MPR):
                         if prefer_gjk:
+                            # Stash the pair's per-env geom scales for the GJK support driver (i_ga/i_gb are
+                            # already in sorted order here; identity when unused).
+                            if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                                gjk_state.geom_scale[i_b, 0] = geoms_state.scale[i_ga, i_b]
+                                gjk_state.geom_scale[i_b, 1] = geoms_state.scale[i_gb, i_b]
                             if qd.static(static_rigid_sim_config.requires_grad):
                                 diff_gjk.func_gjk_contact(
                                     links_state,
@@ -1819,6 +1824,11 @@ def _func_multicontact_run_detection(
 
         if qd.static(collider_static_config.ccd_algorithm != CCD_ALGORITHM_CODE.MJ_MPR):
             if use_gjk:
+                # Stash the pair's per-env geom scales on the multicontact GJK state slot (i_scratch) for the
+                # support driver; value from the true env i_b. Identity when unused.
+                if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                    gjk_state.geom_scale[i_scratch, 0] = geoms_state.scale[i_ga, i_b]
+                    gjk_state.geom_scale[i_scratch, 1] = geoms_state.scale[i_gb, i_b]
                 if qd.static(not static_rigid_sim_config.requires_grad):
                     gjk.func_gjk_contact(
                         geoms_state,
@@ -2456,6 +2466,11 @@ def _func_narrowphase_contact0(
                     collider_static_config.ccd_algorithm in (CCD_ALGORITHM_CODE.GJK, CCD_ALGORITHM_CODE.MJ_GJK)
                 ):
                     gjk.clear_cache(gjk_state, flat_idx)
+                    # Stash the pair's per-env geom scales on the contact0 GJK state slot (flat_idx) for the
+                    # support driver; value from the true env i_b. i_ga/i_gb are already swapped above.
+                    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                        gjk_state.geom_scale[flat_idx, 0] = geoms_state.scale[i_ga, i_b]
+                        gjk_state.geom_scale[flat_idx, 1] = geoms_state.scale[i_gb, i_b]
                     distance = gjk.func_gjk(
                         geoms_info,
                         verts_info,

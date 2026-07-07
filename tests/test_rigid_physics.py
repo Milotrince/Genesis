@@ -7605,6 +7605,34 @@ def test_geom_scale_collision(tol):
 
 
 @pytest.mark.parametrize("backend", [gs.gpu])
+def test_geom_scale_collision_gjk(tol):
+    """Per-env scale is honored on the GJK collision path (forced via use_gjk_collision)."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_geom_scaling=True,
+            use_gjk_collision=True,
+            gravity=(0.0, 0.0, -10.0),
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(gs.morphs.Box(size=(0.6, 0.6, 0.1), pos=(0.0, 0.0, 0.05), fixed=True))
+    faller = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.6)))
+    # env 0 unscaled control; env 1 z-scaled x3 -> box-box contact resolved by GJK.
+    scene.build(n_envs=2)
+
+    faller.set_scale((1.0, 1.0, 3.0), envs_idx=[1])
+    for _ in range(600):
+        scene.step()
+
+    fz = faller.get_pos()[..., 2]
+    assert torch.isfinite(fz).all()
+    # Rests on the platform top (0.1) plus its half-height: 0.15 unscaled, 0.25 with z-scale 3.
+    assert_allclose(fz[0], 0.15, tol=1e-2)
+    assert_allclose(fz[1], 0.25, tol=1e-2)
+
+
+@pytest.mark.parametrize("backend", [gs.gpu])
 def test_geom_scale_nonconvex(tol):
     """Per-env scale is honored by the nonconvex-mesh SDF-polytope collision path."""
     scene = gs.Scene(

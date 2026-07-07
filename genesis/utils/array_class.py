@@ -1237,6 +1237,10 @@ def get_witness(_B, max_contacts_per_pair, is_active):
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
 class GJKState:
     support_mesh_prev_vertex_id: qd.Tensor
+    # Per-environment scale of the two geoms of the current pair ([i_b, i_o], i_o in {0, 1}), stashed by the
+    # narrowphase before a GJK/EPA run so the support driver can scale geometry without threading scale
+    # through the GJK stack. Only read when static config 'enable_geom_scaling' is set.
+    geom_scale: qd.Tensor
     simplex_vertex: MDVertex
     simplex_buffer: GJKSimplexBuffer
     simplex: GJKSimplex
@@ -1282,6 +1286,7 @@ def get_gjk_state(_B, static_rigid_sim_config, gjk_info, is_active, requires_gra
     return GJKState(
         # GJK simplex
         support_mesh_prev_vertex_id=V(dtype=gs.qd_int, shape=(_B, 2)),
+        geom_scale=V(dtype=gs.qd_vec3, shape=(_B, 2)),
         simplex_vertex=get_gjk_simplex_vertex(_B, is_active),
         simplex_buffer=get_gjk_simplex_buffer(_B, is_active),
         simplex=get_gjk_simplex(_B, is_active),
@@ -1329,6 +1334,7 @@ def get_gjk_state_contact_only(_B):
 
     return GJKState(
         support_mesh_prev_vertex_id=V(dtype=gs.qd_int, shape=(_B, 2)),
+        geom_scale=V(dtype=gs.qd_vec3, shape=(_B, 2)),
         simplex_vertex=get_gjk_simplex_vertex(_B, is_active=True),
         simplex_buffer=get_gjk_simplex_buffer(_B, is_active=True),
         simplex=get_gjk_simplex(_B, is_active=True),

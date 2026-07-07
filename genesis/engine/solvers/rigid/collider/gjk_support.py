@@ -85,9 +85,12 @@ def support_driver(
     v_ = qd.Vector.zero(gs.qd_float, 3)
     vid = -1
 
-    # GJK does not yet thread the per-env geom scale (it is not the default CCD); pass unit scale so the
-    # shared support leaves stay exact. Per-env scale is handled on the MPR path (see mpr.support_driver).
+    # Per-env geom scale for this object, stashed on gjk_state by the narrowphase before the GJK/EPA run
+    # ([i_b, i_o]: state slot + object index, the same indices as support_mesh_prev_vertex_id). Gated so
+    # unscaled scenes compile the identity path.
     scale = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+        scale = gjk_state.geom_scale[i_b, i_o]
 
     geom_type = geoms_info.type[i_g]
     if geom_type == gs.GEOM_TYPE.SPHERE:
