@@ -771,6 +771,24 @@ def test_rasterizer_modality_defaults_rgb_only():
     assert scene.read_sensors() == {}
 
 
+@pytest.mark.required
+def test_read_cameras():
+    # Cameras are excluded from the vector reader and returned by the dedicated camera reader.
+    W, H = 64, 48
+    scene, camera = _modality_scene((W, H), render_depth=True)
+    scene.build(n_envs=0)
+    camera._shared_metadata.context.shadow = False
+    scene.step()
+
+    assert scene.read_sensors() == {}
+
+    cams = scene.read_cameras()
+    assert list(cams.keys()) == [camera]
+    data = cams[camera]
+    assert data.rgb is not None and data.rgb.shape == (H, W, 3)
+    assert data.depth is not None and data.depth.shape == (H, W)
+
+
 @pytest.mark.slow
 @pytest.mark.required
 def test_camera_coexists_with_ring_pipeline_sensor():

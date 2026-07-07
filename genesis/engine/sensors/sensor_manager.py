@@ -61,6 +61,8 @@ class SensorManager:
         self._max_history_by_class: dict[type["Sensor"], int] = {}
         # Per-(class, return-dtype) ordered `(global_sensor_idx, size_in_dtype)` list driving `_apply_delay`.
         self._delay_layout_by_type: dict[type["Sensor"], dict[torch.dtype, list[tuple[int, int]]]] = {}
+        # One-shot guard so `read_sensors` notes the camera/read_cameras split at most once per scene.
+        self._logged_camera_exclusion: bool = False
 
     def create_sensor(self, sensor_options: "SensorOptions") -> "Sensor":
         sensor_options.validate_scene(self._sim.scene)
@@ -499,7 +501,12 @@ class SensorManager:
         self, entity_idx: int | None = None, envs_idx=None, is_ground_truth: bool = False
     ) -> dict[int, torch.Tensor]:
         """
-        Read the latest data of every sensor class in scope as a single tensor per class.
+        Read the latest data of every **vector** sensor class in scope as a single tensor per class.
+
+        This is the batched reader for vector-shaped sensors (IMU, contact, raycaster, ...): one flat tensor per
+        sensor type. Camera / image sensors are NOT included here - their multi-modality image output has no
+        single-tensor representation, and reading them would force a render on every call. Read cameras individually
+        via `camera.read()`, or all at once via `scene.read_cameras()`.
 
         Always returns a fresh tensor per class, independent of the internal sensor storage; the caller is free to
         mutate the result.
@@ -507,7 +514,7 @@ class SensorManager:
         Parameters
         ----------
         entity_idx : int | None
-            - None (default): include every sensor in the scene.
+            - None (default): include every vector sensor in the scene.
             - k >= 0: include only sensors whose `entity_idx == k`.
             - -1: include only static sensors (those not attached to any entity).
         envs_idx : array-like | int | slice | None
@@ -520,18 +527,27 @@ class SensorManager:
         dict[int, torch.Tensor]
             Mapping from sensor-type tag (`gs.sensors.types.<Name>`) to a tensor of shape
             (B, [history,] class_or_entity_cache_size). For sensors without history, the history
-            dimension is omitted. Only ring-pipeline sensor classes are included; lazily-rendered sensors (cameras),
-            whose multi-modality output has no single-tensor representation, are read via `sensor.read()` instead.
+            dimension is omitted. Camera sensors are excluded (see `read_cameras`).
         """
         # Sanitize envs_idx to a 1D tensor so fancy-indexing the batch axis always allocates a fresh tensor; this is
         # what gives the function its mutation-safe contract.
         env_index = self._sim._scene._sanitize_envs_idx(envs_idx)
 
+        # Surface the camera/vector split once so a user with cameras in the scene isn't confused by their absence.
+        if not self._logged_camera_exclusion:
+            cameras = self.camera_sensors
+            if cameras:
+                gs.logger.info(
+                    f"`read_sensors()` returns vector sensors only; {len(cameras)} camera sensor(s) are excluded. "
+                    "Read them via `camera.read()` or all at once via `scene.read_cameras()`."
+                )
+            self._logged_camera_exclusion = True
+
         result: dict[int, torch.Tensor] = {}
         for sensor_cls, sensors in self._sensors_by_type.items():
             if not sensor_cls.uses_ring_pipeline:
                 # Cameras compute their output lazily on render (not through the eager per-step ring pipeline) and span
-                # several dtypes; the batched aggregate can't represent them. Read them via `sensor.read()`.
+                # several dtypes; the batched aggregate can't represent them. Read them via `read_cameras`.
                 continue
             return_caches = self._return_cache[sensor_cls]
             # The batched aggregate is one tensor per class, so it only covers single-return-dtype classes (every
@@ -577,6 +593,44 @@ class SensorManager:
             for sensor in sensor_list
             if sensor._options.entity_idx == target_eid
         )
+
+    @property
+    def camera_sensors(self) -> "gs.List[Sensor]":
+        """The camera sensors in the scene - the ones excluded from `read_sensors` and read via `read_cameras`."""
+        # Local import avoids a module-level cycle (camera -> base_sensor -> sensor_manager) and defers the heavy vis
+        # imports that `camera` pulls in.
+        from .camera import BaseCameraSensor
+
+        return gs.List(sensor for sensor in self.sensors if isinstance(sensor, BaseCameraSensor))
+
+    def read_cameras(self, entity_idx: int | None = None, envs_idx=None):
+        """
+        Render and read every camera sensor in scope, returned per camera.
+
+        Complements `read_sensors` (which covers vector sensors): each camera is read via its own `read()`, so the
+        result is one `CameraReturnType` (`.rgb` / `.depth` / `.segmentation` / `.normal`) per camera. Rendering
+        happens here, so this is only paid when explicitly called.
+
+        Parameters
+        ----------
+        entity_idx : int | None
+            - None (default): every camera in the scene.
+            - k >= 0: only cameras whose `entity_idx == k`.
+            - -1: only static cameras (not attached to any entity).
+        envs_idx : array-like | int | slice | None
+            Environment selection passed through to each `camera.read()`.
+
+        Returns
+        -------
+        dict[Sensor, CameraReturnType]
+            Mapping from each camera sensor to its rendered modalities.
+        """
+        target_eid = None if entity_idx is None else (-1 if entity_idx < 0 else entity_idx)
+        return {
+            camera: camera.read(envs_idx)
+            for camera in self.camera_sensors
+            if target_eid is None or camera._options.entity_idx == target_eid
+        }
 
     @property
     def sensors(self):

@@ -644,10 +644,11 @@ class Scene(RBC):
     @gs.assert_built
     def read_sensors(self, envs_idx=None) -> "dict[type[Sensor], torch.Tensor]":
         """
-        Read every sensor in the scene as a tensor per sensor class.
+        Read every **vector** sensor in the scene as a tensor per sensor class.
 
-        Always returns a fresh tensor independent of the internal sensor storage; the caller is free to mutate the
-        result.
+        This is the batched reader for vector-shaped sensors (IMU, contact, raycaster, ...). Camera sensors are not
+        included - read them via ``camera.read()`` or all at once via :meth:`read_cameras`. Always returns a fresh
+        tensor independent of the internal sensor storage; the caller is free to mutate the result.
 
         Parameters
         ----------
@@ -657,11 +658,29 @@ class Scene(RBC):
         Returns
         -------
         dict[Type[Sensor], torch.Tensor]
-            For each ring-pipeline sensor class present in the scene, a tensor of shape (B, [history,] class_cache_size).
-            Camera sensors are excluded (their multi-modality output has no single-tensor representation); read them via
-            ``camera.read()``.
+            For each vector sensor class present in the scene, a tensor of shape (B, [history,] class_cache_size).
         """
         return self._sim._sensor_manager.read_sensors(entity_idx=None, envs_idx=envs_idx)
+
+    def read_cameras(self, envs_idx=None) -> dict:
+        """
+        Render and read every camera sensor in the scene, one entry per camera.
+
+        The companion to :meth:`read_sensors` for image sensors: each camera is rendered and read individually, so
+        the result maps each camera sensor to its ``CameraReturnType`` (``.rgb`` / ``.depth`` / ``.segmentation`` /
+        ``.normal``). Rendering happens on call, so the cost is only paid when explicitly requested.
+
+        Parameters
+        ----------
+        envs_idx : array-like | int | slice | None
+            Environment selection passed through to each ``camera.read()``.
+
+        Returns
+        -------
+        dict[Sensor, CameraReturnType]
+            Mapping from each camera sensor to its rendered modalities.
+        """
+        return self._sim._sensor_manager.read_cameras(entity_idx=None, envs_idx=envs_idx)
 
     @gs.assert_unbuilt
     def start_recording(self, data_func: Callable, rec_options: "RecorderOptions") -> "Recorder":
