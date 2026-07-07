@@ -2162,6 +2162,22 @@ class KinematicEntity(Entity):
             gs.raise_exception("set_active_variant can only be called after the scene is built.")
         self._solver.set_active_variant(self, variant_idx, envs_idx)
 
+    def set_scale(self, scale, envs_idx=None):
+        """Set a per-environment geometry scale for this entity at runtime.
+
+        `scale` is a scalar (isotropic), a length-3 vector `(sx, sy, sz)`, or a per-environment
+        `(n_envs, 3)` array. Requires the scene built with `RigidOptions(enable_geom_scaling=True)`. Scales
+        the entity's collision geometry, AABBs and inertial about each geom's frame origin; the joint
+        configuration is preserved. Radial primitives (capsule, cylinder) require an isotropic radial scale.
+        """
+        if not self._solver.is_built:
+            gs.raise_exception("set_scale can only be called after the scene is built.")
+        self._solver.set_entity_scale(self, scale, envs_idx)
+
+    def get_scale(self, envs_idx=None):
+        """Return this entity's per-environment geometry scale as `(n_envs, 3)` (or `(3,)` for a single env)."""
+        return qd_to_numpy(self._solver.geoms_state.scale, envs_idx, self._geom_start, transpose=True)
+
     @property
     def n_joints(self):
         """The number of `RigidJoint` in the entity."""
@@ -4556,7 +4572,7 @@ class RigidEntity(KinematicEntity):
             The total mass of the entity in kg. For heterogeneous entities, returns
             an array of shape (n_envs,) with per-environment masses.
         """
-        if self._enable_heterogeneous:
+        if self._enable_heterogeneous or self._solver._enable_geom_scaling:
             links_idx = slice(self.link_start, self.link_end)
             links_mass = qd_to_numpy(self._solver.links_info.inertial_mass, None, links_idx, transpose=True)
             return links_mass.sum(axis=1)

@@ -82,9 +82,7 @@ def _update_geom_active_envs(geom, starts, ends, envs_idx, B):
     is_active = (starts <= geom.idx) & (geom.idx < ends)
     if geom.active_envs_mask is None:
         geom.active_envs_mask = torch.zeros(B, dtype=torch.bool, device=gs.device)
-    geom.active_envs_mask[torch.as_tensor(envs_idx, device=gs.device)] = torch.as_tensor(
-        is_active, device=gs.device
-    )
+    geom.active_envs_mask[torch.as_tensor(envs_idx, device=gs.device)] = torch.as_tensor(is_active, device=gs.device)
     (geom.active_envs_idx,) = np.where(tensor_to_array(geom.active_envs_mask))
 
 
@@ -174,6 +172,7 @@ class KinematicSolver(Solver):
         self._enable_mujoco_compatibility = False
         self._requires_grad = False
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
+        self._enable_geom_scaling = False  # RigidSolver overrides from RigidOptions(enable_geom_scaling)
 
         self.collider = None
         self.constraint_solver = None
@@ -323,9 +322,10 @@ class KinematicSolver(Solver):
         self.n_custom_vfaces_ = max(1, self.n_custom_vfaces)
         self.n_entities_ = max(1, self.n_entities)
 
-        # batch_links_info is required when heterogeneous simulation is used.
-        # We must update options because get_links_info reads from solver._options.batch_links_info.
-        if self._enable_heterogeneous:
+        # batch_links_info is required for per-environment link info: heterogeneous variants (per-env geom
+        # ranges + inertial) and per-env geom scaling (per-env inertial write). We must update options
+        # because get_links_info reads from solver._options.batch_links_info.
+        if self._enable_heterogeneous or self._enable_geom_scaling:
             self._options.batch_links_info = True
 
         self._build_static_config()

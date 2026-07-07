@@ -1122,7 +1122,9 @@ def kernel_update_verts_for_geoms(
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g_, i_b in qd.ndrange(n_geoms, _B):
         i_g = geoms_idx[i_g_]
-        func_update_verts_for_geom(i_g, i_b, geoms_state, geoms_info, verts_info, free_verts_state, fixed_verts_state)
+        func_update_verts_for_geom(
+            i_g, i_b, geoms_state, geoms_info, verts_info, free_verts_state, fixed_verts_state, static_rigid_sim_config
+        )
 
 
 @qd.func
@@ -1134,12 +1136,15 @@ def func_update_verts_for_geom(
     verts_info: array_class.VertsInfo,
     free_verts_state: array_class.VertsState,
     fixed_verts_state: array_class.VertsState,
+    static_rigid_sim_config: qd.template(),
 ):
     _B = geoms_state.verts_updated.shape[1]
 
     if not geoms_state.verts_updated[i_g, i_b]:
         i_v_start = geoms_info.vert_start[i_g]
         if verts_info.is_fixed[i_v_start]:
+            # Fixed-vert geoms live in a shared (no batch axis) buffer, so they cannot carry a per-env
+            # scale; set_scale rejects them, so init_pos is always at unit scale here.
             for i_v in range(i_v_start, geoms_info.vert_end[i_g]):
                 verts_state_idx = verts_info.verts_state_idx[i_v]
                 fixed_verts_state.pos[verts_state_idx] = gu.qd_transform_by_trans_quat(
@@ -1150,8 +1155,11 @@ def func_update_verts_for_geom(
         else:
             for i_v in range(i_v_start, geoms_info.vert_end[i_g]):
                 verts_state_idx = verts_info.verts_state_idx[i_v]
+                init_pos = verts_info.init_pos[i_v]
+                if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                    init_pos = geoms_state.scale[i_g, i_b] * init_pos
                 free_verts_state.pos[verts_state_idx, i_b] = gu.qd_transform_by_trans_quat(
-                    verts_info.init_pos[i_v], geoms_state.pos[i_g, i_b], geoms_state.quat[i_g, i_b]
+                    init_pos, geoms_state.pos[i_g, i_b], geoms_state.quat[i_g, i_b]
                 )
             geoms_state.verts_updated[i_g, i_b] = True
 
@@ -1169,7 +1177,9 @@ def func_update_all_verts(
 
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g, i_b in qd.ndrange(n_geoms, _B):
-        func_update_verts_for_geom(i_g, i_b, geoms_state, geoms_info, verts_info, free_verts_state, fixed_verts_state)
+        func_update_verts_for_geom(
+            i_g, i_b, geoms_state, geoms_info, verts_info, free_verts_state, fixed_verts_state, static_rigid_sim_config
+        )
 
 
 @qd.kernel(fastcache=True)
@@ -1203,7 +1213,10 @@ def kernel_update_geom_aabbs(
         lower = gu.qd_vec3(qd.math.inf)
         upper = gu.qd_vec3(-qd.math.inf)
         for i_corner in qd.static(range(8)):
-            corner_pos = gu.qd_transform_by_trans_quat(geoms_init_AABB[i_g, i_corner], g_pos, g_quat)
+            corner = geoms_init_AABB[i_g, i_corner]
+            if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                corner = geoms_state.scale[i_g, i_b] * corner
+            corner_pos = gu.qd_transform_by_trans_quat(corner, g_pos, g_quat)
             lower = qd.min(lower, corner_pos)
             upper = qd.max(upper, corner_pos)
 

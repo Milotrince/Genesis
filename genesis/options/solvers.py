@@ -519,6 +519,11 @@ class RigidOptions(Options):
     batch_joints_info: StrictBool = False
     batch_dofs_info: StrictBool = False
 
+    # Enable per-environment runtime geometry scale (entity.set_scale). Off by default so scenes that do
+    # not use it compile identical, scale-free kernels. Requires batch_links_info for the per-env inertial
+    # write; it is auto-enabled when this is set.
+    enable_geom_scaling: StrictBool = False
+
     # constraint solver
     constraint_solver: gs.constraint_solver = gs.constraint_solver.Newton
     iterations: PositiveInt = 50

@@ -1932,6 +1932,9 @@ class GeomsState:
     max_buffer_idx: qd.Tensor
     is_hibernated: qd.Tensor
     friction_ratio: qd.Tensor
+    # Per-environment geometry scale (diagonal, about the geom frame origin), default (1, 1, 1). Read at
+    # geometry-consumption sites only when static config 'enable_geom_scaling' is set (see set_geoms_scale).
+    scale: qd.Tensor
 
 
 def get_geoms_state(solver):
@@ -1948,6 +1951,7 @@ def get_geoms_state(solver):
         max_buffer_idx=V(dtype=gs.qd_int, shape=shape),
         is_hibernated=V(dtype=gs.qd_int, shape=shape),
         friction_ratio=V(dtype=gs.qd_float, shape=shape),
+        scale=V(dtype=gs.qd_vec3, shape=shape),
     )
 
 
@@ -2270,6 +2274,9 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     requires_grad: bool
     prefer_decomposed_solver: int = -1  # -1 = None (auto), 0 = False, 1 = True
     use_contact_island: bool = False  # per-island Newton solve (gated; the legacy island solver is retired)
+    # Per-environment runtime geom scale (entity.set_scale). Gates the scale reads in the verts/AABB/
+    # collision kernels so scenes that don't opt in compile identical, scale-free kernels.
+    enable_geom_scaling: bool = False
     # Consecutive sub-tolerance steps a body's max DOF velocity must hold before it is ready to hibernate. Guards
     # against a body that is only momentarily slow (e.g. at the apex of a toss) sleeping prematurely.
     hibernation_min_steps: int = 10

@@ -648,6 +648,7 @@ def kernel_init_geom_fields(
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g, i_b in qd.ndrange(n_geoms, _B):
         geoms_state.friction_ratio[i_g, i_b] = 1.0
+        geoms_state.scale[i_g, i_b] = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
 
 
 @qd.kernel(fastcache=True)
