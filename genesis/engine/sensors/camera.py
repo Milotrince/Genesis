@@ -269,7 +269,7 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
         if not sensors:
             return
         manager = sensors[0]._manager
-        if cls not in manager._measured_return_timeline_ring:
+        if not manager.class_has_return_ring(cls):
             return
         shared_metadata.last_render_timestep = -1
         for sensor in sensors:
@@ -336,74 +336,85 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
 
     # ========================== Capability delegation to the owned vis.Camera ==========================
 
+    def _require_camera(self) -> "Camera":
+        # The owned vis.Camera is created eagerly at build for standalone/headless rendering, but lazily on the first
+        # render when sharing a live viewer's rasterizer. Give a clear message instead of a NoneType error if pose /
+        # intrinsics are accessed before that first render on the viewer-shared path.
+        if self._camera is None:
+            gs.raise_exception(
+                "Camera not built yet: its underlying vis.Camera is created on the first render when sharing a live "
+                "viewer. Step the scene or call `read()` once before accessing camera pose / intrinsics."
+            )
+        return self._camera
+
     @property
     def camera(self) -> "Camera":
         """The underlying `vis.Camera` this sensor renders through (pose, intrinsics, extrinsics, ...)."""
-        return self._camera
+        return self._require_camera()
 
     @gs.assert_built
     def set_pose(self, transform=None, pos=None, lookat=None, up=None, envs_idx=None):
         """Set the camera pose. Delegates to `vis.Camera.set_pose` (per-env when batched)."""
-        self._camera.set_pose(transform=transform, pos=pos, lookat=lookat, up=up, envs_idx=envs_idx)
+        self._require_camera().set_pose(transform=transform, pos=pos, lookat=lookat, up=up, envs_idx=envs_idx)
         # Invalidate the lazy-render cache so the next read re-renders from the new pose within the same step.
         self._stale = True
 
     @gs.assert_built
     def get_pos(self, envs_idx=None):
-        return self._camera.get_pos(envs_idx)
+        return self._require_camera().get_pos(envs_idx)
 
     @gs.assert_built
     def get_quat(self, envs_idx=None):
-        return self._camera.get_quat(envs_idx)
+        return self._require_camera().get_quat(envs_idx)
 
     @gs.assert_built
     def get_transform(self, envs_idx=None):
-        return self._camera.get_transform(envs_idx)
+        return self._require_camera().get_transform(envs_idx)
 
     @gs.assert_built
     def get_lookat(self, envs_idx=None):
-        return self._camera.get_lookat(envs_idx)
+        return self._require_camera().get_lookat(envs_idx)
 
     @gs.assert_built
     def get_up(self, envs_idx=None):
-        return self._camera.get_up(envs_idx)
+        return self._require_camera().get_up(envs_idx)
 
     @property
     def intrinsics(self):
         """The camera intrinsics matrix `K`."""
-        return self._camera.intrinsics
+        return self._require_camera().intrinsics
 
     @property
     def extrinsics(self):
         """The camera extrinsics (world-to-camera) matrix."""
-        return self._camera.extrinsics
+        return self._require_camera().extrinsics
 
     @property
     def projection_matrix(self):
         """The OpenGL projection matrix."""
-        return self._camera.projection_matrix
+        return self._require_camera().projection_matrix
 
     @property
     def f(self):
         """The focal length in pixels."""
-        return self._camera.f
+        return self._require_camera().f
 
     @property
     def cx(self):
-        return self._camera.cx
+        return self._require_camera().cx
 
     @property
     def cy(self):
-        return self._camera.cy
+        return self._require_camera().cy
 
     def distance_center_to_plane(self, center_dis):
         """Convert Euclidean center distance (range along the ray) to planar Z depth."""
-        return self._camera.distance_center_to_plane(center_dis)
+        return self._require_camera().distance_center_to_plane(center_dis)
 
     @gs.assert_built
     def render_pointcloud(self, world_frame=True):
         """Render a partial point cloud from the camera view (depth-deprojected)."""
-        return self._camera.render_pointcloud(world_frame=world_frame)
+        return self._require_camera().render_pointcloud(world_frame=world_frame)
 
     # ========================== Shared read() ==========================
 
@@ -434,7 +445,7 @@ class BaseCameraSensor(KinematicSensorMixin, Sensor[OptionsT, None, SharedSensor
         # Eager (delay/history) cameras are rendered every step into the return-space ring by `_update_shared_cache`;
         # `read()` then just samples the ring and must NOT re-render. Lazy (no-ring) cameras render on read into the
         # aliased cache.
-        return type(self) in self._manager._measured_return_timeline_ring
+        return self._manager.class_has_return_ring(type(self))
 
     @gs.assert_built
     def read(self, envs_idx=None) -> CameraReturnType:

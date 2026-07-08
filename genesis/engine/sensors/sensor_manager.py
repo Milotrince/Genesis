@@ -594,6 +594,13 @@ class SensorManager:
             if sensor._options.entity_idx == target_eid
         )
 
+    def class_has_return_ring(self, sensor_cls: type["Sensor"]) -> bool:
+        """
+        Whether a sensor class has a per-class return-space ring (allocated for delay / history / a `_post_process`
+        override). Cameras use this to decide eager (per-step) vs lazy (on-read) rendering.
+        """
+        return sensor_cls in self._measured_return_timeline_ring
+
     @property
     def camera_sensors(self) -> "gs.List[Sensor]":
         """The camera sensors in the scene - the ones excluded from `read_sensors` and read via `read_cameras`."""
