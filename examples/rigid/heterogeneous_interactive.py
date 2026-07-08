@@ -13,7 +13,8 @@ Usage:
     python heterogeneous_interactive.py --cpu      # run on CPU
 
 Controls:
-    R - randomize the active object variant of every environment
+    R   - randomize the active object variant of every environment
+    ESC - quit
     (plus the usual viewer camera controls)
 """
 
@@ -74,17 +75,25 @@ def main():
         obj.set_pos(spawn_pos, zero_velocity=True)
         gs.logger.info(f"Randomized active variants: {variant_idx.tolist()}")
 
+    is_running = True
+
+    def stop():
+        nonlocal is_running
+        is_running = False
+
     # Start with a varied assignment, then let R re-randomize live. R overwrites the default record-video bind.
     randomize()
     scene.viewer.register_keybinds(
         Keybind("randomize_variants", Key.R, KeyAction.PRESS, callback=randomize, allow_overload=False),
+        Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=stop),
         overwrite=True,
     )
 
     print("\nHeterogeneous controls:")
-    print("R - randomize the active object variant of every environment\n")
+    print("R   - randomize the active object variant of every environment")
+    print("ESC - quit\n")
 
-    while scene.viewer.is_alive():
+    while is_running and scene.viewer.is_alive():
         scene.step()
 
 
