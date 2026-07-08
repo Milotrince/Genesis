@@ -563,11 +563,28 @@ class RasterizerContext:
 
                     # For heterogeneous simulation, filter envs based on geom's assigned environments
                     geom_envs_idx = self._get_geom_active_envs_idx(geom, self.rendered_envs_idx)
+
+                    node = self.rigid_nodes[geom.uid]
+                    primitive = node.mesh.primitives[0]
+
+                    # A runtime rebind (set_active_variant) changes which envs a variant is active in. The jit
+                    # per-env visibility mask (env_active) is rebuilt from primitive.active_envs only when the
+                    # scene is flagged meshes-updated, so refresh the mask whenever it actually changes and flag
+                    # the rebuild. np.isin yields all-False when the variant left every rendered env (drawn
+                    # nowhere). Only env-masked variants carry a mask; env-shared instances (active_envs None,
+                    # e.g. shared planes) are untouched.
+                    if primitive.active_envs is not None:
+                        new_active_envs = np.isin(self.rendered_envs_idx, geom_envs_idx)
+                        if not np.array_equal(new_active_envs, primitive.active_envs):
+                            primitive.active_envs = new_active_envs
+                            self._scene._meshes_updated = True
+
                     if len(geom_envs_idx) == 0:
                         continue
 
-                    # Mirror on_rigid: full per-env poses for env-masked variants, compacted otherwise.
-                    if len(geom_envs_idx) < len(self.rendered_envs_idx):
+                    # Env-masked variants carry full per-env poses (the mask selects the drawn envs), so a
+                    # variant can occupy any env after a rebind; env-shared instances use compacted poses.
+                    if primitive.active_envs is not None:
                         geom_T = geoms_T[geom.idx][self.rendered_envs_idx]
                     else:
                         geom_T = geoms_T[geom.idx][geom_envs_idx]
@@ -583,9 +600,8 @@ class RasterizerContext:
                         ):
                             geom_T = geom_T[:1]
 
-                    node = self.rigid_nodes[geom.uid]
                     node.mesh._bounds = None
-                    node.mesh.primitives[0].poses = geom_T
+                    primitive.poses = geom_T
                     self.jit.update_buffer(node, "model", geom_T.transpose((0, 2, 1)))
                     if isinstance(entity._morph, gs.morphs.Plane):
                         self.set_reflection_mat(geom_T)
