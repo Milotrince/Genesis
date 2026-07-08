@@ -7808,6 +7808,47 @@ def test_heterogeneous_aabb_fast_approx(tol):
         assert_allclose(fast[0], fast[2], tol=1e-3)
 
 
+def test_geom_pool_reserved_block_inert(tol):
+    """A reserved but unfilled geometry pool block enlarges device allocation yet is physically inert.
+
+    The pool appends empty geom/vert/face/edge/cell slots to the global arrays (so the device allocation
+    n_geoms_ grows past the real geom count), but until set_active_object fills a slot those rows stay zero:
+    a zero quaternion rotates to a finite point and contype == conaffinity == 0 yields no collision pairs, so
+    the simulation must be bit-identical to the same scene built without a pool.
+    """
+
+    def build(with_pool):
+        kw = {}
+        if with_pool:
+            kw["geom_pool"] = gs.options.GeomPoolOptions(
+                n_slots=3, max_geoms_per_slot=2, max_verts_per_slot=16, max_faces_per_slot=28, max_edges_per_slot=42
+            )
+        scene = gs.Scene(rigid_options=gs.options.RigidOptions(**kw), show_viewer=False)
+        scene.add_entity(gs.morphs.Plane())
+        box = scene.add_entity(gs.morphs.Box(size=(0.12, 0.12, 0.12), pos=(0.05, -0.03, 0.4)))
+        scene.build(n_envs=3)
+        for _ in range(60):
+            scene.step()
+        return scene, box
+
+    scene_ref, box_ref = build(with_pool=False)
+    scene_pool, box_pool = build(with_pool=True)
+
+    # The pool reserves device rows beyond the real geom count, but the logical geom list is unchanged.
+    assert scene_ref.rigid_solver.n_geoms_ == scene_ref.rigid_solver.n_geoms
+    assert scene_pool.rigid_solver.n_geoms == scene_ref.rigid_solver.n_geoms
+    assert scene_pool.rigid_solver.n_geoms_ == scene_pool.rigid_solver.n_geoms + 3 * 2
+    assert len(scene_pool.rigid_solver.geoms) == scene_ref.rigid_solver.n_geoms
+    # A pooled scene forces SAP broadphase (per-env slot bindings diverge like heterogeneous variants).
+    assert scene_pool.rigid_solver._resolve_broadphase_traversal() == gs.broadphase_traversal.SAP
+
+    # The reserved block is inert: identical settling to the pool-free scene, and no NaNs from empty slots.
+    ref_pos, pool_pos = box_ref.get_pos(), box_pool.get_pos()
+    assert not torch.isnan(pool_pos).any()
+    assert_allclose(pool_pos, ref_pos, tol=tol)
+    assert_allclose(box_pool.get_mass(), box_ref.get_mass(), tol=tol)
+
+
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_geom_scale_visual(tol):
     """Per-env scale is mirrored onto visual geometry: get_vAABB / get_vverts rescale per env."""

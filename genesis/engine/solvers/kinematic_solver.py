@@ -173,6 +173,7 @@ class KinematicSolver(Solver):
         self._requires_grad = False
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
         self._enable_geom_scaling = False  # RigidSolver overrides from RigidOptions(enable_geom_scaling)
+        self._enable_geom_pool = False  # RigidSolver overrides from RigidOptions(geom_pool)
 
         self.collider = None
         self.constraint_solver = None
@@ -325,7 +326,7 @@ class KinematicSolver(Solver):
         # batch_links_info is required for per-environment link info: heterogeneous variants (per-env geom
         # ranges + inertial) and per-env geom scaling (per-env inertial write). We must update options
         # because get_links_info reads from solver._options.batch_links_info.
-        if self._enable_heterogeneous or self._enable_geom_scaling:
+        if self._enable_heterogeneous or self._enable_geom_scaling or self._enable_geom_pool:
             self._options.batch_links_info = True
 
         self._build_static_config()

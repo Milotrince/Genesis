@@ -103,7 +103,10 @@ class RigidSolverState:
         self.links_quat = gs.zeros((_B, scene.sim.rigid_solver.n_links, 4), **args)
         self.i_pos_shift = gs.zeros((_B, scene.sim.rigid_solver.n_links, 3), **args)
         self.mass_shift = gs.zeros((_B, scene.sim.rigid_solver.n_links), **args)
-        self.friction_ratio = gs.ones((_B, scene.sim.rigid_solver.n_geoms), **args)
+        # Size the per-geom friction to the device allocation (n_geoms_), which matches geoms_state and may
+        # exceed the real geom count when a dynamic geometry pool reserves trailing slots. Identical to n_geoms
+        # for ordinary scenes (n_geoms_ == max(1, n_geoms)).
+        self.friction_ratio = gs.ones((_B, scene.sim.rigid_solver.n_geoms_), **args)
 
     def serializable(self):
         self.scene = None

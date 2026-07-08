@@ -621,6 +621,15 @@ class Collider:
         if self._n_possible_pairs == 0:
             self._collider_info.collision_pair_idx.fill(-1)
             return
+        # The device field is sized (n_geoms_, n_geoms_), which exceeds the real geom count when a dynamic
+        # geometry pool reserves trailing slots. Pad the host matrix with -1 (no pair) so reserved rows/cols
+        # never produce a valid pair; set_active_object patches in a slot's real pairs when it is filled.
+        n_geoms_ = self._solver.n_geoms_
+        if collision_pair_idx.shape[0] != n_geoms_:
+            padded = np.full((n_geoms_, n_geoms_), fill_value=-1, dtype=gs.np_int)
+            n = collision_pair_idx.shape[0]
+            padded[:n, :n] = collision_pair_idx
+            collision_pair_idx = padded
         self._collider_info.collision_pair_idx.from_numpy(collision_pair_idx)
 
     def _init_valid_pairs(self):
@@ -629,6 +638,13 @@ class Collider:
 
     def _init_verts_connectivity(self, vert_neighbors, vert_neighbor_start, vert_n_neighbors):
         if self._solver.n_verts > 0:
+            # The per-vert start/count fields are sized (n_verts_,), which exceeds the real vert count when a
+            # geometry pool reserves trailing vertex rows. Pad those two with zeros (reserved verts have no
+            # neighbors); set_active_object fills a slot's real connectivity when it is loaded.
+            n_verts_ = self._solver.n_verts_
+            if vert_neighbor_start.shape[0] != n_verts_:
+                vert_neighbor_start = np.pad(vert_neighbor_start, (0, n_verts_ - vert_neighbor_start.shape[0]))
+                vert_n_neighbors = np.pad(vert_n_neighbors, (0, n_verts_ - vert_n_neighbors.shape[0]))
             self._collider_info.vert_neighbors.from_numpy(vert_neighbors)
             self._collider_info.vert_neighbor_start.from_numpy(vert_neighbor_start)
             self._collider_info.vert_n_neighbors.from_numpy(vert_n_neighbors)

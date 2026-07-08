@@ -393,6 +393,44 @@ class ToolOptions(Options):
     floor_height: float | None = None
 
 
+class GeomPoolOptions(Options):
+    """
+    Options configuring a dynamic GPU geometry residency pool for a heterogeneous-capable rigid entity.
+
+    The pool reserves, at build time, a fixed block of ``n_slots`` uniform geometry slots appended to the
+    solver's global geometry/vertex arrays. The block starts empty (inert) and is filled at runtime by
+    ``entity.set_active_object(...)``, which uploads a processed object into a free slot and rebinds the
+    selected environments to it. Because the engine's device fields are statically shaped at build, every
+    per-slot budget below is a hard capacity: an object whose processed geometry exceeds any budget cannot be
+    loaded (a clear error is raised). Slots are bound to a single link declared at build.
+
+    Parameters
+    ----------
+    n_slots : int
+        Number of resident geometry slots. ``0`` disables the pool entirely (the solver compiles identical,
+        pool-free kernels). Defaults to 0.
+    max_geoms_per_slot : int
+        Maximum number of collision sub-geoms per slot. Convex decomposition of a single mesh can yield several
+        convex pieces, each a geom; this budgets the largest object the pool accepts. Defaults to 1.
+    max_verts_per_slot : int
+        Maximum number of collision vertices per slot (across all its sub-geoms). Defaults to 0.
+    max_faces_per_slot : int
+        Maximum number of collision faces per slot. Defaults to 0.
+    max_edges_per_slot : int
+        Maximum number of collision edges per slot. Defaults to 0.
+    max_cells_per_slot : int
+        Maximum number of SDF grid cells per slot, needed only when pooling nonconvex meshes (which use the
+        SDF narrowphase path). ``0`` means the pool accepts only primitives and convex geometry. Defaults to 0.
+    """
+
+    n_slots: NonNegativeInt = 0
+    max_geoms_per_slot: PositiveInt = 1
+    max_verts_per_slot: NonNegativeInt = 0
+    max_faces_per_slot: NonNegativeInt = 0
+    max_edges_per_slot: NonNegativeInt = 0
+    max_cells_per_slot: NonNegativeInt = 0
+
+
 class RigidOptions(Options):
     """
     Options configuring the RigidSolver.
@@ -523,6 +561,11 @@ class RigidOptions(Options):
     # not use it compile identical, scale-free kernels. Requires batch_links_info for the per-env inertial
     # write; it is auto-enabled when this is set.
     enable_geom_scaling: StrictBool = False
+
+    # Dynamic GPU geometry residency pool (Phase 3). Reserves a build-time block of geometry slots that
+    # entity.set_active_object fills at runtime. None (or n_slots=0) disables it so scenes compile identical,
+    # pool-free kernels. Like heterogeneous variants, it relies on batched links_info (auto-enabled).
+    geom_pool: GeomPoolOptions | None = None
 
     # constraint solver
     constraint_solver: gs.constraint_solver = gs.constraint_solver.Newton

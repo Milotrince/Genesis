@@ -261,6 +261,11 @@ class RigidSolver(KinematicSolver):
         self._requires_grad = self._sim.options.requires_grad
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
         self._enable_geom_scaling = options.enable_geom_scaling  # per-env runtime geom scale (set_scale)
+        # Dynamic geometry residency pool (Phase 3). Enabled only when a pool with slots is requested; the
+        # static layout is built in build() once the real geom counts are known. None keeps the feature off.
+        self._geom_pool_options = options.geom_pool if (options.geom_pool and options.geom_pool.n_slots) else None
+        self._enable_geom_pool = self._geom_pool_options is not None
+        self._geom_pool = None
 
         # Contact islands are off by default (opt in explicitly). The gate further below still disables them under
         # requires_grad (the differentiable adjoint reads the dense global Hessian) and for single-island scenes
@@ -356,13 +361,41 @@ class RigidSolver(KinematicSolver):
         self._geoms = self.geoms
         self._equalities = self.equalities
 
-        self.n_geoms_ = max(1, self.n_geoms)
-        self.n_cells_ = max(1, self.n_cells)
-        self.n_verts_ = max(1, self.n_verts)
-        self.n_faces_ = max(1, self.n_faces)
-        self.n_edges_ = max(1, self.n_edges)
-        self.n_free_verts_ = max(1, self.n_free_verts)
-        self.n_fixed_verts_ = max(1, self.n_fixed_verts)
+        # Reserve a dynamic geometry pool block (Phase 3) appended to the global arrays. The logical _n_*
+        # counts stay at the real entity count (so n_geoms == len(geoms) and Python-side iteration is
+        # unaffected); only the device ALLOCATION sizes (n_*_) grow by the reserved block, giving kernels
+        # (which bound on field .shape[0]) extra rows to hold runtime uploads. Base indices are the first free
+        # row after the real entities. Reserved rows stay zero (inert: a zero quat rotates to a finite point
+        # and contype == conaffinity == 0 yields no collision pairs) until set_active_object fills a slot.
+        pool_geoms = pool_cells = pool_verts = pool_free_verts = pool_faces = pool_edges = 0
+        if self._enable_geom_pool:
+            from .geom_pool import GeometryPool
+
+            self._geom_pool = GeometryPool(
+                self._geom_pool_options,
+                base={
+                    "geom": self._n_geoms,
+                    "vert": self._n_verts,
+                    "face": self._n_faces,
+                    "edge": self._n_edges,
+                    "cell": self._n_cells,
+                    "free_vert": self._n_free_verts,
+                },
+            )
+            pool_geoms = self._geom_pool.n_geoms
+            pool_cells = self._geom_pool.n_cells
+            pool_verts = self._geom_pool.n_verts
+            pool_free_verts = self._geom_pool.n_free_verts
+            pool_faces = self._geom_pool.n_faces
+            pool_edges = self._geom_pool.n_edges
+
+        self.n_geoms_ = max(1, self._n_geoms + pool_geoms)
+        self.n_cells_ = max(1, self._n_cells + pool_cells)
+        self.n_verts_ = max(1, self._n_verts + pool_verts)
+        self.n_faces_ = max(1, self._n_faces + pool_faces)
+        self.n_edges_ = max(1, self._n_edges + pool_edges)
+        self.n_free_verts_ = max(1, self._n_free_verts + pool_free_verts)
+        self.n_fixed_verts_ = max(1, self._n_fixed_verts)
         self.n_candidate_equalities_ = max(1, self.n_equalities + self._options.max_dynamic_constraints)
 
         # Resolve precision-dependent tolerance default
@@ -417,7 +450,9 @@ class RigidSolver(KinematicSolver):
         # in the current batch element. Per-batch lists multiply the memory footprint by the batch size, increasing
         # memory usage, and increasing L1/L2 cache contention. Runtime filtering keeps the single list, but it will
         # no longer be compact, and we will have thread divergence.
-        if gs.backend == gs.cpu or self._use_hibernation or self._enable_heterogeneous:
+        # A dynamic geometry pool binds different slots to different envs at runtime (like heterogeneous
+        # variants), so per-batch geom sets diverge and the single global valid-pair list requires SAP.
+        if gs.backend == gs.cpu or self._use_hibernation or self._enable_heterogeneous or self._enable_geom_pool:
             return gs.broadphase_traversal.SAP
         return gs.broadphase_traversal.ALL_VS_ALL
 
