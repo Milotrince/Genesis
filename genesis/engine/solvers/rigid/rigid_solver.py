@@ -39,6 +39,7 @@ from ..kinematic_solver import (
 )
 from .collider import Collider
 from .constraint import ConstraintSolver
+from .geom_pool_kernels import kernel_update_pool_geoms
 from .abd.misc import (
     func_add_safe_backward,
     func_apply_coupling_force,
@@ -1429,6 +1430,18 @@ class RigidSolver(KinematicSolver):
             self._static_rigid_sim_config,
             force_update_fixed_geoms,
         )
+        # The reserved geometry-pool block lies outside every entity's contiguous geom range, so the
+        # entity-based pass above skips it. Pose those geoms from their owning link (set at upload; link 0 and
+        # inert while a slot is empty). Small extra pass, only when a pool is reserved.
+        if self._enable_geom_pool:
+            kernel_update_pool_geoms(
+                self._n_geoms,
+                self.n_geoms_,
+                self.geoms_state,
+                self.geoms_info,
+                self.links_state,
+                self._static_rigid_sim_config,
+            )
 
     def apply_links_external_force(
         self,
