@@ -261,10 +261,9 @@ class RigidSolver(KinematicSolver):
         self._requires_grad = self._sim.options.requires_grad
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
         self._enable_geom_scaling = options.enable_geom_scaling  # per-env runtime geom scale (set_scale)
-        # Dynamic geometry residency pool (Phase 3). Enabled only when a pool with slots is requested; the
-        # static layout is built in build() once the real geom counts are known. None keeps the feature off.
-        self._geom_pool_options = options.geom_pool if (options.geom_pool and options.geom_pool.n_slots) else None
-        self._enable_geom_pool = self._geom_pool_options is not None
+        # Dynamic geometry residency pool (Phase 3). Declared per-entity via add_entity(geom_pool=...), which
+        # flips _enable_geom_pool; the aggregated static layout is built in build() once real counts are known.
+        self._enable_geom_pool = False
         self._geom_pool = None
 
         # Contact islands are off by default (opt in explicitly). The gate further below still disables them under
@@ -301,12 +300,19 @@ class RigidSolver(KinematicSolver):
     def init_ckpt(self):
         pass
 
-    def add_entity(self, idx, material, morph, surface, visualize_contact, name: str | None = None) -> RigidEntity:
+    def add_entity(
+        self, idx, material, morph, surface, visualize_contact, name: str | None = None, *, geom_pool=None
+    ) -> RigidEntity:
         # Handle heterogeneous morphs (list/tuple of morphs)
         morph_heterogeneous = []
         if isinstance(morph, (tuple, list)):
             morph, *morph_heterogeneous = morph
             self._enable_heterogeneous |= bool(morph_heterogeneous)
+
+        # A per-entity geometry pool (Phase 3) reserves runtime-swappable slots bound to this entity's base
+        # link; enabling it forces the same batched-links_info / SAP path heterogeneous variants use.
+        if geom_pool is not None and geom_pool.n_slots:
+            self._enable_geom_pool = True
 
         if isinstance(morph, gs.morphs.Drone):
             EntityClass = DroneEntity
@@ -341,6 +347,7 @@ class RigidSolver(KinematicSolver):
             custom_vface_start=self.n_custom_vfaces,
             visualize_contact=visualize_contact,
             morph_heterogeneous=morph_heterogeneous,
+            geom_pool=geom_pool if (geom_pool is not None and geom_pool.n_slots) else None,
             name=name,
         )
         assert isinstance(entity, RigidEntity)
@@ -371,8 +378,10 @@ class RigidSolver(KinematicSolver):
         if self._enable_geom_pool:
             from .geom_pool import GeometryPool
 
+            # Aggregate every poolable entity's per-entity pool into one contiguous reserved block, starting at
+            # the first free row in each global array. Each segment's slots are bound to that entity's base
+            # link, so a slot's owning link is known at build (collision-pair validity precomputes cleanly).
             self._geom_pool = GeometryPool(
-                self._geom_pool_options,
                 base={
                     "geom": self._n_geoms,
                     "vert": self._n_verts,
@@ -380,8 +389,15 @@ class RigidSolver(KinematicSolver):
                     "edge": self._n_edges,
                     "cell": self._n_cells,
                     "free_vert": self._n_free_verts,
-                },
+                }
             )
+            for entity in self._entities:
+                if entity._geom_pool_options is not None:
+                    self._geom_pool.add_segment(
+                        entity_idx=entity._idx_in_solver,
+                        link_idx=entity.base_link.idx,
+                        options=entity._geom_pool_options,
+                    )
             pool_geoms = self._geom_pool.n_geoms
             pool_cells = self._geom_pool.n_cells
             pool_verts = self._geom_pool.n_verts

@@ -317,6 +317,7 @@ class Scene(RBC):
         visualize_contact: bool = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
+        geom_pool: "gs.options.GeomPoolOptions | None" = ...,
     ) -> "RigidEntity": ...
 
     @overload
@@ -328,6 +329,7 @@ class Scene(RBC):
         visualize_contact: bool = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
+        geom_pool: "gs.options.GeomPoolOptions | None" = ...,
     ) -> EntityT: ...
 
     @gs.assert_unbuilt
@@ -339,6 +341,7 @@ class Scene(RBC):
         visualize_contact: bool = False,
         vis_mode: str | None = None,
         name: str | None = None,
+        geom_pool: "gs.options.GeomPoolOptions | None" = None,
     ) -> "Entity":
         """
         Add an entity to the scene.
@@ -362,6 +365,11 @@ class Scene(RBC):
         name : str | None, optional
             User-specified name for the entity. If not provided, an auto-generated name will be assigned
             based on the morph type and entity UID (e.g., "box_a1b2c3d4"). Must be unique within the scene.
+        geom_pool : gs.options.GeomPoolOptions | None, optional
+            Reserve a dynamic GPU geometry pool for this entity (rigid, single non-heterogeneous morph only).
+            The pool's slots are bound at build to the entity's base link; ``entity.set_active_object(...)``
+            loads a processed object into a free slot at runtime and rebinds selected environments to it.
+            None disables pooling. Defaults to None.
 
         Returns
         -------
@@ -496,7 +504,13 @@ class Scene(RBC):
                 if morph_variant.decimate is None:
                     morph_variant.decimate = morph_variant.convexify
 
-        entity = self._sim._add_entity(morph, material, surface, visualize_contact, name)
+        if geom_pool is not None:
+            if not isinstance(material, gs.materials.Rigid):
+                gs.raise_exception("`geom_pool` is only supported for Rigid entities.")
+            if is_heterogeneous:
+                gs.raise_exception("`geom_pool` is not supported together with heterogeneous morphs.")
+
+        entity = self._sim._add_entity(morph, material, surface, visualize_contact, name, geom_pool=geom_pool)
 
         return entity
 

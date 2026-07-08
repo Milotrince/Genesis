@@ -90,11 +90,15 @@ class KinematicEntity(Entity):
         custom_vvert_start: int,
         custom_vface_start: int,
         morph_heterogeneous: list[Morph] | None = None,
+        geom_pool=None,
         name: str | None = None,
     ):
         # Set heterogeneous support before super().__init__() because _get_morph_identifier() needs it
         self._morph_heterogeneous = morph_heterogeneous if morph_heterogeneous is not None else []
         self._enable_heterogeneous = bool(self._morph_heterogeneous)
+        # Per-entity dynamic geometry pool request (Phase 3); the solver reserves its slots at build.
+        self._geom_pool_options = geom_pool
+        self._enable_geom_pool = geom_pool is not None
 
         super().__init__(idx, scene, morph, solver, material, surface, name=name)
 
@@ -2382,6 +2386,7 @@ class RigidEntity(KinematicEntity):
         equality_start=0,
         visualize_contact: bool = False,
         morph_heterogeneous: list[Morph] | None = None,
+        geom_pool=None,
         name: str | None = None,
     ):
         self._geom_start = geom_start
@@ -2416,6 +2421,7 @@ class RigidEntity(KinematicEntity):
             custom_vvert_start,
             custom_vface_start,
             morph_heterogeneous,
+            geom_pool,
             name,
         )
 

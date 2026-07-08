@@ -562,11 +562,6 @@ class RigidOptions(Options):
     # write; it is auto-enabled when this is set.
     enable_geom_scaling: StrictBool = False
 
-    # Dynamic GPU geometry residency pool (Phase 3). Reserves a build-time block of geometry slots that
-    # entity.set_active_object fills at runtime. None (or n_slots=0) disables it so scenes compile identical,
-    # pool-free kernels. Like heterogeneous variants, it relies on batched links_info (auto-enabled).
-    geom_pool: GeomPoolOptions | None = None
-
     # constraint solver
     constraint_solver: gs.constraint_solver = gs.constraint_solver.Newton
     iterations: PositiveInt = 50

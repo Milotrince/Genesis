@@ -7818,14 +7818,14 @@ def test_geom_pool_reserved_block_inert(tol):
     """
 
     def build(with_pool):
-        kw = {}
+        pool = None
         if with_pool:
-            kw["geom_pool"] = gs.options.GeomPoolOptions(
+            pool = gs.options.GeomPoolOptions(
                 n_slots=3, max_geoms_per_slot=2, max_verts_per_slot=16, max_faces_per_slot=28, max_edges_per_slot=42
             )
-        scene = gs.Scene(rigid_options=gs.options.RigidOptions(**kw), show_viewer=False)
+        scene = gs.Scene(show_viewer=False)
         scene.add_entity(gs.morphs.Plane())
-        box = scene.add_entity(gs.morphs.Box(size=(0.12, 0.12, 0.12), pos=(0.05, -0.03, 0.4)))
+        box = scene.add_entity(gs.morphs.Box(size=(0.12, 0.12, 0.12), pos=(0.05, -0.03, 0.4)), geom_pool=pool)
         scene.build(n_envs=3)
         for _ in range(60):
             scene.step()

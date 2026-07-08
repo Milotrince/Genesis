@@ -1,18 +1,25 @@
 """Dynamic GPU geometry residency pool (Phase 3).
 
-A ``GeometryPool`` reserves, at build time, a fixed block of uniform geometry slots appended to the solver's
-global geometry/vertex/face/edge/SDF-cell arrays. The block starts empty (its device rows are zero, which is
-inert: a zero quaternion rotates to a finite point and ``contype == conaffinity == 0`` yields no collision
-pairs) and is filled at runtime by ``RigidSolver.set_active_object``, which uploads a processed object into a
-free slot and rebinds environments to it via the same ``_bind_link_variant`` machinery heterogeneous variants
-use.
+A geometry pool reserves, at build time, a fixed block of geometry slots appended to the solver's global
+geometry/vertex/face/edge/SDF-cell arrays. The block starts empty (its device rows are zero, which is inert:
+a zero quaternion rotates every AABB corner to a finite point and ``contype == conaffinity == 0`` yields no
+collision pairs) and is filled at runtime by ``RigidSolver.set_active_object``, which uploads a processed
+object into a free slot and rebinds environments to it via the same ``_bind_link_variant`` machinery
+heterogeneous variants use.
 
-Stage 1 (this file) computes and owns the static slot *layout* -- the contiguous index range each slot
-occupies in every global array. Residency bookkeeping (which object is in which slot, refcounts, LRU
-eviction) is layered on top in Stage 2.
+The pool is declared **per entity** (``scene.add_entity(morph=base, geom_pool=GeomPoolOptions(...))``): each
+poolable entity contributes one ``GeomPoolSegment`` whose slots are bound at build to that entity's base
+link. This makes "which link does a slot serve" known at build (so collision-pair validity precomputes
+cleanly) and keeps pool slots the same per-link geom-range kind as heterogeneous variants. ``GeometryPool``
+aggregates every segment into one contiguous reserved block, because the device fields are single global
+arrays; each segment owns a disjoint sub-range.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+# The global-array keys a slot reserves a uniform per-slot budget in. A slot's free-vertex state budget
+# equals its collision-vertex budget: each collision vertex of a movable pooled geom owns one world state row.
+_ARRAY_KEYS = ("geom", "vert", "face", "edge", "cell", "free_vert")
 
 
 @dataclass(frozen=True)
@@ -27,27 +34,58 @@ class GeomPoolSlotRanges:
     free_vert: tuple[int, int]
 
 
+@dataclass
+class GeomPoolSegment:
+    """One poolable entity's contiguous sub-block of slots, bound to a single link.
+
+    Owns both the static slot *layout* (index ranges) and the runtime residency table (which object occupies
+    each slot, per-slot refcount, and LRU order). Residency is pure host state; the device only ever sees
+    which geom range an environment's link is bound to, exactly as for heterogeneous variants.
+    """
+
+    entity_idx: int
+    link_idx: int
+    n_slots: int
+    per_slot: dict  # array key -> uniform per-slot budget
+    slots: list  # list[GeomPoolSlotRanges], one per slot
+
+    # Residency bookkeeping (Stage 2). A slot is free when resident_key is None.
+    resident_key: list = field(default_factory=list)  # slot -> object key | None
+    refcount: list = field(default_factory=list)  # slot -> #envs currently bound
+    inertial: list = field(default_factory=list)  # slot -> LinkInertial-like of the resident object
+    lru: list = field(default_factory=list)  # slot indices, least-recently-used first
+    key_to_slot: dict = field(default_factory=dict)  # object key -> slot
+
+    def __post_init__(self):
+        self.resident_key = [None] * self.n_slots
+        self.refcount = [0] * self.n_slots
+        self.inertial = [None] * self.n_slots
+        self.lru = list(range(self.n_slots))
+
+    def total(self, key: str) -> int:
+        return self.n_slots * self.per_slot[key]
+
+
 class GeometryPool:
-    """Static layout of a build-time-reserved geometry pool block.
+    """Aggregate of every poolable entity's segment; owns the global reserved-block layout.
 
     Parameters
     ----------
-    options : GeomPoolOptions
-        The per-slot budgets and slot count.
     base : dict[str, int]
-        First reserved index in each global array, keyed ``geom``/``vert``/``face``/``edge``/``cell``/
-        ``free_vert``. Captured by the solver right after the real entities are counted and before the pool
-        block is appended.
+        First free index in each global array after the real entities (where the reserved block begins).
     """
 
-    def __init__(self, options, base: dict[str, int]):
-        self.options = options
-        self.n_slots = int(options.n_slots)
-        self._base = dict(base)
+    def __init__(self, base: dict[str, int]):
+        self._cursor = dict(base)
+        self._segments: list[GeomPoolSegment] = []
+        self._by_entity: dict[int, GeomPoolSegment] = {}
 
-        # Per-slot uniform budgets. A slot's free-vertex state budget equals its collision-vertex budget: each
-        # collision vertex of a movable pooled geom owns exactly one world-space state row.
-        self._per_slot = {
+    def add_segment(self, entity_idx: int, link_idx: int, options) -> GeomPoolSegment:
+        """Reserve a contiguous slot sub-block for one entity's pool and return its segment.
+
+        Segments are appended in call order; each advances the shared cursor so sub-blocks stay disjoint.
+        """
+        per_slot = {
             "geom": int(options.max_geoms_per_slot),
             "vert": int(options.max_verts_per_slot),
             "face": int(options.max_faces_per_slot),
@@ -55,24 +93,34 @@ class GeometryPool:
             "cell": int(options.max_cells_per_slot),
             "free_vert": int(options.max_verts_per_slot),
         }
+        n_slots = int(options.n_slots)
 
-        # Partition the reserved block into slot ranges. Uniform per-slot budgets make this a trivial
-        # contiguous partition, so the runtime free-list is just a stack of slot indices (no fragmentation).
-        self._slots: list[GeomPoolSlotRanges] = []
-        for s in range(self.n_slots):
-            ranges = {
-                key: (self._base[key] + s * width, self._base[key] + (s + 1) * width)
-                for key, width in self._per_slot.items()
-            }
-            self._slots.append(GeomPoolSlotRanges(**ranges))
+        slots = []
+        for _ in range(n_slots):
+            ranges = {}
+            for key in _ARRAY_KEYS:
+                start = self._cursor[key]
+                self._cursor[key] = start + per_slot[key]
+                ranges[key] = (start, self._cursor[key])
+            slots.append(GeomPoolSlotRanges(**ranges))
 
-    # ------------------------------------------------------------------------------------
-    # Total reserved counts (added to the solver's global allocation sizes at build).
-    # ------------------------------------------------------------------------------------
+        segment = GeomPoolSegment(
+            entity_idx=entity_idx, link_idx=link_idx, n_slots=n_slots, per_slot=per_slot, slots=slots
+        )
+        self._segments.append(segment)
+        self._by_entity[entity_idx] = segment
+        return segment
 
+    def segment_for_entity(self, entity_idx: int) -> GeomPoolSegment | None:
+        return self._by_entity.get(entity_idx)
+
+    @property
+    def segments(self) -> list[GeomPoolSegment]:
+        return self._segments
+
+    # Total reserved rows for one array key across every segment (added to the solver's allocation sizes).
     def total(self, key: str) -> int:
-        """Total reserved rows for one array key across all slots."""
-        return self.n_slots * self._per_slot[key]
+        return sum(seg.total(key) for seg in self._segments)
 
     @property
     def n_geoms(self) -> int:
@@ -97,6 +145,3 @@ class GeometryPool:
     @property
     def n_free_verts(self) -> int:
         return self.total("free_vert")
-
-    def slot_ranges(self, slot: int) -> GeomPoolSlotRanges:
-        return self._slots[slot]

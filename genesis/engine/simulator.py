@@ -159,12 +159,14 @@ class Simulator(RBC):
         # sensors
         self._sensor_manager = SensorManager(self)
 
-    def _add_entity(self, morph: Morph, material, surface, visualize_contact=False, name: str | None = None):
+    def _add_entity(
+        self, morph: Morph, material, surface, visualize_contact=False, name: str | None = None, *, geom_pool=None
+    ):
         if isinstance(material, gs.materials.Tool):
             entity = self.tool_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.Rigid):
             entity = self.rigid_solver.add_entity(
-                self.n_entities, material, morph, surface, visualize_contact, name=name
+                self.n_entities, material, morph, surface, visualize_contact, name=name, geom_pool=geom_pool
             )
         elif isinstance(material, gs.materials.Kinematic):
             entity = self.kinematic_solver.add_entity(
