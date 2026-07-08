@@ -7730,6 +7730,84 @@ def test_link_mass_api_heterogeneous(tol):
     assert_allclose(het.get_mass(), m, tol=tol)
 
 
+def test_potential_energy_scaled(tol):
+    """entity.get_potential_energy is per-env aware under scaling; the mass axis aligns with the requested envs."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
+        show_viewer=False,
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 1.0)))
+    scene.build(n_envs=4)
+
+    # Non-uniform scale on envs 0-1 (det(S) = 6); envs 2-3 stay unit. No plane: free fall keeps every env's
+    # COM at the same height, so at a common instant PE is proportional to mass.
+    box.set_scale((2.0, 1.0, 3.0), envs_idx=[0, 1])
+    for _ in range(5):
+        scene.step()
+
+    pe = box.get_potential_energy()
+    assert pe.shape == (4,)
+    assert_allclose(pe[0], pe[1], tol=tol)
+    assert_allclose(pe[2], pe[3], tol=tol)
+    assert_allclose(pe[0] / pe[2], 6.0, tol=tol)
+
+    # envs_idx subset must not crash and must return the matching per-env slice (regression: the per-env mass
+    # axis was previously fetched for all envs, mismatching the sliced links_pos).
+    pe_subset = box.get_potential_energy(envs_idx=[0, 2])
+    assert pe_subset.shape == (2,)
+    assert_allclose(pe_subset, pe[[0, 2]], tol=tol)
+
+
+def test_potential_energy_heterogeneous(tol):
+    """entity.get_potential_energy uses each env's bound-variant mass, including an envs_idx subset."""
+    scene = gs.Scene(show_viewer=False)
+    big, small = 0.04, 0.02
+    het = scene.add_entity(
+        morph=(
+            gs.morphs.Box(size=(big,) * 3, pos=(0.0, 0.0, 1.0)),
+            gs.morphs.Box(size=(small,) * 3, pos=(0.0, 0.0, 1.0)),
+        ),
+    )
+    scene.build(n_envs=4)  # envs 0-1 -> big, envs 2-3 -> small
+    for _ in range(5):
+        scene.step()
+
+    pe = het.get_potential_energy()
+    assert pe.shape == (4,)
+    assert_allclose(pe[0], pe[1], tol=tol)
+    assert_allclose(pe[2], pe[3], tol=tol)
+    # Both variants are centered at the same height, so the PE ratio is the mass ratio (big/small)**3.
+    assert_allclose(pe[0] / pe[2], (big / small) ** 3, tol=tol)
+
+    pe_subset = het.get_potential_energy(envs_idx=[1, 3])
+    assert pe_subset.shape == (2,)
+    assert_allclose(pe_subset, pe[[1, 3]], tol=tol)
+
+
+def test_heterogeneous_aabb_fast_approx(tol):
+    """get_AABB(allow_fast_approx=True) must fall back to the active-masked branch for heterogeneous entities.
+
+    The solver fast path aggregates the full contiguous geom range, which includes variant geoms inactive in a
+    given env; without the fallback, envs bound to the sphere variant would report the box variant's AABB too.
+    """
+    scene = gs.Scene(show_viewer=False)  # default LegacyCoupler enables the fast-approx path
+    scene.add_entity(gs.morphs.Plane())
+    het = scene.add_entity(
+        morph=(
+            gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.1)),
+            gs.morphs.Sphere(radius=0.01, pos=(0.1, 0.0, 0.15)),
+        ),
+    )
+    scene.build(n_envs=4)  # envs 0-1 -> box, envs 2-3 -> sphere
+
+    fast = het.get_AABB(allow_fast_approx=True)
+    accurate = het.get_AABB(allow_fast_approx=False)
+    assert_allclose(fast, accurate, tol=gs.EPS)
+    # The two variants differ, so the box envs and sphere envs must not share an AABB.
+    with pytest.raises(AssertionError):
+        assert_allclose(fast[0], fast[2], tol=1e-3)
+
+
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_geom_scale_visual(tol):
     """Per-env scale is mirrored onto visual geometry: get_vAABB / get_vverts rescale per env."""

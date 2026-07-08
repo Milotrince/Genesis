@@ -3562,8 +3562,10 @@ class RigidEntity(KinematicEntity):
         if self.n_geoms == 0:
             gs.raise_exception("Entity has no collision geometries.")
 
-        # Already computed internally by the solver. Let's access it directly for efficiency.
-        if allow_fast_approx and isinstance(self.sim.coupler, LegacyCoupler):
+        # Already computed internally by the solver. Let's access it directly for efficiency. Not usable for
+        # heterogeneous entities: the solver aggregates the full contiguous geom range, which includes variant
+        # geoms inactive in a given env, over-sizing that env's AABB. Fall through to the active-masked branch.
+        if allow_fast_approx and isinstance(self.sim.coupler, LegacyCoupler) and not self._enable_heterogeneous:
             return self._solver.get_AABB(entities_idx=[self._idx_in_solver], envs_idx=envs_idx)[..., 0, :]
 
         # For heterogeneous entities, compute AABB per-environment respecting active_envs_idx.
@@ -4299,9 +4301,16 @@ class RigidEntity(KinematicEntity):
         """
         gravity = self._solver.get_gravity(envs_idx=envs_idx)  # (3,) or (n_envs, 3)
         links_pos = self.get_links_pos(envs_idx=envs_idx, ref="link_com")  # (..., n_links, 3)
-        # Link masses are static properties (not batched per environment),
-        # so always fetch without envs_idx to avoid indexing conflicts.
-        links_mass = self.get_links_inertial_mass()  # (n_links,)
+        # Link masses are batched per environment for heterogeneous or per-env-scaled entities (the runtime
+        # inertial differs per env); otherwise they are a static per-link vector. When batched, fetch all envs
+        # (the solver forbids envs_idx for batched links) and index down to the requested envs so the mass axis
+        # aligns with links_pos.
+        if (self._enable_heterogeneous or self._solver._enable_geom_scaling) and self._solver.n_envs > 0:
+            links_mass = self.get_links_inertial_mass()  # (n_envs, n_links)
+            if envs_idx is not None:
+                links_mass = links_mass[self._scene._sanitize_envs_idx(envs_idx)]
+        else:
+            links_mass = self.get_links_inertial_mass()  # (n_links,)
 
         # PE_i = m_i * g^T * p_i => PE = sum_i(m_i * (g . p_i))
         # g is (..., 3), links_pos is (..., n_links, 3) -> broadcast g to (..., 1, 3)
