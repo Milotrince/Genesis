@@ -8102,6 +8102,38 @@ def test_set_active_object_nonconvex(tol):
     assert_allclose(z[1], 0.05, tol=5e-3)  # env 1 base box unchanged
 
 
+def test_set_active_object_visual(tol):
+    """With visual pooling (max_vgeoms_per_slot), a pooled object renders its own shape per environment.
+
+    get_vAABB is the backend-agnostic proxy: the pooled object's placeholder vgeom is visible only in the
+    bound envs (its trimesh + per-env link pose), and the base morph's visual is hidden there, so env 0's
+    visual bounds match the swapped object while env 1 keeps the base box.
+    """
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    pool = gs.options.GeomPoolOptions(
+        n_slots=2,
+        max_geoms_per_slot=1,
+        max_verts_per_slot=8,
+        max_faces_per_slot=12,
+        max_edges_per_slot=18,
+        max_vgeoms_per_slot=1,
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=pool)
+    scene.build(n_envs=2)
+    scene.step()
+
+    base_ext = torch.diff(box.get_vAABB(), dim=-2)[:, 0]  # (n_envs, 3)
+    assert_allclose(base_ext[0], 0.1, tol=tol)
+    assert_allclose(base_ext[1], 0.1, tol=tol)
+
+    box.set_active_object(gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.3)), envs_idx=[0])
+    scene.step()
+    ext = torch.diff(box.get_vAABB(), dim=-2)[:, 0]
+    assert_allclose(ext[0], 0.2, tol=tol)  # env 0 renders the pooled 2x box
+    assert_allclose(ext[1], 0.1, tol=tol)  # env 1 still renders the base box
+
+
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_geom_scale_visual(tol):
     """Per-env scale is mirrored onto visual geometry: get_vAABB / get_vverts rescale per env."""

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Literal
 import quadrants as qd
 import numpy as np
 import torch
+import trimesh
 
 import genesis as gs
 import genesis.utils.array_class as array_class
@@ -1501,6 +1502,13 @@ class RigidSolver(KinematicSolver):
             if seg.per_slot["vgeom"] == 0:
                 continue
             base_link = seg.entity.base_link
+            # Make the entity's base (morph) vgeoms maskable so they can be hidden per env once a pooled object
+            # is shown there. An all-True mask renders everywhere (visible) but via per-env nodes on_rigid can
+            # later cull; without a mask on_rigid would build an env-shared node that cannot be hidden per env.
+            for base_vgeom in seg.entity.vgeoms:
+                if base_vgeom.active_envs_mask is None:
+                    base_vgeom.active_envs_mask = torch.ones(self._B, dtype=torch.bool, device=gs.device)
+                    (base_vgeom.active_envs_idx,) = np.where(tensor_to_array(base_vgeom.active_envs_mask))
             for slot in range(seg.n_slots):
                 vgeom_range = seg.slots[slot].vgeom
                 # One placeholder per slot (the object's merged visual mesh); extra reserved vgeom rows stay
@@ -1508,6 +1516,7 @@ class RigidSolver(KinematicSolver):
                 placeholder = RigidVisGeom(
                     base_link, vgeom_range[0], 0, 0, placeholder_mesh, gu.zero_pos(), gu.identity_quat()
                 )
+                placeholder._is_pool_slot = True
                 placeholder.active_envs_mask = torch.zeros(self._B, dtype=torch.bool, device=gs.device)
                 placeholder.active_envs_idx = np.zeros(0, dtype=gs.np_int)
                 seg.vgeom_placeholders[slot] = placeholder
@@ -2726,6 +2735,7 @@ class RigidSolver(KinematicSolver):
         # Bind the selected envs to the slot's geom range + inertial (reuse the heterogeneous rebind kernel),
         # then refresh inertia-derived quantities and reset caches exactly like set_active_variant.
         self._pool_bind_slot(entity, segment, slot, envs_idx_np)
+        self._pool_bind_visual(entity, segment, slot, envs_idx_np)
 
         if self._n_dofs > 0:
             restore_envs = envs_idx if self.n_envs > 0 else None
@@ -2796,7 +2806,9 @@ class RigidSolver(KinematicSolver):
             g_infos = entity._load_primitive(object_ref, entity._surface, load_geom_only_for_heterogeneous=True)
         else:
             gs.raise_exception("set_active_object only supports gs.morphs.Mesh and gs.morphs.Primitive objects.")
-        cg_infos, _vg_infos = entity._postprocess_geoms_info(object_ref, g_infos, is_robot=False)
+        cg_infos, vg_infos = entity._postprocess_geoms_info(object_ref, g_infos, is_robot=False)
+        if segment.per_slot["vgeom"] > 0:
+            self._pool_set_slot_visual(segment, slot, vg_infos)
 
         ranges = segment.slots[slot]
         base_link = entity.base_link
@@ -2867,6 +2879,42 @@ class RigidSolver(KinematicSolver):
             np.asarray(inertia, dtype=gs.np_float),
         )
         return inertial, len(geoms)
+
+    def _pool_set_slot_visual(self, segment, slot, vg_infos):
+        """Set a slot's placeholder visual mesh from an uploaded object's visual geoms (merged into one mesh).
+
+        The placeholder holds the host trimesh only; rigid rendering + get_vAABB use it plus the per-env device
+        vgeom pose, so no device vvert upload is needed. Flags the placeholder for the rasterizer to re-mesh.
+        """
+        placeholder = segment.vgeom_placeholders[slot]
+        if placeholder is None or not vg_infos:
+            return
+        vmeshes = [vg["vmesh"] for vg in vg_infos]
+        if len(vmeshes) == 1:
+            vmesh = vmeshes[0]
+        else:
+            vmesh = gs.Mesh.from_trimesh(
+                trimesh.util.concatenate([vm.trimesh for vm in vmeshes]), surface=vmeshes[0].surface
+            )
+        placeholder.set_pool_mesh(vmesh)
+
+    def _pool_bind_visual(self, entity, segment, slot, envs_idx_np):
+        """Per-env visual switch: in the given envs, show slot `slot`'s placeholder and hide the entity's base
+        morph visuals plus the other slots' placeholders."""
+        if segment.per_slot["vgeom"] == 0:
+            return
+        envs = torch.as_tensor(envs_idx_np, device=gs.device)
+        placeholder_ids = {id(ph) for ph in segment.vgeom_placeholders if ph is not None}
+        for vgeom in entity.vgeoms:
+            if id(vgeom) in placeholder_ids or vgeom.active_envs_mask is None:
+                continue
+            vgeom.active_envs_mask[envs] = False  # hide the base morph visual where a pooled object is shown
+            (vgeom.active_envs_idx,) = np.where(tensor_to_array(vgeom.active_envs_mask))
+        for other_slot, placeholder in enumerate(segment.vgeom_placeholders):
+            if placeholder is None:
+                continue
+            placeholder.active_envs_mask[envs] = other_slot == slot
+            (placeholder.active_envs_idx,) = np.where(tensor_to_array(placeholder.active_envs_mask))
 
     def _pool_rho(self, entity):
         """Material density for a pooled object, resolved exactly as RigidLink._build does for a variant."""

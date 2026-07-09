@@ -862,8 +862,26 @@ class RigidVisGeom(RBC):
         self._metadata = vmesh.metadata
         self._color = vmesh._color
 
+        # Geometry-pool visual slot (Phase 3): a placeholder vgeom whose mesh is swapped at runtime by
+        # set_active_object. `_pool_render_dirty` flags the rasterizer to (re)create its render node.
+        self._is_pool_slot = False
+        self._pool_render_dirty = False
+
     def _build(self):
         pass
+
+    def set_pool_mesh(self, vmesh):
+        """Swap this pool-slot placeholder's visual mesh (runtime), flagging the renderer to re-mesh its node."""
+        self._vmesh = vmesh
+        self._init_vverts = vmesh.verts
+        self._init_vfaces = vmesh.faces
+        self._init_vnormals = vmesh.normals
+        self._uvs = vmesh.uvs
+        self._surface = vmesh.surface
+        self._metadata = vmesh.metadata
+        self._color = vmesh._color
+        self._aabb_verts = None  # rebuilt lazily from the new mesh
+        self._pool_render_dirty = True
 
     def get_trimesh(self):
         """

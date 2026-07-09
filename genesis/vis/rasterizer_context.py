@@ -440,8 +440,11 @@ class RasterizerContext:
                     # A heterogeneous variant is present in only a subset of environments. Render its full per-env pose
                     # set with a per-env visibility mask, so the per-env draw places the variant in its own environment
                     # instead of collapsing the subset of poses onto the wrong environments.
+                    # Build a per-env visibility mask whenever the geom carries an active-env mask (a subset now,
+                    # or all envs but maskable later, e.g. a geometry-pool entity's base vgeoms hidden per env
+                    # once a pooled object is shown), so the node can be culled per env; else a shared instance.
                     active_envs = None
-                    if len(geom_envs_idx) < len(self.rendered_envs_idx):
+                    if geom.active_envs_mask is not None or len(geom_envs_idx) < len(self.rendered_envs_idx):
                         geom_T = geoms_T[geom.idx][self.rendered_envs_idx]
                         active_envs = np.isin(self.rendered_envs_idx, geom_envs_idx)
                     else:
@@ -556,6 +559,27 @@ class RasterizerContext:
                     geoms_T = solver._geoms_render_T
 
                 for geom in geoms:
+                    # Geometry-pool visual slots start as empty placeholders (no node at build). When
+                    # set_active_object swaps in a new object mesh, (re)create the node with that mesh, mirroring
+                    # the custom-vvert pop/re-add. Gated on visual mode so collision geoms are never inspected.
+                    if entity.surface.vis_mode == "visual" and geom._is_pool_slot and geom._pool_render_dirty:
+                        geom._pool_render_dirty = False
+                        old_node = self.rigid_nodes.pop(geom.uid, None)
+                        if old_node is not None:
+                            self.remove_node_seg(old_node)
+                            self.remove_node(old_node)
+                        geom_envs_idx = self._get_geom_active_envs_idx(geom, self.rendered_envs_idx)
+                        if len(geom_envs_idx) > 0:
+                            mesh_node = pyrender.Mesh.from_trimesh(
+                                mesh=geom.get_trimesh(),
+                                poses=geoms_T[geom.idx][self.rendered_envs_idx],
+                                smooth=geom.surface.smooth,
+                                double_sided=geom.surface.double_sided,
+                                active_envs=np.isin(self.rendered_envs_idx, geom_envs_idx),
+                            )
+                            self.add_rigid_node(geom, mesh_node)
+                        continue
+
                     # Skip geoms that weren't added - in heterogeneous simulation, some geoms
                     # may not be rendered in any of the requested environments
                     if geom.uid not in self.rigid_nodes:

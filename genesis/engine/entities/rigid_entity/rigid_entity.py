@@ -1797,8 +1797,10 @@ class KinematicEntity(Entity):
         if self.n_vgeoms == 0:
             gs.raise_exception("Entity has no visual geometries.")
 
-        # For heterogeneous entities, compute AABB per-environment respecting active_envs_idx
-        if self._enable_heterogeneous:
+        # For heterogeneous or geometry-pool entities, compute the AABB per environment respecting each
+        # vgeom's active_envs_mask (pool placeholders are visible only in the envs bound to their slot, and the
+        # base morph vgeoms are hidden in envs showing a pooled object).
+        if self._enable_heterogeneous or self._enable_geom_pool:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
             n_envs = len(envs_idx)
             aabb_min = torch.full((n_envs, 3), float("inf"), dtype=gs.tc_float, device=gs.device)
