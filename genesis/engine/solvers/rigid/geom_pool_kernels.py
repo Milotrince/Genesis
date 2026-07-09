@@ -247,3 +247,46 @@ def kernel_update_pool_geoms(
             upper = qd.max(upper, corner_pos)
         geoms_state.aabb_min[i_g, i_b] = lower
         geoms_state.aabb_max[i_g, i_b] = upper
+
+
+@qd.kernel(fastcache=True)
+def kernel_upload_sdf_slot(
+    cell_base: qd.i32,
+    geoms_idx: qd.types.ndarray(),  # absolute geom index of each SDF-carrying sub-geom
+    geoms_T_mesh_to_sdf: qd.types.ndarray(),
+    geoms_sdf_res: qd.types.ndarray(),
+    geoms_sdf_cell_start: qd.types.ndarray(),  # absolute per sub-geom
+    geoms_sdf_max: qd.types.ndarray(),
+    geoms_sdf_cell_size: qd.types.ndarray(),
+    geoms_sdf_val: qd.types.ndarray(),  # flat, concatenated across the SDF-carrying sub-geoms
+    geoms_sdf_grad: qd.types.ndarray(),
+    geoms_sdf_closest_vert: qd.types.ndarray(),  # raw local vertex indices (consumer adds vert_start)
+    static_rigid_sim_config: qd.template(),
+    sdf_info: array_class.SDFInfo,
+):
+    """Upload one object's SDF grids into a slot's reserved cell range (mirror sdf_kernel_init_geom_fields).
+
+    Per sub-geom rows go to their absolute ``geoms_idx[i]`` (nonconvex sub-geoms need not be contiguous);
+    per-cell rows go to ``cell_base + i`` with the flat cell arrays concatenated in the same sub-geom order as
+    ``geoms_sdf_cell_start`` (absolute, cumulative). The runtime ravel (sdf_cell_start[geom] + local offset)
+    then lands in the slot's cells. closest_vert stays local; the consumer adds geoms_info.vert_start[geom].
+    """
+    n_geoms = geoms_sdf_res.shape[0]
+    n_cells = geoms_sdf_val.shape[0]
+
+    for i in range(n_geoms):
+        i_g = geoms_idx[i]
+        for j, k in qd.static(qd.ndrange(4, 4)):
+            sdf_info.geoms_info.T_mesh_to_sdf[i_g][j, k] = geoms_T_mesh_to_sdf[i, j, k]
+        for j in qd.static(range(3)):
+            sdf_info.geoms_info.sdf_res[i_g][j] = geoms_sdf_res[i, j]
+            sdf_info.geoms_info.sdf_cell_size[i_g][j] = geoms_sdf_cell_size[i, j]
+        sdf_info.geoms_info.sdf_cell_start[i_g] = geoms_sdf_cell_start[i]
+        sdf_info.geoms_info.sdf_max[i_g] = geoms_sdf_max[i]
+
+    for i in range(n_cells):
+        c = cell_base + i
+        sdf_info.geoms_sdf_val[c] = geoms_sdf_val[i]
+        sdf_info.geoms_sdf_closest_vert[c] = geoms_sdf_closest_vert[i]
+        for j in qd.static(range(3)):
+            sdf_info.geoms_sdf_grad[c][j] = geoms_sdf_grad[i, j]

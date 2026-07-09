@@ -7906,6 +7906,46 @@ def test_set_active_object_requires_pool():
         box.set_active_object(gs.morphs.Box(size=(0.2, 0.2, 0.2)))
 
 
+def test_set_active_object_nonconvex(tol):
+    """set_active_object uploads a nonconvex mesh (SDF grid) into a pool slot and it collides correctly.
+
+    A nonconvex duck is loaded at runtime into env 0's slot; its SDF grid is uploaded into the slot's reserved
+    cell range and the vertex-vs-SDF narrowphase must let it rest on the plane (finite, no tunnelling), while
+    env 1 keeps the base box.
+    """
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    # Budgets sized for the duck mesh (n_verts~502, n_faces~1000, n_edges~1500, sdf cells ~65*67*97).
+    pool = gs.options.GeomPoolOptions(
+        n_slots=1,
+        max_geoms_per_slot=1,
+        max_verts_per_slot=600,
+        max_faces_per_slot=1100,
+        max_edges_per_slot=1600,
+        max_cells_per_slot=430000,
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=pool)
+    scene.build(n_envs=2)
+    scene.step()
+
+    duck = gs.morphs.Mesh(file="meshes/duck.obj", scale=0.1, pos=(0.0, 0.0, 0.3), convexify=False)
+    box.set_active_object(duck, envs_idx=[0])
+    box.set_pos(np.array([[0.0, 0.0, 0.3], [0.0, 0.0, 0.3]]), zero_velocity=True)
+
+    # Per-env mass reflects the swap (duck != base box).
+    mass = box.get_mass()
+    assert mass.shape == (2,)
+    with pytest.raises(AssertionError):
+        assert_allclose(mass[0], mass[1], tol=1e-2)
+
+    for _ in range(300):
+        scene.step()
+    z = box.get_pos()[:, 2]
+    assert torch.isfinite(z).all()
+    assert z[0] > 0.0  # duck rests on the plane (nonconvex SDF collision), no tunnelling
+    assert_allclose(z[1], 0.05, tol=5e-3)  # env 1 base box unchanged
+
+
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_geom_scale_visual(tol):
     """Per-env scale is mirrored onto visual geometry: get_vAABB / get_vverts rescale per env."""

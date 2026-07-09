@@ -43,6 +43,7 @@ from .geom_pool_kernels import (
     kernel_init_pool_geom_defaults,
     kernel_update_pool_geoms,
     kernel_upload_geom_slot,
+    kernel_upload_sdf_slot,
     kernel_upload_vert_slot,
 )
 from .abd.misc import (
@@ -2706,12 +2707,12 @@ class RigidSolver(KinematicSolver):
         # (vert/face/edge/normal extraction, data padding, center of mass); they are not appended to the link.
         # Cursors advance within the slot's reserved ranges; a geom's vertex-state rows track its vertex rows.
         geoms, geoms_inertial = [], []
-        vert_cur, face_cur, edge_cur = ranges.vert[0], ranges.face[0], ranges.edge[0]
+        vert_cur, face_cur, edge_cur, cell_cur = ranges.vert[0], ranges.face[0], ranges.edge[0], ranges.cell[0]
         for i, g_info in enumerate(cg_infos):
             geom = RigidGeom(
                 link=base_link,
                 idx=ranges.geom[0] + i,
-                cell_start=ranges.cell[0],
+                cell_start=cell_cur,
                 vert_start=vert_cur,
                 face_start=face_cur,
                 edge_start=edge_cur,
@@ -2727,11 +2728,6 @@ class RigidSolver(KinematicSolver):
                 conaffinity=conaffinity,
                 data=g_info.get("data"),
             )
-            if not geom.is_convex:
-                gs.raise_exception(
-                    "set_active_object currently supports only primitive and convex geometry; nonconvex meshes "
-                    "(SDF upload) are not yet implemented."
-                )
             geoms.append(geom)
             geoms_inertial.append(
                 GeomInertialInfo(
@@ -2741,6 +2737,10 @@ class RigidSolver(KinematicSolver):
             vert_cur += geom.n_verts
             face_cur += geom.n_faces
             edge_cur += geom.n_edges
+            # Only nonconvex geoms use the SDF narrowphase, so only they consume reserved cells (convex and
+            # primitives use analytic/MPR support). Advance the cell cursor solely for them.
+            if not geom.is_convex:
+                cell_cur += geom.n_cells
 
         # Validate the object fits the slot's uniform budgets (a static reservation cannot grow).
         for name, cur, rng in (
@@ -2748,6 +2748,7 @@ class RigidSolver(KinematicSolver):
             ("vert", vert_cur, ranges.vert),
             ("face", face_cur, ranges.face),
             ("edge", edge_cur, ranges.edge),
+            ("cell", cell_cur, ranges.cell),
         ):
             used, budget = cur - rng[0], rng[1] - rng[0]
             if used > budget:
@@ -2853,6 +2854,28 @@ class RigidSolver(KinematicSolver):
             self.geoms_init_AABB,
             self._static_rigid_sim_config,
         )
+
+        # Nonconvex sub-geoms collide via the vertex-vs-SDF narrowphase, so upload their baked SDF grids into
+        # the slot's reserved cell range (convex/primitive geoms use analytic/MPR support and need no grid).
+        sdf_geoms = [g for g in geoms if not g.is_convex]
+        if sdf_geoms:
+            kernel_upload_sdf_slot(
+                sdf_geoms[0].cell_start,
+                np.array([g.idx for g in sdf_geoms], dtype=gs.np_int),
+                np.array([g.T_mesh_to_sdf for g in sdf_geoms], dtype=gs.np_float),
+                np.array([g.sdf_res for g in sdf_geoms], dtype=gs.np_int),
+                np.array([g.cell_start for g in sdf_geoms], dtype=gs.np_int),
+                np.array([g.sdf_max for g in sdf_geoms], dtype=gs.np_float),
+                np.array(
+                    [np.broadcast_to(np.asarray(g.sdf_cell_size, dtype=gs.np_float), (3,)) for g in sdf_geoms],
+                    dtype=gs.np_float,
+                ),
+                np.concatenate([g.sdf_val_flattened for g in sdf_geoms], dtype=gs.np_float),
+                np.concatenate([g.sdf_grad_flattened for g in sdf_geoms], dtype=gs.np_float),
+                np.concatenate([g.sdf_closest_vert_flattened for g in sdf_geoms], dtype=gs.np_int),
+                self._static_rigid_sim_config,
+                self.collider._sdf._sdf_info,
+            )
 
     def _pool_bind_slot(self, entity, segment, slot, envs_idx_np):
         """Point each selected env's base link at the slot's live geom range + inertial (device rebind)."""
