@@ -96,6 +96,10 @@ class KinematicEntity(Entity):
         # Set heterogeneous support before super().__init__() because _get_morph_identifier() needs it
         self._morph_heterogeneous = morph_heterogeneous if morph_heterogeneous is not None else []
         self._enable_heterogeneous = bool(self._morph_heterogeneous)
+        # Per-variant parsed joint infos (primary + each variant), captured only for heterogeneous entities so
+        # per-env kinematic topology (joint type + DOF mapping) can be rebound per environment. None otherwise.
+        self._primary_links_j_infos = None
+        self._variant_links_j_infos = None
         # Per-entity dynamic geometry pool request (Phase 3); the solver reserves its slots at build.
         self._geom_pool_options = geom_pool
         self._enable_geom_pool = geom_pool is not None
@@ -195,6 +199,9 @@ class KinematicEntity(Entity):
         self._variant_init_qpos = [self.init_qpos]
         self._variant_offset_pos = [self._offset_pos]
         self._variant_offset_quat = [self._offset_quat]
+        # Per-variant parsed per-link joint infos, variant 0 = primary (captured in _load_scene). Basic-object
+        # (Mesh/Primitive) variants carry no joint structure, so they record None (a single free/fixed base).
+        self._variant_links_j_infos = [self._primary_links_j_infos]
 
         n_links = len(self._links)
 
@@ -204,6 +211,7 @@ class KinematicEntity(Entity):
                 # Parse variant scene file
                 morph._enable_mujoco_compatibility = self._morph._enable_mujoco_compatibility
                 v_l_infos, v_links_j_infos, v_links_g_infos, _ = self._parse_scene(morph, self._surface)
+                self._variant_links_j_infos.append(v_links_j_infos)
 
                 # Validate that the variant has the same joint structure as the primary
                 if len(v_l_infos) != n_links:
@@ -301,6 +309,8 @@ class KinematicEntity(Entity):
                 offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
 
                 self._add_heterogeneous_variant(self._links[0], cg_infos, vg_infos)
+                # Mesh/Primitive variants have no explicit joint structure (single fixed/free base).
+                self._variant_links_j_infos.append(None)
                 # Mesh/Primitive variants have no explicit inertial; the anchor inertia comes from their geometry.
                 self._align_inertials[0].append(self._finalize_inertial(None, None, None, None, cg_infos))
 
@@ -2537,6 +2547,12 @@ class RigidEntity(KinematicEntity):
         from genesis.engine.couplers import IPCCoupler
 
         l_infos, links_j_infos, links_g_infos, eqs_info = self._parse_scene(morph, surface)
+
+        # For a heterogeneous entity the first (primary) morph defines the skeleton slots; keep its parsed
+        # per-link joint infos so per-env topology (joint type + DOF mapping) can be rebound for variant 0
+        # alongside the other variants (recorded in _load_heterogeneous_morphs). Non-heterogeneous stays None.
+        if self._enable_heterogeneous and self._primary_links_j_infos is None:
+            self._primary_links_j_infos = links_j_infos
 
         # Make sure that the entity is not object
         if (

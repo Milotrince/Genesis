@@ -59,17 +59,51 @@ def main():
     # keys stay stable. (Convex decomposition of a pooled mesh is not used here: its many small pieces yield an
     # ill-conditioned composed inertial - a known pool limitation.)
     objects = [
-        gs.morphs.Box(size=(0.18, 0.18, 0.18), pos=SPAWN_POS),
-        gs.morphs.Sphere(radius=0.1, pos=SPAWN_POS),
-        gs.morphs.Cylinder(radius=0.08, height=0.2, pos=SPAWN_POS),
-        gs.morphs.Mesh(file="meshes/duck.obj", scale=0.05, pos=SPAWN_POS, convexify=False, decimate=True),
-        gs.morphs.Mesh(file="meshes/bunny.obj", scale=0.2, pos=SPAWN_POS, convexify=False, decimate=True),
-        gs.morphs.Mesh(file="meshes/dragon.obj", scale=0.2, pos=SPAWN_POS, convexify=False, decimate=True),
+        gs.morphs.Box(
+            size=(0.18, 0.18, 0.18),
+            pos=SPAWN_POS,
+        ),
+        gs.morphs.Sphere(
+            radius=0.1,
+            pos=SPAWN_POS,
+        ),
+        gs.morphs.Cylinder(
+            radius=0.08,
+            height=0.2,
+            pos=SPAWN_POS,
+        ),
+        gs.morphs.Mesh(
+            file="meshes/duck.obj",
+            scale=0.05,
+            pos=SPAWN_POS,
+            convexify=False,
+            decimate=True,
+        ),
+        gs.morphs.Mesh(
+            file="meshes/bunny.obj",
+            scale=0.2,
+            pos=SPAWN_POS,
+            convexify=False,
+            decimate=True,
+        ),
+        gs.morphs.Mesh(
+            file="meshes/dragon.obj",
+            scale=0.2,
+            pos=SPAWN_POS,
+            convexify=False,
+            decimate=True,
+        ),
     ]
     # Passing the catalog as the geometry pool auto-sizes it: the per-slot budgets and slot count are derived
     # by processing each object once at build (each object's geometry is cached for a fast set_active_object).
     obj = scene.add_entity(
-        gs.morphs.Box(size=(0.15, 0.15, 0.15), pos=SPAWN_POS),
+        gs.morphs.Box(
+            size=(0.15, 0.15, 0.15),
+            pos=SPAWN_POS,
+        ),
+        surface=gs.surfaces.Default(
+            color=(1.0, 1.0, 1.0, 1.0),
+        ),
         geom_pool=objects,
     )
 
