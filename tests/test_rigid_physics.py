@@ -7880,6 +7880,11 @@ def test_set_active_object_runtime_bind(tol):
     assert_allclose(mass[0], base_mass[0] * 8.0, tol=tol)
     assert_allclose(mass[1], base_mass[1], tol=tol)
 
+    # get_AABB is pool-aware: env 0's extent is the 2x box, env 1's the base box.
+    ext = torch.diff(box.get_AABB(), dim=-2)[:, 0]  # (n_envs, 3)
+    assert_allclose(ext[0], 0.2, tol=tol)
+    assert_allclose(ext[1], 0.1, tol=tol)
+
     # Binding the same object again reuses its slot (no second upload).
     segment = scene.rigid_solver._geom_pool.segment_for_entity(box._idx_in_solver)
     assert len(segment.key_to_slot) == 1

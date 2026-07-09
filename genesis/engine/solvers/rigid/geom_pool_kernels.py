@@ -250,6 +250,36 @@ def kernel_update_pool_geoms(
 
 
 @qd.kernel(fastcache=True)
+def kernel_entity_aabb_per_env(
+    link_start: qd.i32,
+    link_end: qd.i32,
+    envs_idx: qd.types.ndarray(),
+    links_info: array_class.LinksInfo,
+    geoms_state: array_class.GeomsState,
+    aabb_out: qd.types.ndarray(),  # (n_sel_envs, 2, 3): [:, 0]=min, [:, 1]=max
+    static_rigid_sim_config: qd.template(),
+):
+    """Per-env AABB of an entity over the geoms ACTIVE in each env (its links' per-env geom ranges).
+
+    Mirrors the broadphase sweep (broadphase.py): a pool/heterogeneous entity's active geoms per env live in
+    ``links_info.geom_start/end[link, env]``, not in the entity's contiguous range, so reduce the device
+    ``geoms_state.aabb_min/max`` over those ranges.
+    """
+    for e in range(envs_idx.shape[0]):
+        i_b = envs_idx[e]
+        lower = gu.qd_vec3(qd.math.inf)
+        upper = gu.qd_vec3(-qd.math.inf)
+        for i_l in range(link_start, link_end):
+            I_l = [i_l, i_b] if qd.static(static_rigid_sim_config.batch_links_info) else i_l
+            for i_g in range(links_info.geom_start[I_l], links_info.geom_end[I_l]):
+                lower = qd.min(lower, geoms_state.aabb_min[i_g, i_b])
+                upper = qd.max(upper, geoms_state.aabb_max[i_g, i_b])
+        for j in qd.static(range(3)):
+            aabb_out[e, 0, j] = lower[j]
+            aabb_out[e, 1, j] = upper[j]
+
+
+@qd.kernel(fastcache=True)
 def kernel_upload_sdf_slot(
     cell_base: qd.i32,
     geoms_idx: qd.types.ndarray(),  # absolute geom index of each SDF-carrying sub-geom

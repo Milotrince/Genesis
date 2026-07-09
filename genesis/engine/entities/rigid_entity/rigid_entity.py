@@ -3585,8 +3585,19 @@ class RigidEntity(KinematicEntity):
         # Already computed internally by the solver. Let's access it directly for efficiency. Not usable for
         # heterogeneous entities: the solver aggregates the full contiguous geom range, which includes variant
         # geoms inactive in a given env, over-sizing that env's AABB. Fall through to the active-masked branch.
-        if allow_fast_approx and isinstance(self.sim.coupler, LegacyCoupler) and not self._enable_heterogeneous:
+        if (
+            allow_fast_approx
+            and isinstance(self.sim.coupler, LegacyCoupler)
+            and not self._enable_heterogeneous
+            and not self._enable_geom_pool
+        ):
             return self._solver.get_AABB(entities_idx=[self._idx_in_solver], envs_idx=envs_idx)[..., 0, :]
+
+        # For a geometry-pool entity, the per-env active geoms live in the reserved pool block (bound via
+        # links_info per env), not in the entity's contiguous range and not as RigidGeom objects. Reduce the
+        # device per-env AABBs over each env's link geom ranges.
+        if self._enable_geom_pool and self._solver.n_envs > 0:
+            return self._solver.get_entity_aabb_per_env(self, envs_idx)
 
         # For heterogeneous entities, compute AABB per-environment respecting active_envs_idx.
         # FIXME: Remove this branch after implementing 'get_verts'.
@@ -3775,6 +3786,11 @@ class RigidEntity(KinematicEntity):
         """
         if self._enable_heterogeneous:
             gs.raise_exception("This method is not supported by heterogeneous entities.")
+        if self._enable_geom_pool:
+            gs.raise_exception(
+                "get_verts is not supported for geometry-pool entities (the active geometry is per-env); "
+                "use get_AABB for per-env bounds."
+            )
 
         self._solver.update_verts_for_geoms(slice(self.geom_start, self.geom_end))
 

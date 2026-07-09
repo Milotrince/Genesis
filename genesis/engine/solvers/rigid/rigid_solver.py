@@ -40,6 +40,7 @@ from ..kinematic_solver import (
 from .collider import Collider
 from .constraint import ConstraintSolver
 from .geom_pool_kernels import (
+    kernel_entity_aabb_per_env,
     kernel_init_pool_geom_defaults,
     kernel_update_pool_geoms,
     kernel_upload_geom_slot,
@@ -1452,6 +1453,26 @@ class RigidSolver(KinematicSolver):
         # entity-based pass above skips it. Pose those geoms from their owning link (set at upload; link 0 and
         # inert while a slot is empty). Small extra pass, only when a pool is reserved.
         self._func_update_pool_geoms()
+
+    def get_entity_aabb_per_env(self, entity, envs_idx=None):
+        """Per-env AABB of a geometry-pool entity, reduced over the geoms active in each env.
+
+        The entity's per-env active geoms live in `links_info.geom_start/end` (the bound pool slot for its base
+        link, static ranges for any other link), so aggregate the device `geoms_state.aabb_min/max` over those
+        ranges rather than the entity's contiguous build-time range.
+        """
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        aabb = torch.empty((len(envs_idx), 2, 3), dtype=gs.tc_float, device=gs.device)
+        kernel_entity_aabb_per_env(
+            entity._link_start,
+            entity._link_start + entity.n_links,
+            tensor_to_array(envs_idx),
+            self.links_info,
+            self.geoms_state,
+            aabb,
+            self._static_rigid_sim_config,
+        )
+        return aabb
 
     def _func_update_pool_geoms(self):
         """Pose the reserved geometry-pool block from its links and refresh its AABBs (no-op without a pool)."""
