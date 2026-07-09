@@ -74,10 +74,13 @@ def main():
     )
 
     # Drag objects around with the mouse (left-click and drag) to probe the swapped-in collision geometry.
+    # Position mode (use_force=False) moves the grabbed link kinematically. Force mode is avoided here: its
+    # spring uses the link's base inertia, which is wrong for a pooled object (whose real per-env inertia lives
+    # only on the device), so light or scaled objects overshoot into instability.
     scene.viewer.add_plugin(
         gs.vis.viewer_plugins.MouseInteractionPlugin(
             color=(0.1, 0.6, 0.8, 0.6),
-            use_force=True,
+            use_force=False,
         ),
     )
 
