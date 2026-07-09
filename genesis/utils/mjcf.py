@@ -98,7 +98,11 @@ def build_model(xml, discard_visual, default_armature=None, merge_fixed_links=Fa
                 include_path = parent_path / elem.attrib["file"]
                 include_root = ET.parse(Path(asset_path) / include_path).getroot()
                 for include_elem in include_root.findall(".//mesh"):
-                    include_elem.attrib["file"] = str(include_path.parent / include_elem.attrib["file"])
+                    # `<default><mesh .../></default>` declarations have no `file` attribute, so leave them untouched
+                    # and only rewrite relative paths for mesh assets that reference a file.
+                    mesh_file = include_elem.attrib.get("file")
+                    if mesh_file is not None:
+                        include_elem.attrib["file"] = str(include_path.parent / mesh_file)
                 for child in include_root:
                     mjcf.append(child)
                 mjcf.remove(elem)
