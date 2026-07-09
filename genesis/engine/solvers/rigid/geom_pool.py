@@ -65,6 +65,10 @@ class GeomPoolSegment:
     key_to_slot: dict = field(default_factory=dict)  # object key -> slot
     env_slot: dict = field(default_factory=dict)  # env index -> slot it is currently bound to (else base morph)
     vgeom_placeholders: list = field(default_factory=list)  # slot -> RigidVisGeom placeholder (visual pooling)
+    # id(morph) -> (cg_infos, vg_infos) for objects declared via GeomPoolOptions.objects, processed once at
+    # build. set_active_object reuses this so a declared object's (possibly nondeterministic) geometry always
+    # matches the budgets derived from it. The GeomPoolOptions holds the morphs, so their ids stay valid.
+    declared: dict = field(default_factory=dict)
 
     def __post_init__(self):
         self.resident_key = [None] * self.n_slots
@@ -94,21 +98,27 @@ class GeometryPool:
         self._segments: list[GeomPoolSegment] = []
         self._by_entity: dict[int, GeomPoolSegment] = {}
 
-    def add_segment(self, entity_idx: int, link_idx: int, entity, options) -> GeomPoolSegment:
+    def add_segment(
+        self, entity_idx: int, link_idx: int, entity, options, per_slot=None, n_slots=None
+    ) -> GeomPoolSegment:
         """Reserve a contiguous slot sub-block for one entity's pool and return its segment.
 
         Segments are appended in call order; each advances the shared cursor so sub-blocks stay disjoint.
+        `per_slot` / `n_slots`, when given, override the options' explicit budgets (used when the caller has
+        derived them from an object catalog); otherwise they come straight from `options`.
         """
-        per_slot = {
-            "geom": int(options.max_geoms_per_slot),
-            "vert": int(options.max_verts_per_slot),
-            "face": int(options.max_faces_per_slot),
-            "edge": int(options.max_edges_per_slot),
-            "cell": int(options.max_cells_per_slot),
-            "free_vert": int(options.max_verts_per_slot),
-            "vgeom": int(options.max_vgeoms_per_slot),
-        }
-        n_slots = int(options.n_slots)
+        if per_slot is None:
+            per_slot = {
+                "geom": int(options.max_geoms_per_slot),
+                "vert": int(options.max_verts_per_slot),
+                "face": int(options.max_faces_per_slot),
+                "edge": int(options.max_edges_per_slot),
+                "cell": int(options.max_cells_per_slot),
+                "free_vert": int(options.max_verts_per_slot),
+                "vgeom": int(options.max_vgeoms_per_slot),
+            }
+        if n_slots is None:
+            n_slots = int(options.n_slots)
 
         slots = []
         for _ in range(n_slots):

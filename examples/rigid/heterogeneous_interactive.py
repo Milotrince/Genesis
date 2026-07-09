@@ -66,19 +66,11 @@ def main():
         gs.morphs.Mesh(file="meshes/bunny.obj", scale=0.2, pos=SPAWN_POS, convexify=False, decimate=True),
         gs.morphs.Mesh(file="meshes/dragon.obj", scale=0.2, pos=SPAWN_POS, convexify=False, decimate=True),
     ]
-    # Slot budgets cover the largest object per dimension: decimated meshes (~a few thousand verts) and the
-    # duck's nonconvex SDF grid (~65*67*97 cells). One visual geom per slot renders the object's real shape.
+    # Passing the catalog as the geometry pool auto-sizes it: the per-slot budgets and slot count are derived
+    # by processing each object once at build (each object's geometry is cached for a fast set_active_object).
     obj = scene.add_entity(
         gs.morphs.Box(size=(0.15, 0.15, 0.15), pos=SPAWN_POS),
-        geom_pool=gs.options.GeomPoolOptions(
-            n_slots=len(objects),
-            max_geoms_per_slot=1,
-            max_verts_per_slot=4000,
-            max_faces_per_slot=8000,
-            max_edges_per_slot=12000,
-            max_cells_per_slot=430000,
-            max_vgeoms_per_slot=1,
-        ),
+        geom_pool=objects,
     )
 
     # Drag objects around with the mouse (left-click and drag) to probe the swapped-in collision geometry.

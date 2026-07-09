@@ -321,8 +321,12 @@ class RigidSolver(KinematicSolver):
             self._enable_heterogeneous |= bool(morph_heterogeneous)
 
         # A per-entity geometry pool (Phase 3) reserves runtime-swappable slots bound to this entity's base
-        # link; enabling it forces the same batched-links_info / SAP path heterogeneous variants use.
-        if geom_pool is not None and geom_pool.n_slots:
+        # link; enabling it forces the same batched-links_info / SAP path heterogeneous variants use. As a
+        # shorthand, a bare list of object morphs is promoted to a GeomPoolOptions that auto-sizes the pool.
+        if isinstance(geom_pool, (list, tuple)):
+            geom_pool = gs.options.GeomPoolOptions(objects=list(geom_pool))
+        pool_enabled = geom_pool is not None and bool(geom_pool.n_slots or geom_pool.objects)
+        if pool_enabled:
             self._enable_geom_pool = True
 
         if isinstance(morph, gs.morphs.Drone):
@@ -358,7 +362,7 @@ class RigidSolver(KinematicSolver):
             custom_vface_start=self.n_custom_vfaces,
             visualize_contact=visualize_contact,
             morph_heterogeneous=morph_heterogeneous,
-            geom_pool=geom_pool if (geom_pool is not None and geom_pool.n_slots) else None,
+            geom_pool=geom_pool if pool_enabled else None,
             name=name,
         )
         assert isinstance(entity, RigidEntity)
@@ -407,12 +411,23 @@ class RigidSolver(KinematicSolver):
             )
             for entity in self._entities:
                 if entity._geom_pool_options is not None:
-                    self._geom_pool.add_segment(
+                    options = entity._geom_pool_options
+                    # When a catalog is declared, process each object once now, cache it, and derive the
+                    # per-slot budgets + slot count from the set (see _pool_derive_from_objects).
+                    per_slot, n_slots, declared = (None, None, None)
+                    if options.objects:
+                        per_slot, declared = self._pool_derive_from_objects(entity, options.objects)
+                        n_slots = int(options.n_slots) or len(options.objects)
+                    segment = self._geom_pool.add_segment(
                         entity_idx=entity._idx_in_solver,
                         link_idx=entity.base_link.idx,
                         entity=entity,
-                        options=entity._geom_pool_options,
+                        options=options,
+                        per_slot=per_slot,
+                        n_slots=n_slots,
                     )
+                    if declared is not None:
+                        segment.declared = declared
             pool_geoms = self._geom_pool.n_geoms
             pool_cells = self._geom_pool.n_cells
             pool_verts = self._geom_pool.n_verts
@@ -2788,58 +2803,115 @@ class RigidSolver(KinematicSolver):
             "or pinned, so none can be evicted. Increase GeomPoolOptions.n_slots, or unbind/unpin some objects."
         )
 
-    def _pool_upload_object(self, entity, segment, slot, object_ref):
-        """Process a morph into collision geoms and upload them into `slot`'s reserved ranges.
+    def _pool_process_object(self, entity, object_ref):
+        """Load + postprocess a pool-object morph into (cg_infos, vg_infos); pure preprocessing, no slot writes.
 
-        Returns ((mass, com, quat, inertia_tensor), n_live_geoms): the object's aggregate inertial for the link
-        binding, and how many sub-geoms were uploaded (the bound geom range is the live sub-range of the slot).
+        This is the nondeterministic step (convex decomposition, decimation), so declared objects run it once
+        at build (`_pool_derive_from_objects`) and cache the result in `segment.declared`.
         """
-        from genesis.engine.entities.rigid_entity.rigid_geom import RigidGeom
-        from genesis.engine.entities.rigid_entity.rigid_link import (
-            GeomInertialInfo,
-            compose_inertial_properties,
-            get_local_inertial_from_geom_info,
-        )
-
         if isinstance(object_ref, gs.morphs.Mesh):
             g_infos = entity._load_mesh(object_ref, entity._surface, load_geom_only_for_heterogeneous=True)
         elif isinstance(object_ref, gs.morphs.Primitive):
             g_infos = entity._load_primitive(object_ref, entity._surface, load_geom_only_for_heterogeneous=True)
         else:
             gs.raise_exception("set_active_object only supports gs.morphs.Mesh and gs.morphs.Primitive objects.")
-        cg_infos, vg_infos = entity._postprocess_geoms_info(object_ref, g_infos, is_robot=False)
+        return entity._postprocess_geoms_info(object_ref, g_infos, is_robot=False)
+
+    def _pool_make_geom(self, entity, g_info, idx, vert_start, face_start, edge_start, cell_start, verts_state_start):
+        """Build one transient RigidGeom from a processed geom info at the given (slot) array indices.
+
+        It is not appended to any link - it just reuses the full geom preprocessing (vert/face/edge/normal
+        extraction, data padding, center of mass). The size fields (n_verts/faces/edges/cells) are
+        mesh-intrinsic and independent of the passed indices, so measurement can pass zeros.
+        """
+        from genesis.engine.entities.rigid_entity.rigid_geom import RigidGeom
+
+        friction = entity.material.friction
+        return RigidGeom(
+            link=entity.base_link,
+            idx=idx,
+            cell_start=cell_start,
+            vert_start=vert_start,
+            face_start=face_start,
+            edge_start=edge_start,
+            verts_state_start=verts_state_start,
+            mesh=g_info["mesh"],
+            init_pos=g_info.get("pos", gu.zero_pos()),
+            init_quat=g_info.get("quat", gu.identity_quat()),
+            type=g_info["type"],
+            friction=friction if friction is not None else g_info.get("friction", gu.default_friction()),
+            sol_params=g_info["sol_params"],
+            needs_coup=entity.material.needs_coup,
+            contype=entity._morph.contype,
+            conaffinity=entity._morph.conaffinity,
+            data=g_info.get("data"),
+        )
+
+    def _pool_derive_from_objects(self, entity, objects):
+        """Process each declared object once and derive per-slot budgets + the residency cache from the set.
+
+        Returns (per_slot, declared): per_slot is the per-array-key maximum over the catalog (so every declared
+        object fits a slot), and declared maps id(morph) -> (cg_infos, vg_infos) for reuse at upload time.
+        """
+        per_slot = {key: 0 for key in ("geom", "vert", "face", "edge", "cell", "free_vert", "vgeom")}
+        declared = {}
+        for object_ref in objects:
+            cg_infos, vg_infos = self._pool_process_object(entity, object_ref)
+            declared[id(object_ref)] = (cg_infos, vg_infos)
+            per_slot["geom"] = max(per_slot["geom"], len(cg_infos))
+            per_slot["vgeom"] = max(per_slot["vgeom"], len(vg_infos))
+            verts = faces = edges = cells = 0
+            for g_info in cg_infos:
+                geom = self._pool_make_geom(entity, g_info, 0, 0, 0, 0, 0, 0)
+                verts += geom.n_verts
+                faces += geom.n_faces
+                edges += geom.n_edges
+                # Only nonconvex geoms use the SDF narrowphase and thus consume reserved cells.
+                if not geom.is_convex:
+                    cells += geom.n_cells
+            per_slot["vert"] = max(per_slot["vert"], verts)
+            per_slot["face"] = max(per_slot["face"], faces)
+            per_slot["edge"] = max(per_slot["edge"], edges)
+            per_slot["cell"] = max(per_slot["cell"], cells)
+        per_slot["geom"] = max(per_slot["geom"], 1)
+        per_slot["free_vert"] = per_slot["vert"]
+        return per_slot, declared
+
+    def _pool_upload_object(self, entity, segment, slot, object_ref):
+        """Process a morph into collision geoms and upload them into `slot`'s reserved ranges.
+
+        Returns ((mass, com, quat, inertia_tensor), n_live_geoms): the object's aggregate inertial for the link
+        binding, and how many sub-geoms were uploaded (the bound geom range is the live sub-range of the slot).
+        """
+        from genesis.engine.entities.rigid_entity.rigid_link import (
+            GeomInertialInfo,
+            compose_inertial_properties,
+            get_local_inertial_from_geom_info,
+        )
+
+        # A declared object was processed (and its nondeterministic decomposition frozen) at build; reuse that
+        # so its uploaded geometry always matches the derived slot budgets. An undeclared object (a morph not
+        # in GeomPoolOptions.objects) is processed on demand and must fit the budgets.
+        cached = segment.declared.get(id(object_ref))
+        cg_infos, vg_infos = cached if cached is not None else self._pool_process_object(entity, object_ref)
         if segment.per_slot["vgeom"] > 0:
             self._pool_set_slot_visual(segment, slot, vg_infos)
 
         ranges = segment.slots[slot]
-        base_link = entity.base_link
-        friction = entity.material.friction
-        contype, conaffinity = entity._morph.contype, entity._morph.conaffinity
-
-        # Build transient RigidGeoms at the slot's reserved indices to reuse the full geom preprocessing
-        # (vert/face/edge/normal extraction, data padding, center of mass); they are not appended to the link.
-        # Cursors advance within the slot's reserved ranges; a geom's vertex-state rows track its vertex rows.
+        # Build transient RigidGeoms at the slot's reserved indices. Cursors advance within the slot's reserved
+        # ranges; a geom's vertex-state rows track its vertex rows.
         geoms, geoms_inertial = [], []
         vert_cur, face_cur, edge_cur, cell_cur = ranges.vert[0], ranges.face[0], ranges.edge[0], ranges.cell[0]
         for i, g_info in enumerate(cg_infos):
-            geom = RigidGeom(
-                link=base_link,
+            geom = self._pool_make_geom(
+                entity,
+                g_info,
                 idx=ranges.geom[0] + i,
-                cell_start=cell_cur,
                 vert_start=vert_cur,
                 face_start=face_cur,
                 edge_start=edge_cur,
+                cell_start=cell_cur,
                 verts_state_start=ranges.free_vert[0] + (vert_cur - ranges.vert[0]),
-                mesh=g_info["mesh"],
-                init_pos=g_info.get("pos", gu.zero_pos()),
-                init_quat=g_info.get("quat", gu.identity_quat()),
-                type=g_info["type"],
-                friction=friction if friction is not None else g_info.get("friction", gu.default_friction()),
-                sol_params=g_info["sol_params"],
-                needs_coup=entity.material.needs_coup,
-                contype=contype,
-                conaffinity=conaffinity,
-                data=g_info.get("data"),
             )
             geoms.append(geom)
             geoms_inertial.append(

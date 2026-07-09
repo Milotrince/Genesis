@@ -317,7 +317,7 @@ class Scene(RBC):
         visualize_contact: bool = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
-        geom_pool: "gs.options.GeomPoolOptions | None" = ...,
+        geom_pool: "gs.options.GeomPoolOptions | list | None" = ...,
     ) -> "RigidEntity": ...
 
     @overload
@@ -329,7 +329,7 @@ class Scene(RBC):
         visualize_contact: bool = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
-        geom_pool: "gs.options.GeomPoolOptions | None" = ...,
+        geom_pool: "gs.options.GeomPoolOptions | list | None" = ...,
     ) -> EntityT: ...
 
     @gs.assert_unbuilt
@@ -341,7 +341,7 @@ class Scene(RBC):
         visualize_contact: bool = False,
         vis_mode: str | None = None,
         name: str | None = None,
-        geom_pool: "gs.options.GeomPoolOptions | None" = None,
+        geom_pool: "gs.options.GeomPoolOptions | list | None" = None,
     ) -> "Entity":
         """
         Add an entity to the scene.
@@ -365,11 +365,13 @@ class Scene(RBC):
         name : str | None, optional
             User-specified name for the entity. If not provided, an auto-generated name will be assigned
             based on the morph type and entity UID (e.g., "box_a1b2c3d4"). Must be unique within the scene.
-        geom_pool : gs.options.GeomPoolOptions | None, optional
+        geom_pool : gs.options.GeomPoolOptions | list[gs.morphs.Morph] | None, optional
             Reserve a dynamic GPU geometry pool for this entity (rigid, single non-heterogeneous morph only).
             The pool's slots are bound at build to the entity's base link; ``entity.set_active_object(...)``
             loads a processed object into a free slot at runtime and rebinds selected environments to it.
-            None disables pooling. Defaults to None.
+            A bare list of object morphs is a shorthand for ``GeomPoolOptions(objects=...)``, which auto-sizes
+            the pool (per-slot budgets and slot count derived from the catalog). None disables pooling.
+            Defaults to None.
 
         Returns
         -------

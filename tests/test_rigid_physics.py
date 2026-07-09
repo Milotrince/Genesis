@@ -8007,6 +8007,46 @@ def test_set_active_object_runtime_bind(tol):
     assert_allclose(z[1], 0.05, tol=5e-3)
 
 
+def test_geom_pool_derived_budgets(tol):
+    """Passing an object catalog auto-derives the pool budgets and slot count; declared objects are cached.
+
+    The bare-list shorthand (`geom_pool=<list of morphs>`) enables the pool, sizes every per-slot budget as
+    the per-dimension maximum over the catalog, defaults n_slots to the catalog size, and caches each object's
+    processed geometry so set_active_object binds it without re-processing (and always within budget).
+    """
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    small = gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3))
+    big = gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.3))
+    ball = gs.morphs.Sphere(radius=0.12, pos=(0.0, 0.0, 0.3))
+    catalog = [small, big, ball]
+    # Bare list of morphs is promoted to a GeomPoolOptions that auto-sizes the pool.
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=catalog)
+    assert box._enable_geom_pool
+    scene.build(n_envs=3)
+
+    segment = scene.rigid_solver._geom_pool.segment_for_entity(box._idx_in_solver)
+    # n_slots defaults to the catalog size; every declared object was processed and cached at build.
+    assert segment.n_slots == len(catalog)
+    assert len(segment.declared) == len(catalog)
+    # Budgets are derived: one geom per primitive, and strictly positive vert/face/edge capacities.
+    assert segment.per_slot["geom"] == 1
+    assert segment.per_slot["vert"] > 0 and segment.per_slot["face"] > 0 and segment.per_slot["edge"] > 0
+
+    # Each declared object binds (cache hit, no upload growth) and rests at its own half-height/radius.
+    for i, morph in enumerate(catalog):
+        box.set_active_object(morph, envs_idx=[i])
+    assert len(segment.key_to_slot) == len(catalog)
+    box.set_pos(np.tile(np.array([0.0, 0.0, 0.3], dtype=np.float32), (3, 1)), zero_velocity=True)
+    for _ in range(250):
+        scene.step()
+    z = box.get_pos()[:, 2]
+    assert not torch.isnan(z).any()
+    assert_allclose(z[0], 0.05, tol=5e-3)  # small box half-height
+    assert_allclose(z[1], 0.1, tol=5e-3)  # big box half-height
+    assert_allclose(z[2], 0.12, tol=5e-3)  # sphere radius
+
+
 def test_set_active_object_requires_pool():
     """set_active_object without a geom pool raises a clear error."""
     scene = gs.Scene(show_viewer=False)
