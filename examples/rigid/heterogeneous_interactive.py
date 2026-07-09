@@ -87,6 +87,8 @@ def main():
 
     rng = np.random.default_rng(args.seed)
     spawn_pos = np.tile(np.array(SPAWN_POS, dtype=np.float32), (n_envs, 1))
+    # The object currently bound to each environment, so size randomization can respect its shape.
+    current_choices = np.zeros(n_envs, dtype=int)
 
     def apply_randomize_objects():
         """Bind each environment to a random pooled object, grouping envs that pick the same object."""
@@ -94,16 +96,24 @@ def main():
         for object_idx in np.unique(choices):
             envs_idx = np.where(choices == object_idx)[0]
             obj.set_active_object(objects[object_idx], envs_idx=envs_idx.tolist())
+        current_choices[:] = choices
         obj.set_pos(spawn_pos, zero_velocity=True)
         gs.logger.info(f"Objects: {[type(objects[c]).__name__ for c in choices]}")
 
     def apply_randomize_size():
         """Give each environment a random per-axis (x, y, z) scale, stretching and squashing objects.
 
-        The geometry pool applies per-axis scale directly (unlike the base set_scale path, it does not
-        require radial primitives to stay isotropic), so spheres and cylinders become ellipsoids here.
+        Radial primitives collide analytically, so their radial plane must stay circular (a cylinder cannot be
+        an ellipse): spheres are kept fully isotropic and cylinders keep sx == sy (free height). Boxes and
+        meshes stretch on every axis.
         """
         sizes = rng.uniform(0.6, 1.6, size=(n_envs, 3)).astype(np.float32)
+        for env_idx, object_idx in enumerate(current_choices):
+            morph = objects[object_idx]
+            if isinstance(morph, gs.morphs.Sphere):
+                sizes[env_idx] = sizes[env_idx, 0]
+            elif isinstance(morph, gs.morphs.Cylinder):
+                sizes[env_idx, 1] = sizes[env_idx, 0]
         obj.set_scale(sizes)
         obj.set_pos(spawn_pos, zero_velocity=True)
         gs.logger.info(f"Sizes:\n{sizes.round(2)}")
