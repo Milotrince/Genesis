@@ -105,7 +105,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
             if ray_hit.geom and ray_hit.geom.link is not None and not ray_hit.geom.link.is_fixed:
                 link = ray_hit.geom.link
                 hit_env_idx = self._get_last_raycast_env_idx()
-                mass = float(link.get_mass())
+                mass = self._link_mass_at(link, hit_env_idx)
 
                 # Validate mass is not too small to prevent numerical instability
                 if mass < MIN_PICKABLE_MASS:
@@ -253,7 +253,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
                 self._sim_running
                 and link is not None
                 and not link.is_fixed
-                and float(link.get_mass()) >= MIN_PICKABLE_MASS
+                and self._link_mass_at(link, self._get_last_raycast_env_idx()) >= MIN_PICKABLE_MASS
             )
             if is_pickable:
                 arrow_T = gu.trans_R_to_T(closest_hit.position, gu.z_up_to_R(closest_hit.normal))
@@ -320,6 +320,15 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
     def _get_last_raycast_env_idx(self) -> int | None:
         return self._raycaster.last_hit_env_idx
 
+    def _link_mass_at(self, link: "RigidLink", env_idx: int | None) -> float:
+        """Mass of `link` in the hit environment as a scalar.
+
+        `get_mass` returns a per-environment vector when the runtime inertial can differ per env (heterogeneous
+        variants or per-env geom scaling), so it must be indexed by the hit env before reducing to a scalar.
+        """
+        mass = np.atleast_1d(tensor_to_array(link.get_mass()))
+        return float(mass[env_idx] if (env_idx is not None and mass.size > 1) else mass[0])
+
     def _apply_spring_force(self, control_point: np.ndarray, dt: float) -> None:
         if not self._held_link:
             return
@@ -350,7 +359,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
         inv_inertia_world = np.linalg.inv(inertia_world)
 
         pos_err_v = control_point_env_local - held_point_env_local
-        inv_mass = 1.0 / float(self._held_link.get_mass())
+        inv_mass = 1.0 / self._link_mass_at(self._held_link, envs_idx)
 
         total_impulse = np.zeros(3, dtype=gs.np_float)
         total_torque_impulse = np.zeros(3, dtype=gs.np_float)

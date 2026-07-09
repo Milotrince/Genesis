@@ -234,15 +234,18 @@ def test_viewer_thread_crash_reports_traceback():
 @pytest.mark.required
 @pytest.mark.skipif(not IS_INTERACTIVE_VIEWER_AVAILABLE, reason=SKIP_NO_VIEWER)
 @pytest.mark.parametrize(
-    "n_envs, env_spacing, n_envs_per_row, target_env_idx, target_offset",
+    "n_envs, env_spacing, n_envs_per_row, target_env_idx, target_offset, enable_scaling",
     [
-        (0, (0.0, 0.0), None, None, (0.0, 0.0, 0.0)),
+        (0, (0.0, 0.0), None, None, (0.0, 0.0, 0.0), False),
         # Two envs spaced along x so envs_offset is non-zero. Camera is positioned over env 1, so a viewport-center
         # click must pick env 1 (exercising kernel_cast_ray's per-env offset transform) and leave env 0 untouched.
-        (2, (0.5, 0.0), 1, 1, (0.25, 0.0, 0.0)),
+        (2, (0.5, 0.0), 1, 1, (0.25, 0.0, 0.0), False),
+        # Same, but with per-env geom scaling on: get_mass then returns a per-env vector, so picking/dragging must
+        # index the hit env instead of collapsing the batch to a scalar (regression for a multi-env pick crash).
+        (2, (0.5, 0.0), 1, 1, (0.25, 0.0, 0.0), True),
     ],
 )
-def test_mouse_interaction_plugin(n_envs, env_spacing, n_envs_per_row, target_env_idx, target_offset):
+def test_mouse_interaction_plugin(n_envs, env_spacing, n_envs_per_row, target_env_idx, target_offset, enable_scaling):
     DT = 0.01
     MASS = 100.0
     BOX_LENGTH = 0.2
@@ -258,6 +261,7 @@ def test_mouse_interaction_plugin(n_envs, env_spacing, n_envs_per_row, target_en
             dt=DT,
             gravity=(0.0, 0.0, 0.0),
         ),
+        rigid_options=gs.options.RigidOptions(enable_geom_scaling=enable_scaling),
         viewer_options=gs.options.ViewerOptions(
             # Forces odd resolution so that mouse clicks are centered on pixels
             res=(2 * (CAM_RES[0] // 2) + 1, 2 * (CAM_RES[0] // 2) + 1),
