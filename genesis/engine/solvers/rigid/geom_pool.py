@@ -50,17 +50,21 @@ class GeomPoolSegment:
     per_slot: dict  # array key -> uniform per-slot budget
     slots: list  # list[GeomPoolSlotRanges], one per slot
 
-    # Residency bookkeeping (Stage 2). A slot is free when resident_key is None.
+    # Residency bookkeeping (Stage 2). A slot is free when resident_key is None. A slot is evictable when its
+    # refcount is 0 (no env currently bound) and it is not pinned.
     resident_key: list = field(default_factory=list)  # slot -> object key | None
     refcount: list = field(default_factory=list)  # slot -> #envs currently bound
+    pinned: list = field(default_factory=list)  # slot -> bool (excluded from eviction)
     inertial: list = field(default_factory=list)  # slot -> LinkInertial-like of the resident object
     n_live_geoms: list = field(default_factory=list)  # slot -> #sub-geoms actually uploaded (<= geom budget)
     lru: list = field(default_factory=list)  # slot indices, least-recently-used first
     key_to_slot: dict = field(default_factory=dict)  # object key -> slot
+    env_slot: dict = field(default_factory=dict)  # env index -> slot it is currently bound to (else base morph)
 
     def __post_init__(self):
         self.resident_key = [None] * self.n_slots
         self.refcount = [0] * self.n_slots
+        self.pinned = [False] * self.n_slots
         self.inertial = [None] * self.n_slots
         self.n_live_geoms = [0] * self.n_slots
         self.lru = list(range(self.n_slots))

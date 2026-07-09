@@ -2647,6 +2647,10 @@ class RigidSolver(KinematicSolver):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         envs_idx_np = tensor_to_array(envs_idx)
 
+        # Release the selected envs from their current slots first, so any slot they fully vacate becomes
+        # evictable and can be reused for this object (its refcount drops to 0 before acquire runs).
+        self._pool_release_envs(segment, envs_idx_np)
+
         # Resolve (or fill) the slot holding this object. A slot is keyed by the morph object; re-binding the
         # same morph reuses its slot. Uploading only happens the first time an object is made resident.
         key = id(object_ref)
@@ -2658,10 +2662,13 @@ class RigidSolver(KinematicSolver):
             segment.inertial[slot] = inertial
             segment.n_live_geoms[slot] = n_live
             segment.key_to_slot[key] = slot
-        # Mark most-recently-used (drives Stage-3 LRU eviction).
+        # Mark most-recently-used (tail of the LRU list) and account the new env bindings.
         if slot in segment.lru:
             segment.lru.remove(slot)
         segment.lru.append(slot)
+        for env in envs_idx_np:
+            segment.env_slot[int(env)] = slot
+            segment.refcount[slot] += 1
 
         # Bind the selected envs to the slot's geom range + inertial (reuse the heterogeneous rebind kernel),
         # then refresh inertia-derived quantities and reset caches exactly like set_active_variant.
@@ -2688,14 +2695,32 @@ class RigidSolver(KinematicSolver):
         # next step (the per-substep pass would otherwise be the first to touch them).
         self._func_update_pool_geoms()
 
+    def _pool_release_envs(self, segment, envs_idx_np):
+        """Drop the given envs' bindings to their current slots, decrementing per-slot refcounts."""
+        for env in envs_idx_np:
+            prev = segment.env_slot.pop(int(env), None)
+            if prev is not None:
+                segment.refcount[prev] -= 1
+
     def _pool_acquire_slot(self, segment):
-        """Return a free slot index for `segment`, raising when the pool is full (LRU eviction is Stage 3)."""
+        """Return a slot for a new object: a free slot, else the LRU evictable slot (refcount 0, unpinned).
+
+        Raises when every slot is currently bound to an environment or pinned.
+        """
         for slot in range(segment.n_slots):
             if segment.resident_key[slot] is None:
                 return slot
+        # Full: evict the least-recently-used slot no env is bound to and that is not pinned.
+        for slot in segment.lru:
+            if segment.refcount[slot] == 0 and not segment.pinned[slot]:
+                segment.key_to_slot.pop(segment.resident_key[slot], None)
+                segment.resident_key[slot] = None
+                segment.inertial[slot] = None
+                segment.n_live_geoms[slot] = 0
+                return slot
         gs.raise_exception(
-            f"Geometry pool for this entity is full ({segment.n_slots} slots all resident). Increase "
-            "GeomPoolOptions.n_slots (runtime eviction of unused objects is not yet implemented)."
+            f"Geometry pool for this entity is full: all {segment.n_slots} slots are bound to an environment "
+            "or pinned, so none can be evicted. Increase GeomPoolOptions.n_slots, or unbind/unpin some objects."
         )
 
     def _pool_upload_object(self, entity, segment, slot, object_ref):

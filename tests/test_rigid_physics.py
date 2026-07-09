@@ -7911,6 +7911,51 @@ def test_set_active_object_requires_pool():
         box.set_active_object(gs.morphs.Box(size=(0.2, 0.2, 0.2)))
 
 
+def test_set_active_object_eviction(tol):
+    """When the pool is full, binding a new object evicts the LRU slot no env is bound to."""
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    pool = gs.options.GeomPoolOptions(
+        n_slots=2, max_geoms_per_slot=1, max_verts_per_slot=8, max_faces_per_slot=12, max_edges_per_slot=18
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=pool)
+    scene.build(n_envs=2)
+    scene.step()
+    segment = scene.rigid_solver._geom_pool.segment_for_entity(box._idx_in_solver)
+
+    a = gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.3))  # env 0
+    b = gs.morphs.Box(size=(0.3, 0.3, 0.3), pos=(0.0, 0.0, 0.3))  # env 1
+    c = gs.morphs.Box(size=(0.4, 0.4, 0.4), pos=(0.0, 0.0, 0.3))  # env 0, evicts a
+    box.set_active_object(a, envs_idx=[0])
+    box.set_active_object(b, envs_idx=[1])
+    assert len(segment.key_to_slot) == 2  # both slots resident
+    box.set_active_object(c, envs_idx=[0])  # env 0 leaves a's slot (refcount 0) -> a evicted, c reused there
+    assert len(segment.key_to_slot) == 2  # still 2 (a gone, c added)
+    assert id(a) not in segment.key_to_slot
+
+    # env 0 now the 0.4 box, env 1 still the 0.3 box.
+    box.set_pos(np.array([[0.0, 0.0, 0.5], [0.0, 0.0, 0.5]]), zero_velocity=True)
+    for _ in range(220):
+        scene.step()
+    z = box.get_pos()[:, 2]
+    assert_allclose(z[0], 0.2, tol=1e-2)
+    assert_allclose(z[1], 0.15, tol=1e-2)
+
+
+def test_set_active_object_pool_exhausted():
+    """Binding a new object raises when every slot is bound to an environment (none evictable)."""
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    pool = gs.options.GeomPoolOptions(
+        n_slots=1, max_geoms_per_slot=1, max_verts_per_slot=8, max_faces_per_slot=12, max_edges_per_slot=18
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=pool)
+    scene.build(n_envs=2)
+    box.set_active_object(gs.morphs.Box(size=(0.2, 0.2, 0.2)), envs_idx=[0])
+    with pytest.raises(Exception, match="full"):
+        box.set_active_object(gs.morphs.Box(size=(0.3, 0.3, 0.3)), envs_idx=[1])
+
+
 def test_set_active_object_nonconvex(tol):
     """set_active_object uploads a nonconvex mesh (SDF grid) into a pool slot and it collides correctly.
 
