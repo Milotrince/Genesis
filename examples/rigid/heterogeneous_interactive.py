@@ -1,31 +1,33 @@
 """
-Interactive Heterogeneous Simulation
-====================================
+Interactive Geometry Pool
+=========================
 
-Each parallel environment simulates a different geometry variant of the same entity, and the active variant
-of every environment can be re-randomized live with the ``R`` key. This showcases ``set_active_variant``, the
-runtime rebind that swaps an environment's collision geometry and inertial in place while the scene keeps
-running (the joint configuration is preserved; here we also respawn the object so the new shape drops fresh).
+Each parallel environment can show a different object, swapped in at runtime from a dynamic GPU geometry pool
+(`add_entity(geom_pool=...)` + `entity.set_active_object(...)`), and resized per environment with per-env geom
+scaling (`entity.set_scale(...)`). Unlike a fixed heterogeneous morph list, pool objects are processed and
+uploaded on demand, so a large catalog of shapes (primitives, convex-decomposed and nonconvex meshes) shares a
+small reserved slot budget.
 
 Usage:
-    python heterogeneous_interactive.py            # 9 environments, GPU
-    python heterogeneous_interactive.py -n 16      # 16 environments
-    python heterogeneous_interactive.py --cpu      # run on CPU
+    python heterogeneous_interactive.py           # 9 environments, GPU
+    python heterogeneous_interactive.py -n 16     # 16 environments
+    python heterogeneous_interactive.py --cpu     # run on CPU
 
 Controls:
-    R   - randomize the active object variant of every environment
+    R   - randomize each environment's object (box / sphere / cylinder / duck / bunny / dragon)
+    T   - randomize each environment's size
     ESC - quit
-    (plus the usual viewer camera controls)
 """
 
 import argparse
+import os
 
 import numpy as np
 
 import genesis as gs
 from genesis.vis.keybindings import Key, KeyAction, Keybind
 
-SPAWN_POS = (0.0, 0.0, 0.35)
+SPAWN_POS = (0.0, 0.0, 0.5)
 
 
 def main():
@@ -37,10 +39,10 @@ def main():
 
     n_envs = max(1, args.n_envs)
 
-    ########################## init ##########################
     gs.init(backend=gs.cpu if args.cpu else gs.gpu, precision="32")
 
     scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(4.0, -4.0, 3.0),
             camera_lookat=(0.0, 0.0, 0.2),
@@ -48,32 +50,56 @@ def main():
         show_viewer=True,
     )
 
-    ########################## entities ##########################
     scene.add_entity(gs.morphs.Plane())
 
-    # The object is built with a list of morphs: every environment simulates one of these variants, and
-    # set_active_variant can rebind any environment to any of them at runtime.
-    variants = [
-        gs.morphs.Box(size=(0.12, 0.12, 0.12), pos=SPAWN_POS),
-        gs.morphs.Sphere(radius=0.07, pos=SPAWN_POS),
-        gs.morphs.Cylinder(radius=0.06, height=0.16, pos=SPAWN_POS),
-        gs.morphs.Box(size=(0.07, 0.16, 0.07), pos=SPAWN_POS),
+    # The catalog of objects the pool can hold. Meshes are normalized to ~0.2 m and kept nonconvex (single
+    # geom, colliding via the vertex-vs-SDF narrowphase, rendering their real shape) with decimation to keep
+    # the vertex count - hence contact/SDF-scan cost - low. These morph objects persist so their pool residency
+    # keys stay stable. (Convex decomposition of a pooled mesh is not used here: its many small pieces yield an
+    # ill-conditioned composed inertial - a known pool limitation.)
+    objects = [
+        gs.morphs.Box(size=(0.18, 0.18, 0.18), pos=SPAWN_POS),
+        gs.morphs.Sphere(radius=0.1, pos=SPAWN_POS),
+        gs.morphs.Cylinder(radius=0.08, height=0.2, pos=SPAWN_POS),
+        gs.morphs.Mesh(file="meshes/duck.obj", scale=0.05, pos=SPAWN_POS, convexify=False, decimate=True),
+        gs.morphs.Mesh(file="meshes/bunny.obj", scale=0.2, pos=SPAWN_POS, convexify=False, decimate=True),
+        gs.morphs.Mesh(file="meshes/dragon.obj", scale=0.2, pos=SPAWN_POS, convexify=False, decimate=True),
     ]
-    obj = scene.add_entity(morph=variants)
+    # Slot budgets cover the largest object per dimension: decimated meshes (~a few thousand verts) and the
+    # duck's nonconvex SDF grid (~65*67*97 cells). One visual geom per slot renders the object's real shape.
+    obj = scene.add_entity(
+        gs.morphs.Box(size=(0.15, 0.15, 0.15), pos=SPAWN_POS),
+        geom_pool=gs.options.GeomPoolOptions(
+            n_slots=len(objects),
+            max_geoms_per_slot=1,
+            max_verts_per_slot=4000,
+            max_faces_per_slot=8000,
+            max_edges_per_slot=12000,
+            max_cells_per_slot=430000,
+            max_vgeoms_per_slot=1,
+        ),
+    )
 
-    ########################## build ##########################
-    scene.build(n_envs=n_envs, env_spacing=(0.6, 0.6))
+    scene.build(n_envs=n_envs, env_spacing=(0.7, 0.7))
 
-    n_variants = len(variants)
     rng = np.random.default_rng(args.seed)
     spawn_pos = np.tile(np.array(SPAWN_POS, dtype=np.float32), (n_envs, 1))
 
-    def randomize():
-        """Rebind every environment to a random variant and drop it fresh from the spawn height."""
-        variant_idx = rng.integers(0, n_variants, size=n_envs)
-        obj.set_active_variant(variant_idx)
+    def randomize_objects():
+        """Bind each environment to a random pooled object, grouping envs that pick the same object."""
+        choices = rng.integers(0, len(objects), size=n_envs)
+        for object_idx in np.unique(choices):
+            envs_idx = np.where(choices == object_idx)[0]
+            obj.set_active_object(objects[object_idx], envs_idx=envs_idx.tolist())
         obj.set_pos(spawn_pos, zero_velocity=True)
-        gs.logger.info(f"Randomized active variants: {variant_idx.tolist()}")
+        gs.logger.info(f"Objects: {[type(objects[c]).__name__ for c in choices]}")
+
+    def randomize_size():
+        """Give each environment a random isotropic scale (keeps radial primitives valid)."""
+        sizes = rng.uniform(0.6, 1.6, size=n_envs).astype(np.float32)
+        obj.set_scale(np.repeat(sizes[:, None], 3, axis=1))
+        obj.set_pos(spawn_pos, zero_velocity=True)
+        gs.logger.info(f"Sizes: {sizes.round(2).tolist()}")
 
     is_running = True
 
@@ -81,20 +107,26 @@ def main():
         nonlocal is_running
         is_running = False
 
-    # Start with a varied assignment, then let R re-randomize live. R overwrites the default record-video bind.
-    randomize()
+    # Start with a varied scene when run interactively; skip the (mesh-processing) load under pytest so the
+    # example test just builds and steps the base entity quickly.
+    if "PYTEST_VERSION" not in os.environ:
+        randomize_objects()
     scene.viewer.register_keybinds(
-        Keybind("randomize_variants", Key.R, KeyAction.PRESS, callback=randomize, allow_overload=False),
+        Keybind("randomize_objects", Key.R, KeyAction.PRESS, callback=randomize_objects, allow_overload=False),
+        Keybind("randomize_size", Key.T, KeyAction.PRESS, callback=randomize_size),
         Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=stop),
         overwrite=True,
     )
 
-    print("\nHeterogeneous controls:")
-    print("R   - randomize the active object variant of every environment")
+    print("\nGeometry-pool controls:")
+    print("R   - randomize each environment's object")
+    print("T   - randomize each environment's size")
     print("ESC - quit\n")
 
     while is_running and scene.viewer.is_alive():
         scene.step()
+        if "PYTEST_VERSION" in os.environ:
+            break
 
 
 if __name__ == "__main__":

@@ -44,6 +44,7 @@ from .geom_pool_kernels import (
     kernel_entity_aabb_per_env,
     kernel_init_pool_geom_defaults,
     kernel_init_pool_vgeoms,
+    kernel_set_pool_scale,
     kernel_update_pool_geoms,
     kernel_upload_geom_slot,
     kernel_upload_sdf_slot,
@@ -2916,6 +2917,94 @@ class RigidSolver(KinematicSolver):
             placeholder.active_envs_mask[envs] = other_slot == slot
             (placeholder.active_envs_idx,) = np.where(tensor_to_array(placeholder.active_envs_mask))
 
+    def _pool_set_scale(self, entity, segment, scale, envs_idx):
+        """Scale each selected env's ACTIVE pool geometry (bound slot, else the entity's base geoms) in place.
+
+        Writes the per-env geom/vgeom scale fields (collision + visual rescale automatically) and rescales the
+        per-env link inertial from that env's active baseline via the same covariance transform set_scale uses.
+        """
+        base_link = entity.base_link
+        envs_idx_np = tensor_to_array(envs_idx)
+        n_sel = len(envs_idx_np)
+
+        scale = np.asarray(scale, dtype=gs.np_float)
+        if scale.ndim == 0:
+            scale = np.broadcast_to(scale.reshape(1, 1), (n_sel, 3))
+        elif scale.shape == (3,):
+            scale = np.broadcast_to(scale.reshape(1, 3), (n_sel, 3))
+        scale = np.ascontiguousarray(np.broadcast_to(scale, (n_sel, 3)))
+        if (scale <= 0.0).any():
+            gs.raise_exception("scale must be strictly positive.")
+
+        # Per env, resolve its active geom range + placeholder vgeom + inertial baseline, then covariance-scale.
+        geom_lo = np.empty(n_sel, dtype=gs.np_int)
+        geom_hi = np.empty(n_sel, dtype=gs.np_int)
+        vgeom_idx = np.full(n_sel, -1, dtype=gs.np_int)
+        out_mass = np.empty((n_sel, 1), dtype=gs.np_float)
+        out_pos = np.empty((n_sel, 1, 3), dtype=gs.np_float)
+        out_quat = np.zeros((n_sel, 1, 4), dtype=gs.np_float)
+        out_quat[..., 0] = 1.0
+        out_i = np.empty((n_sel, 1, 3, 3), dtype=gs.np_float)
+        eye = np.eye(3, dtype=gs.np_float)
+        for i, env in enumerate(envs_idx_np):
+            slot = segment.env_slot.get(int(env))
+            if slot is not None:
+                ranges = segment.slots[slot]
+                geom_lo[i], geom_hi[i] = ranges.geom[0], ranges.geom[0] + segment.n_live_geoms[slot]
+                placeholder = segment.vgeom_placeholders[slot]
+                vgeom_idx[i] = placeholder.idx if placeholder is not None else -1
+                mass0, com0, quat0, i0 = segment.inertial[slot]
+                rot0 = gu.quat_to_R(np.asarray(quat0, dtype=gs.np_float))
+                i_link = rot0 @ np.asarray(i0, dtype=gs.np_float) @ rot0.T
+                com0 = np.asarray(com0, dtype=gs.np_float)
+            else:
+                geom_lo[i], geom_hi[i] = entity.geom_start, entity.geom_end
+                vgeom_idx[i] = entity.vgeoms[0].idx if len(entity.vgeoms) else -1
+                rot0 = gu.quat_to_R(np.asarray(base_link._inertial_quat, dtype=gs.np_float))
+                i_link = rot0 @ np.asarray(base_link._inertial_i, dtype=gs.np_float) @ rot0.T
+                com0 = np.asarray(base_link._inertial_pos, dtype=gs.np_float)
+                mass0 = float(base_link._inertial_mass)
+            s = scale[i]
+            det = float(s[0] * s[1] * s[2])
+            s_mat = np.diag(s)
+            c0 = 0.5 * np.trace(i_link) * eye - i_link
+            cov = det * (s_mat @ c0 @ s_mat)
+            out_i[i, 0] = np.trace(cov) * eye - cov
+            out_pos[i, 0] = s * com0
+            out_mass[i, 0] = mass0 * det
+
+        kernel_set_pool_scale(
+            envs_idx_np,
+            geom_lo,
+            geom_hi,
+            vgeom_idx,
+            scale,
+            self.geoms_state,
+            self.vgeoms_state,
+            self._static_rigid_sim_config,
+        )
+        kernel_set_links_inertial(
+            out_mass,
+            out_pos,
+            out_quat,
+            out_i,
+            np.array([base_link.idx], dtype=gs.np_int),
+            envs_idx_np,
+            self.links_info,
+            self._static_rigid_sim_config,
+        )
+
+        # Refresh neutral-rest invweight/meaninertia (preserving joint config); the per-substep pool-FK pass
+        # rescales the slot AABBs from the new geoms_state.scale.
+        if self._n_dofs > 0:
+            restore_envs = envs_idx if self.n_envs > 0 else None
+            qpos_saved = qd_to_torch(self.qpos, envs_idx, transpose=True, copy=True)
+            if self.n_envs == 0:
+                qpos_saved = qpos_saved[0]
+            self._init_invweight_and_meaninertia(envs_idx=restore_envs)
+            self.set_qpos(qpos_saved, envs_idx=restore_envs)
+        self._func_update_pool_geoms()
+
     def _pool_rho(self, entity):
         """Material density for a pooled object, resolved exactly as RigidLink._build does for a variant."""
         from genesis.engine.entities.rigid_entity.rigid_link import RHO_MUJOCO, RHO_OBJECT
@@ -3065,6 +3154,13 @@ class RigidSolver(KinematicSolver):
 
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         n_sel = len(envs_idx)
+
+        # A geometry-pool entity's per-env active geoms live in the reserved block (a bound slot), not in the
+        # entity's static geom range, so scale the active slot per env instead of the base geoms.
+        pool_segment = self._geom_pool.segment_for_entity(entity._idx_in_solver) if self._geom_pool else None
+        if pool_segment is not None:
+            self._pool_set_scale(entity, pool_segment, scale, envs_idx)
+            return
 
         # Resolve scale to a per-selected-environment (n_sel, 3) array.
         scale = np.asarray(scale, dtype=gs.np_float)

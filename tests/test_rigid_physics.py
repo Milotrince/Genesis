@@ -8134,6 +8134,43 @@ def test_set_active_object_visual(tol):
     assert_allclose(ext[1], 0.1, tol=tol)  # env 1 still renders the base box
 
 
+def test_set_active_object_scale(tol):
+    """set_scale rescales the ACTIVE pooled object per env (collision + visual + inertial), not the base geom."""
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    pool = gs.options.GeomPoolOptions(
+        n_slots=2,
+        max_geoms_per_slot=1,
+        max_verts_per_slot=8,
+        max_faces_per_slot=12,
+        max_edges_per_slot=18,
+        max_vgeoms_per_slot=1,
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=pool)
+    scene.build(n_envs=2)
+    box.set_active_object(gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.3)), envs_idx=[0])
+    box.set_active_object(gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.3)), envs_idx=[1])
+    mass_before = box.get_mass()
+
+    box.set_scale(2.0, envs_idx=[0])  # scale env 0's active object x2 (det = 8)
+    scene.step()
+    # Mass scales by det on env 0 only; collision + visual AABB double on env 0.
+    mass = box.get_mass()
+    assert_allclose(mass[0], mass_before[0] * 8.0, tol=tol)
+    assert_allclose(mass[1], mass_before[1], tol=tol)
+    assert_allclose(torch.diff(box.get_AABB(), dim=-2)[0, 0], 0.4, tol=tol)
+    assert_allclose(torch.diff(box.get_vAABB(), dim=-2)[0, 0], 0.4, tol=tol)
+    assert_allclose(torch.diff(box.get_AABB(), dim=-2)[1, 0], 0.2, tol=tol)
+
+    # Drop-and-settle: env 0's 0.4 box rests at 0.2, env 1's 0.2 box at 0.1.
+    box.set_pos(np.array([[0.0, 0.0, 0.6], [0.0, 0.0, 0.6]]), zero_velocity=True)
+    for _ in range(250):
+        scene.step()
+    z = box.get_pos()[:, 2]
+    assert_allclose(z[0], 0.2, tol=1e-2)
+    assert_allclose(z[1], 0.1, tol=1e-2)
+
+
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_geom_scale_visual(tol):
     """Per-env scale is mirrored onto visual geometry: get_vAABB / get_vverts rescale per env."""

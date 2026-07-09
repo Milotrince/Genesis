@@ -626,6 +626,14 @@ class Collider:
                 (valid_type_a == gs.GEOM_TYPE.BOX) & (valid_type_b == gs.GEOM_TYPE.BOX)
             )
 
+        # A geometry-pool slot can hold ANY geometry at runtime (box, radial primitive, convex or nonconvex
+        # mesh), but slots are typed nonconvex-mesh at build; force every narrowphase specialization to compile
+        # so a later-uploaded sphere/cylinder/convex-mesh does not fall through an uncompiled branch.
+        if self._solver._geom_pool is not None:
+            has_convex_specialization = True
+            has_non_box_plane_convex_convex = True
+            has_nonconvex_vs_nonterrain = True
+
         return (
             n_possible_pairs,
             collision_pair_idx,

@@ -284,6 +284,32 @@ def kernel_update_pool_geoms(
 
 
 @qd.kernel(fastcache=True)
+def kernel_set_pool_scale(
+    envs_idx: qd.types.ndarray(),
+    geom_lo: qd.types.ndarray(),  # per selected env: active slot's live geom range [lo, hi)
+    geom_hi: qd.types.ndarray(),
+    vgeom_idx: qd.types.ndarray(),  # per selected env: slot placeholder vgeom row (-1 if visual pooling off)
+    scale: qd.types.ndarray(),  # (n_sel, 3)
+    geoms_state: array_class.GeomsState,
+    vgeoms_state: array_class.VGeomsState,
+    static_rigid_sim_config: qd.template(),
+):
+    """Write a per-env geometry scale onto each env's active pool slot (collision geoms + placeholder vgeom).
+
+    The scale-aware collision/AABB (narrowphase + kernel_update_pool_geoms) and rendering
+    (kernel_update_vgeoms_render_T) already read these scale fields, so writing them here rescales the pooled
+    object in place. Different envs may point at different slots, hence per-env geom ranges.
+    """
+    for e in range(envs_idx.shape[0]):
+        i_b = envs_idx[e]
+        s = qd.Vector([scale[e, 0], scale[e, 1], scale[e, 2]], dt=gs.qd_float)
+        for i_g in range(geom_lo[e], geom_hi[e]):
+            geoms_state.scale[i_g, i_b] = s
+        if vgeom_idx[e] >= 0:
+            vgeoms_state.scale[vgeom_idx[e], i_b] = s
+
+
+@qd.kernel(fastcache=True)
 def kernel_entity_aabb_per_env(
     link_start: qd.i32,
     link_end: qd.i32,
