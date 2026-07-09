@@ -8047,6 +8047,33 @@ def test_geom_pool_derived_budgets(tol):
     assert_allclose(z[2], 0.12, tol=5e-3)  # sphere radius
 
 
+def test_geom_pool_raycast_pick(tol):
+    """Viewer raycasting resolves a hit on a pooled (reserved-block) geom to the owning entity's base link.
+
+    Reserved-block slot geoms are absent from the solver's logical geom list, so without the pool-aware lookup
+    a raycast hit on a swapped-in object resolves to None and cannot be picked/dragged (mouse interaction).
+    """
+    from genesis.vis.viewer_plugins.raycast import Raycaster
+
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    big = gs.morphs.Box(size=(0.4, 0.4, 0.4), pos=(0.0, 0.0, 0.5))
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5)), geom_pool=[big])
+    scene.build(n_envs=1)
+    box.set_active_object(big, envs_idx=[0])
+    box.set_pos(np.array([[0.0, 0.0, 0.5]], dtype=np.float32), zero_velocity=True)
+    scene.step()
+
+    # A ray straight down hits the swapped-in 0.4 box (top face near z=0.7); the hit must carry the base link.
+    hit = Raycaster(scene).cast(
+        np.array([0.0, 0.0, 2.0], dtype=gs.np_float), np.array([0.0, 0.0, -1.0], dtype=gs.np_float)
+    )
+    assert hit is not None and hit.geom is not None
+    assert hit.geom.link is box.base_link
+    assert not hit.geom.link.is_fixed
+    assert_allclose(hit.position[2], 0.7, tol=5e-3)
+
+
 def test_set_active_object_requires_pool():
     """set_active_object without a geom pool raises a clear error."""
     scene = gs.Scene(show_viewer=False)

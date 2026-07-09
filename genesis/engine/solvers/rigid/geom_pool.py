@@ -139,6 +139,22 @@ class GeometryPool:
     def segment_for_entity(self, entity_idx: int) -> GeomPoolSegment | None:
         return self._by_entity.get(entity_idx)
 
+    def base_geom_for_idx(self, geom_idx: int):
+        """Map a reserved-block (slot) geom row to a representative RigidGeom on the owning entity's base link.
+
+        Slot geoms are absent from the solver's logical geom list, so a raycast hit on a slot must be resolved
+        to the entity that owns it. The slot is bound to that entity's base link, so any base-link geom yields
+        a hit whose ``.link`` is the correct link to pick/grab (its per-env pose, mass and inertial already
+        reflect the bound object). Returns None if ``geom_idx`` is in no segment's slots or the base link has
+        no geom.
+        """
+        for segment in self._segments:
+            for ranges in segment.slots:
+                if ranges.geom[0] <= geom_idx < ranges.geom[1]:
+                    base_geoms = segment.entity.base_link.geoms
+                    return base_geoms[0] if len(base_geoms) else None
+        return None
+
     @property
     def segments(self) -> list[GeomPoolSegment]:
         return self._segments

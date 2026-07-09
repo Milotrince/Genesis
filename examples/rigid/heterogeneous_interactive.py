@@ -74,7 +74,12 @@ def main():
     )
 
     # Drag objects around with the mouse (left-click and drag) to probe the swapped-in collision geometry.
-    scene.viewer.add_plugin(gs.vis.viewer_plugins.MouseInteractionPlugin(color=(0.1, 0.6, 0.8, 0.6)))
+    scene.viewer.add_plugin(
+        gs.vis.viewer_plugins.MouseInteractionPlugin(
+            color=(0.1, 0.6, 0.8, 0.6),
+            use_force=True,
+        ),
+    )
 
     scene.build(n_envs=n_envs, env_spacing=(0.7, 0.7))
 
