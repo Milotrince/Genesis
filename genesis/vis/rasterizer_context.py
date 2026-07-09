@@ -578,6 +578,10 @@ class RasterizerContext:
                                 active_envs=np.isin(self.rendered_envs_idx, geom_envs_idx),
                             )
                             self.add_rigid_node(geom, mesh_node)
+                        # A pool node is popped and re-added (not just re-posed), so the live viewer must rebuild
+                        # its node/buffer list to pick up the new mesh - the offscreen camera rebuilds every frame
+                        # and so never needed this, but the interactive viewer only refreshes when flagged.
+                        self._scene._meshes_updated = True
                         continue
 
                     # Skip geoms that weren't added - in heterogeneous simulation, some geoms
