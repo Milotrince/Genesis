@@ -174,6 +174,7 @@ class KinematicSolver(Solver):
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
         self._enable_geom_scaling = False  # RigidSolver overrides from RigidOptions(enable_geom_scaling)
         self._enable_geom_pool = False  # RigidSolver overrides from RigidOptions(geom_pool)
+        self._geom_pool = None  # RigidSolver builds the GeometryPool when a pool is enabled
 
         self.collider = None
         self.constraint_solver = None
@@ -316,7 +317,11 @@ class KinematicSolver(Solver):
         self.n_dofs_ = max(1, self.n_dofs)
         self.n_links_ = max(1, self.n_links)
         self.n_joints_ = max(1, self.n_joints)
-        self.n_vgeoms_ = max(1, self.n_vgeoms)
+        # A geometry pool with visual pooling reserves trailing vgeom rows; enlarge the vgeom allocation so
+        # placeholder visual geoms for pool slots have device rows (collision reservation is done earlier in
+        # RigidSolver.build). Rigid visual pooling needs no extra vvert/vface rows (host trimesh is rendered).
+        pool_vgeoms = self._geom_pool.n_vgeoms if self._geom_pool is not None else 0
+        self.n_vgeoms_ = max(1, self.n_vgeoms + pool_vgeoms)
         self.n_vfaces_ = max(1, self.n_vfaces)
         self.n_vverts_ = max(1, self.n_vverts)
         self.n_custom_vverts_ = max(1, self.n_custom_vverts)

@@ -421,6 +421,10 @@ class GeomPoolOptions(Options):
     max_cells_per_slot : int
         Maximum number of SDF grid cells per slot, needed only when pooling nonconvex meshes (which use the
         SDF narrowphase path). ``0`` means the pool accepts only primitives and convex geometry. Defaults to 0.
+    max_vgeoms_per_slot : int
+        Maximum number of visual geoms per slot, enabling visual pooling (each slot renders its uploaded
+        object's visual mesh per environment). ``0`` disables visual pooling: a pooled object collides with
+        its real geometry but renders as the entity's base morph. Defaults to 0.
     """
 
     n_slots: NonNegativeInt = 0
@@ -429,6 +433,7 @@ class GeomPoolOptions(Options):
     max_faces_per_slot: NonNegativeInt = 0
     max_edges_per_slot: NonNegativeInt = 0
     max_cells_per_slot: NonNegativeInt = 0
+    max_vgeoms_per_slot: NonNegativeInt = 0
 
 
 class RigidOptions(Options):

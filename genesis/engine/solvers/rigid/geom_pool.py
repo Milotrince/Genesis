@@ -19,7 +19,9 @@ from dataclasses import dataclass, field
 
 # The global-array keys a slot reserves a uniform per-slot budget in. A slot's free-vertex state budget
 # equals its collision-vertex budget: each collision vertex of a movable pooled geom owns one world state row.
-_ARRAY_KEYS = ("geom", "vert", "face", "edge", "cell", "free_vert")
+# "vgeom" reserves visual-geom rows for visual pooling (0 budget = collision-only pool). Rigid visual pooling
+# needs no vvert/vface device rows: the render/AABB path uses the host trimesh + the device vgeom pose.
+_ARRAY_KEYS = ("geom", "vert", "face", "edge", "cell", "free_vert", "vgeom")
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,7 @@ class GeomPoolSlotRanges:
     edge: tuple[int, int]
     cell: tuple[int, int]
     free_vert: tuple[int, int]
+    vgeom: tuple[int, int]
 
 
 @dataclass
@@ -61,6 +64,7 @@ class GeomPoolSegment:
     lru: list = field(default_factory=list)  # slot indices, least-recently-used first
     key_to_slot: dict = field(default_factory=dict)  # object key -> slot
     env_slot: dict = field(default_factory=dict)  # env index -> slot it is currently bound to (else base morph)
+    vgeom_placeholders: list = field(default_factory=list)  # slot -> RigidVisGeom placeholder (visual pooling)
 
     def __post_init__(self):
         self.resident_key = [None] * self.n_slots
@@ -70,6 +74,7 @@ class GeomPoolSegment:
         self.inertial = [None] * self.n_slots
         self.n_live_geoms = [0] * self.n_slots
         self.lru = list(range(self.n_slots))
+        self.vgeom_placeholders = [None] * self.n_slots
 
     def total(self, key: str) -> int:
         return self.n_slots * self.per_slot[key]
@@ -101,6 +106,7 @@ class GeometryPool:
             "edge": int(options.max_edges_per_slot),
             "cell": int(options.max_cells_per_slot),
             "free_vert": int(options.max_verts_per_slot),
+            "vgeom": int(options.max_vgeoms_per_slot),
         }
         n_slots = int(options.n_slots)
 
@@ -154,3 +160,7 @@ class GeometryPool:
     @property
     def n_free_verts(self) -> int:
         return self.total("free_vert")
+
+    @property
+    def n_vgeoms(self) -> int:
+        return self.total("vgeom")

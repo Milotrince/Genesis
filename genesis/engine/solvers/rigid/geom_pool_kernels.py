@@ -208,6 +208,40 @@ def kernel_init_pool_geom_defaults(
 
 
 @qd.kernel(fastcache=True)
+def kernel_init_pool_vgeoms(
+    vgeom_idx: qd.types.ndarray(),  # reserved vgeom row per slot
+    link_idx: qd.types.ndarray(),  # owning entity's base link per slot
+    vgeoms_info: array_class.VGeomsInfo,
+    vgeoms_state: array_class.VGeomsState,
+    static_rigid_sim_config: qd.template(),
+):
+    """Seed reserved visual-geom rows to inert-but-finite defaults so kernel_update_vgeoms poses them.
+
+    Each reserved vgeom mounts at its owning entity's base link with identity local transform and an empty
+    vvert/vface range (rigid visual pooling renders the host trimesh, not device vverts). The rasterizer culls
+    them per env via the placeholder's active_envs mask until a slot is filled.
+    """
+    _B = vgeoms_state.pos.shape[1]
+    n = vgeom_idx.shape[0]
+    for i in range(n):
+        i_vg = vgeom_idx[i]
+        vgeoms_info.link_idx[i_vg] = link_idx[i]
+        vgeoms_info.pos[i_vg] = qd.Vector([0.0, 0.0, 0.0], dt=gs.qd_float)
+        vgeoms_info.quat[i_vg] = qd.Vector([1.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
+        vgeoms_info.vvert_start[i_vg] = 0
+        vgeoms_info.vvert_end[i_vg] = 0
+        vgeoms_info.vvert_num[i_vg] = 0
+        vgeoms_info.vface_start[i_vg] = 0
+        vgeoms_info.vface_end[i_vg] = 0
+        vgeoms_info.vface_num[i_vg] = 0
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i, i_b in qd.ndrange(n, _B):
+        i_vg = vgeom_idx[i]
+        vgeoms_state.quat[i_vg, i_b] = qd.Vector([1.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
+        vgeoms_state.scale[i_vg, i_b] = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+
+
+@qd.kernel(fastcache=True)
 def kernel_update_pool_geoms(
     geom_lo: qd.i32,
     geom_hi: qd.i32,

@@ -42,6 +42,7 @@ from .constraint import ConstraintSolver
 from .geom_pool_kernels import (
     kernel_entity_aabb_per_env,
     kernel_init_pool_geom_defaults,
+    kernel_init_pool_vgeoms,
     kernel_update_pool_geoms,
     kernel_upload_geom_slot,
     kernel_upload_sdf_slot,
@@ -397,6 +398,9 @@ class RigidSolver(KinematicSolver):
                     "edge": self._n_edges,
                     "cell": self._n_cells,
                     "free_vert": self._n_free_verts,
+                    # Visual pooling reserves vgeom rows appended to the global vgeom array; the vgeom count is
+                    # an entity-sum property readable pre-build. n_vgeoms_ is bumped in KinematicSolver.build.
+                    "vgeom": self.n_vgeoms,
                 }
             )
             for entity in self._entities:
@@ -442,6 +446,7 @@ class RigidSolver(KinematicSolver):
             kernel_init_pool_geom_defaults(
                 self._n_geoms, self.n_geoms_, self.geoms_info, self.geoms_state, self._static_rigid_sim_config
             )
+            self._init_pool_vgeoms()
 
         self._init_invweight_and_meaninertia(force_update=False)
         self._func_update_geoms(self._scene._envs_idx, force_update_fixed_geoms=True)
@@ -1473,6 +1478,51 @@ class RigidSolver(KinematicSolver):
             self._static_rigid_sim_config,
         )
         return aabb
+
+    def _init_pool_vgeoms(self):
+        """Create placeholder visual geoms for reserved vgeom slots (visual pooling) and seed their device rows.
+
+        A per-slot RigidVisGeom placeholder (host trimesh, swapped on set_active_object) is appended to its
+        entity's vgeom list so the rasterizer renders it; per-env visibility is driven by its active_envs_mask
+        (all-False until a slot is bound to an env). Rigid visual pooling uses the host trimesh + the device
+        vgeom pose, so no device vvert data is needed. No-op when no slot reserves visual geometry.
+        """
+        import genesis.utils.mesh as mu
+        from genesis.engine.entities.rigid_entity.rigid_geom import RigidVisGeom
+
+        if self._geom_pool is None or self._geom_pool.n_vgeoms == 0:
+            return
+
+        placeholder_mesh = gs.Mesh.from_trimesh(
+            mu.create_box(extents=(1e-3, 1e-3, 1e-3)), surface=gs.surfaces.Default()
+        )
+        vgeom_idx_all, link_idx_all = [], []
+        for seg in self._geom_pool.segments:
+            if seg.per_slot["vgeom"] == 0:
+                continue
+            base_link = seg.entity.base_link
+            for slot in range(seg.n_slots):
+                vgeom_range = seg.slots[slot].vgeom
+                # One placeholder per slot (the object's merged visual mesh); extra reserved vgeom rows stay
+                # inert. It renders nowhere until set_active_object sets its mesh + active_envs.
+                placeholder = RigidVisGeom(
+                    base_link, vgeom_range[0], 0, 0, placeholder_mesh, gu.zero_pos(), gu.identity_quat()
+                )
+                placeholder.active_envs_mask = torch.zeros(self._B, dtype=torch.bool, device=gs.device)
+                placeholder.active_envs_idx = np.zeros(0, dtype=gs.np_int)
+                seg.vgeom_placeholders[slot] = placeholder
+                seg.entity._vgeoms.append(placeholder)
+                for i in range(vgeom_range[0], vgeom_range[1]):
+                    vgeom_idx_all.append(i)
+                    link_idx_all.append(base_link.idx)
+
+        kernel_init_pool_vgeoms(
+            np.array(vgeom_idx_all, dtype=gs.np_int),
+            np.array(link_idx_all, dtype=gs.np_int),
+            self.vgeoms_info,
+            self.vgeoms_state,
+            self._static_rigid_sim_config,
+        )
 
     def _func_update_pool_geoms(self):
         """Pose the reserved geometry-pool block from its links and refresh its AABBs (no-op without a pool)."""
