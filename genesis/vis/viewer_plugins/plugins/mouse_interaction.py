@@ -329,6 +329,20 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
         mass = np.atleast_1d(tensor_to_array(link.get_mass()))
         return float(mass[env_idx] if (env_idx is not None and mass.size > 1) else mass[0])
 
+    def _link_inertial_at(self, link: "RigidLink", env_idx: int | None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Inertial-frame COM, orientation and inertia tensor of `link` in the hit env, as (3,), (4,), (3,3).
+
+        These are per-env arrays when the runtime inertial can differ per env (heterogeneous variants, per-env
+        geom scaling, or a geometry pool), so index the hit env; otherwise they are the single build-time
+        values. Using the true per-env inertial keeps the spring drag consistent - the base-link inertia is
+        wrong for a swapped-in or scaled object and destabilizes the force integration.
+        """
+        pos = np.atleast_2d(np.asarray(tensor_to_array(link.get_inertial_pos()), dtype=gs.np_float))
+        quat = np.atleast_2d(np.asarray(tensor_to_array(link.get_inertial_quat()), dtype=gs.np_float))
+        inertia = np.asarray(tensor_to_array(link.get_inertial_i()), dtype=gs.np_float).reshape(-1, 3, 3)
+        idx = env_idx if (env_idx is not None and pos.shape[0] > 1) else 0
+        return pos[idx], quat[idx], inertia[idx]
+
     def _apply_spring_force(self, control_point: np.ndarray, dt: float) -> None:
         if not self._held_link:
             return
@@ -344,9 +358,8 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
         held_point_env_local = gu.transform_by_trans_quat(self._held_point_local, link_pos, link_quat)
         control_point_env_local = control_point - self._env_offset
 
-        # Compute inertial frame properties
-        inertial_pos = tensor_to_array(self._held_link.inertial_pos)
-        inertial_quat = tensor_to_array(self._held_link.inertial_quat)
+        # Inertial-frame properties in the hit environment (per-env for heterogeneous / scaled / pooled links).
+        inertial_pos, inertial_quat, inertial_i = self._link_inertial_at(self._held_link, envs_idx)
         world_principal_quat = gu.transform_quat_by_quat(inertial_quat, link_quat)
 
         # Compute arm from COM to held point in world frame
@@ -355,7 +368,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
 
         # Compute inverse inertia in world frame
         R_world = gu.quat_to_R(world_principal_quat)
-        inertia_world = R_world @ self._held_link.inertial_i @ R_world.T
+        inertia_world = R_world @ inertial_i @ R_world.T
         inv_inertia_world = np.linalg.inv(inertia_world)
 
         pos_err_v = control_point_env_local - held_point_env_local

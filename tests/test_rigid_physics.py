@@ -8074,6 +8074,31 @@ def test_geom_pool_raycast_pick(tol):
     assert_allclose(hit.position[2], 0.7, tol=5e-3)
 
 
+def test_link_per_env_inertial(tol):
+    """Per-env inertial getters (mass / COM / orientation / inertia tensor) reflect each env's runtime geometry.
+
+    With per-env geom scaling a link's mass scales as det(scale) and its inertia tensor by the covariance
+    transform; the getters must return these per-env values from the device, not the base build-time ones. This
+    is what lets the mouse spring drag use the correct inertial for a swapped-in / scaled object.
+    """
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    box = scene.add_entity(gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.5)))
+    scene.build(n_envs=2)
+    box.set_scale(np.array([[2.0, 2.0, 2.0], [1.0, 1.0, 1.0]], dtype=np.float32))
+    scene.step()
+
+    link = box.base_link
+    mass = np.asarray(link.get_mass())
+    pos = np.asarray(link.get_inertial_pos())
+    quat = np.asarray(link.get_inertial_quat())
+    inertia = np.asarray(link.get_inertial_i())
+    assert mass.shape == (2,) and pos.shape == (2, 3) and quat.shape == (2, 4) and inertia.shape == (2, 3, 3)
+    # Isotropic 2x scale: mass x det(2I)=8; inertia tensor x 2^5 (mass 2^3 times length^2 2^2).
+    assert_allclose(mass[0], mass[1] * 8.0, tol=tol)
+    assert_allclose(np.diagonal(inertia[0]), np.diagonal(inertia[1]) * 32.0, tol=tol)
+
+
 def test_set_active_object_requires_pool():
     """set_active_object without a geom pool raises a clear error."""
     scene = gs.Scene(show_viewer=False)

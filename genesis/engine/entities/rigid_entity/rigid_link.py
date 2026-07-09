@@ -1050,17 +1050,49 @@ class RigidLink(KinematicLink):
             self._invweight = self._invweight / ratio[..., None]
 
     @gs.assert_built
+    @property
+    def _has_per_env_inertial(self) -> bool:
+        """Whether the runtime link inertial can differ per environment.
+
+        True for heterogeneous variants, per-env geom scaling, and geometry-pool entities (whose bound object -
+        hence mass, COM, orientation and inertia tensor - is chosen per environment at runtime). When True the
+        authoritative inertial lives per-env on the device (`links_info`), not in the base host attributes.
+        """
+        return self.entity._enable_heterogeneous or self.entity._enable_geom_pool or self._solver._enable_geom_scaling
+
     def get_mass(self):
         """
         Get the mass of the link.
 
         Returns the per-environment mass (shape ``(n_envs,)``) when the runtime inertial can differ per
-        environment (heterogeneous variants or per-env geom scaling); otherwise the scalar build-time mass.
+        environment (heterogeneous variants, per-env geom scaling, or a geometry pool); otherwise the scalar
+        build-time mass.
         """
-        if self.entity._enable_heterogeneous or self._solver._enable_geom_scaling:
+        if self._has_per_env_inertial:
             # get_links_inertial_mass keeps a singleton link axis; drop it to return a per-env vector.
             return tensor_to_array(self._solver.get_links_inertial_mass(self._idx))[..., 0]
         return self._inertial_mass
+
+    def get_inertial_pos(self):
+        """Inertial-frame position (center of mass), per-environment (shape ``(n_envs, 3)``) when it can differ
+        per env (heterogeneous / geom scaling / geometry pool); otherwise the build-time value."""
+        if self._has_per_env_inertial:
+            return tensor_to_array(self._solver.get_links_inertial_pos(self._idx))[..., 0, :]
+        return self._inertial_pos
+
+    def get_inertial_quat(self):
+        """Inertial-frame orientation, per-environment (shape ``(n_envs, 4)``) when it can differ per env
+        (heterogeneous / geom scaling / geometry pool); otherwise the build-time value."""
+        if self._has_per_env_inertial:
+            return tensor_to_array(self._solver.get_links_inertial_quat(self._idx))[..., 0, :]
+        return self._inertial_quat
+
+    def get_inertial_i(self):
+        """Inertia tensor about the inertial frame, per-environment (shape ``(n_envs, 3, 3)``) when it can
+        differ per env (heterogeneous / geom scaling / geometry pool); otherwise the build-time value."""
+        if self._has_per_env_inertial:
+            return tensor_to_array(self._solver.get_links_inertial_i(self._idx))[..., 0, :, :]
+        return self._inertial_i
 
     def set_friction(self, friction):
         """
