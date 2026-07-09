@@ -2166,6 +2166,20 @@ class KinematicEntity(Entity):
             gs.raise_exception("set_active_variant can only be called after the scene is built.")
         self._solver.set_active_variant(self, variant_idx, envs_idx)
 
+    def set_active_object(self, object_ref, envs_idx=None):
+        """Load a processed object into this entity's geometry pool and bind environments to it at runtime.
+
+        Only valid for entities built with `add_entity(geom_pool=...)`. `object_ref` is a `gs.morphs.Mesh` or
+        `gs.morphs.Primitive`; it is processed to collision geometry, uploaded into a free pool slot (reused if
+        already resident), and the selected environments are rebound to it. The object inherits this entity's
+        collision filters and base link; the joint configuration is preserved.
+        """
+        if not self._enable_geom_pool:
+            gs.raise_exception("set_active_object is only supported for entities built with add_entity(geom_pool=...).")
+        if not self._solver.is_built:
+            gs.raise_exception("set_active_object can only be called after the scene is built.")
+        self._solver.set_active_object(self, object_ref, envs_idx)
+
     def set_scale(self, scale, envs_idx=None):
         """Set a per-environment geometry scale for this entity at runtime.
 
@@ -4590,7 +4604,7 @@ class RigidEntity(KinematicEntity):
             The total mass of the entity in kg. For heterogeneous entities, returns
             an array of shape (n_envs,) with per-environment masses.
         """
-        if self._enable_heterogeneous or self._solver._enable_geom_scaling:
+        if self._enable_heterogeneous or self._solver._enable_geom_scaling or self._enable_geom_pool:
             links_idx = slice(self.link_start, self.link_end)
             links_mass = qd_to_numpy(self._solver.links_info.inertial_mass, None, links_idx, transpose=True)
             return links_mass.sum(axis=1)

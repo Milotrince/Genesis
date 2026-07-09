@@ -7849,6 +7849,63 @@ def test_geom_pool_reserved_block_inert(tol):
     assert_allclose(box_pool.get_mass(), box_ref.get_mass(), tol=tol)
 
 
+def test_set_active_object_runtime_bind(tol):
+    """entity.set_active_object uploads an object into a pool slot and rebinds envs to it at runtime.
+
+    A pooled box entity is built, then env 0 is bound to a larger box loaded at runtime while env 1 keeps the
+    base box. The swap must take effect in physics: env 0's per-env mass and rest height reflect the larger
+    box, env 1's the base box. Re-binding the same object must reuse its slot rather than upload again.
+    """
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    pool = gs.options.GeomPoolOptions(
+        n_slots=3, max_geoms_per_slot=1, max_verts_per_slot=8, max_faces_per_slot=12, max_edges_per_slot=18
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=pool)
+    scene.build(n_envs=2)
+    scene.step()
+
+    base_mass = box.get_mass()
+    assert base_mass.shape == (2,)
+    assert_allclose(base_mass, 0.6, tol=tol)
+
+    # Load a box twice the size into a pool slot and bind env 0 only.
+    big = gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.3))
+    box.set_active_object(big, envs_idx=[0])
+    box.set_pos(np.array([[0.0, 0.0, 0.3], [0.0, 0.0, 0.3]]), zero_velocity=True)
+    scene.step()
+
+    # Per-env mass reflects the swap: env 0 is the 2x box (8x volume/mass), env 1 the base box.
+    mass = box.get_mass()
+    assert_allclose(mass[0], base_mass[0] * 8.0, tol=tol)
+    assert_allclose(mass[1], base_mass[1], tol=tol)
+
+    # Binding the same object again reuses its slot (no second upload).
+    segment = scene.rigid_solver._geom_pool.segment_for_entity(box._idx_in_solver)
+    assert len(segment.key_to_slot) == 1
+    box.set_active_object(big, envs_idx=[0])
+    assert len(segment.key_to_slot) == 1
+
+    # Drop-and-settle: each env rests on its own half-height (0.1 for the big box, 0.05 for the base box).
+    box.set_pos(np.array([[0.0, 0.0, 0.3], [0.0, 0.0, 0.3]]), zero_velocity=True)
+    for _ in range(250):
+        scene.step()
+    z = box.get_pos()[:, 2]
+    assert not torch.isnan(z).any()
+    assert_allclose(z[0], 0.1, tol=5e-3)
+    assert_allclose(z[1], 0.05, tol=5e-3)
+
+
+def test_set_active_object_requires_pool():
+    """set_active_object without a geom pool raises a clear error."""
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)))
+    scene.build(n_envs=2)
+    with pytest.raises(Exception, match="geom_pool"):
+        box.set_active_object(gs.morphs.Box(size=(0.2, 0.2, 0.2)))
+
+
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_geom_scale_visual(tol):
     """Per-env scale is mirrored onto visual geometry: get_vAABB / get_vverts rescale per env."""

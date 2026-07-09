@@ -185,26 +185,65 @@ def kernel_upload_geom_slot(
 
 
 @qd.kernel(fastcache=True)
+def kernel_init_pool_geom_defaults(
+    geom_lo: qd.i32,
+    geom_hi: qd.i32,
+    geoms_info: array_class.GeomsInfo,
+    geoms_state: array_class.GeomsState,
+    static_rigid_sim_config: qd.template(),
+):
+    """Seed the reserved pool block to inert-but-finite defaults at build.
+
+    kernel_init_geom_fields only initializes the real geoms, leaving the reserved rows zero — a zero quat
+    would rotate AABB corners to NaN when the pool-FK pass runs. Set identity quats and unit scale so an
+    unfilled slot poses to a finite (degenerate) AABB at its link; set_active_object overwrites these on load.
+    """
+    _B = geoms_state.pos.shape[1]
+    for i_g in range(geom_lo, geom_hi):
+        geoms_info.quat[i_g] = qd.Vector([1.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_g, i_b in qd.ndrange((geom_lo, geom_hi), _B):
+        geoms_state.quat[i_g, i_b] = qd.Vector([1.0, 0.0, 0.0, 0.0], dt=gs.qd_float)
+        geoms_state.scale[i_g, i_b] = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+
+
+@qd.kernel(fastcache=True)
 def kernel_update_pool_geoms(
     geom_lo: qd.i32,
     geom_hi: qd.i32,
     geoms_state: array_class.GeomsState,
     geoms_info: array_class.GeomsInfo,
+    geoms_init_AABB: array_class.GeomsInitAABB,
     links_state: array_class.LinksState,
     static_rigid_sim_config: qd.template(),
 ):
-    """Pose every reserved pool geom from its owning link.
+    """Pose every reserved pool geom from its owning link and refresh its world AABB.
 
-    The reserved block lies outside every entity's contiguous geom range, so the entity-based FK pass never
-    touches it. This runs over ``[geom_lo, geom_hi)`` each step: an unfilled slot keeps link_idx 0 and a zero
-    quat (posed harmlessly, never in a collision sweep since no env's link is bound to it), while a filled
-    slot is posed from the owning entity's base link exactly like a normal geom.
+    The reserved block lies outside every entity's contiguous geom range, so the entity-based FK pass in
+    kernel_step_1 never touches it. This runs over ``[geom_lo, geom_hi)`` each substep (after kernel_step_1,
+    before collision): an unfilled slot keeps link_idx 0 and an identity quat (posed harmlessly, never in a
+    collision sweep since no env's link is bound to it), while a filled slot is posed from the owning entity's
+    base link exactly like a normal geom. The AABB mirrors kernel_update_geom_aabbs.
     """
     _B = geoms_state.pos.shape[1]
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g, i_b in qd.ndrange((geom_lo, geom_hi), _B):
         i_l = geoms_info.link_idx[i_g]
-        geoms_state.pos[i_g, i_b], geoms_state.quat[i_g, i_b] = gu.qd_transform_pos_quat_by_trans_quat(
+        g_pos, g_quat = gu.qd_transform_pos_quat_by_trans_quat(
             geoms_info.pos[i_g], geoms_info.quat[i_g], links_state.pos[i_l, i_b], links_state.quat[i_l, i_b]
         )
+        geoms_state.pos[i_g, i_b] = g_pos
+        geoms_state.quat[i_g, i_b] = g_quat
         geoms_state.verts_updated[i_g, i_b] = False
+
+        lower = gu.qd_vec3(qd.math.inf)
+        upper = gu.qd_vec3(-qd.math.inf)
+        for i_corner in qd.static(range(8)):
+            corner = geoms_init_AABB[i_g, i_corner]
+            if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                corner = geoms_state.scale[i_g, i_b] * corner
+            corner_pos = gu.qd_transform_by_trans_quat(corner, g_pos, g_quat)
+            lower = qd.min(lower, corner_pos)
+            upper = qd.max(upper, corner_pos)
+        geoms_state.aabb_min[i_g, i_b] = lower
+        geoms_state.aabb_max[i_g, i_b] = upper

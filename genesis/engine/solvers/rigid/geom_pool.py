@@ -45,6 +45,7 @@ class GeomPoolSegment:
 
     entity_idx: int
     link_idx: int
+    entity: object  # the owning RigidEntity (its collision identity is shared by all this segment's slots)
     n_slots: int
     per_slot: dict  # array key -> uniform per-slot budget
     slots: list  # list[GeomPoolSlotRanges], one per slot
@@ -53,6 +54,7 @@ class GeomPoolSegment:
     resident_key: list = field(default_factory=list)  # slot -> object key | None
     refcount: list = field(default_factory=list)  # slot -> #envs currently bound
     inertial: list = field(default_factory=list)  # slot -> LinkInertial-like of the resident object
+    n_live_geoms: list = field(default_factory=list)  # slot -> #sub-geoms actually uploaded (<= geom budget)
     lru: list = field(default_factory=list)  # slot indices, least-recently-used first
     key_to_slot: dict = field(default_factory=dict)  # object key -> slot
 
@@ -60,6 +62,7 @@ class GeomPoolSegment:
         self.resident_key = [None] * self.n_slots
         self.refcount = [0] * self.n_slots
         self.inertial = [None] * self.n_slots
+        self.n_live_geoms = [0] * self.n_slots
         self.lru = list(range(self.n_slots))
 
     def total(self, key: str) -> int:
@@ -80,7 +83,7 @@ class GeometryPool:
         self._segments: list[GeomPoolSegment] = []
         self._by_entity: dict[int, GeomPoolSegment] = {}
 
-    def add_segment(self, entity_idx: int, link_idx: int, options) -> GeomPoolSegment:
+    def add_segment(self, entity_idx: int, link_idx: int, entity, options) -> GeomPoolSegment:
         """Reserve a contiguous slot sub-block for one entity's pool and return its segment.
 
         Segments are appended in call order; each advances the shared cursor so sub-blocks stay disjoint.
@@ -105,7 +108,7 @@ class GeometryPool:
             slots.append(GeomPoolSlotRanges(**ranges))
 
         segment = GeomPoolSegment(
-            entity_idx=entity_idx, link_idx=link_idx, n_slots=n_slots, per_slot=per_slot, slots=slots
+            entity_idx=entity_idx, link_idx=link_idx, entity=entity, n_slots=n_slots, per_slot=per_slot, slots=slots
         )
         self._segments.append(segment)
         self._by_entity[entity_idx] = segment
