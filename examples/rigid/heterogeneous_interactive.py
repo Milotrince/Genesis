@@ -95,11 +95,15 @@ def main():
         gs.logger.info(f"Objects: {[type(objects[c]).__name__ for c in choices]}")
 
     def randomize_size():
-        """Give each environment a random isotropic scale (keeps radial primitives valid)."""
-        sizes = rng.uniform(0.6, 1.6, size=n_envs).astype(np.float32)
-        obj.set_scale(np.repeat(sizes[:, None], 3, axis=1))
+        """Give each environment a random per-axis (x, y, z) scale, stretching and squashing objects.
+
+        The geometry pool applies per-axis scale directly (unlike the base set_scale path, it does not
+        require radial primitives to stay isotropic), so spheres and cylinders become ellipsoids here.
+        """
+        sizes = rng.uniform(0.6, 1.6, size=(n_envs, 3)).astype(np.float32)
+        obj.set_scale(sizes)
         obj.set_pos(spawn_pos, zero_velocity=True)
-        gs.logger.info(f"Sizes: {sizes.round(2).tolist()}")
+        gs.logger.info(f"Sizes:\n{sizes.round(2)}")
 
     is_running = True
 
