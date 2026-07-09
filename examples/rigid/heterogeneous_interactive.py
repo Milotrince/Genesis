@@ -85,7 +85,7 @@ def main():
     rng = np.random.default_rng(args.seed)
     spawn_pos = np.tile(np.array(SPAWN_POS, dtype=np.float32), (n_envs, 1))
 
-    def randomize_objects():
+    def apply_randomize_objects():
         """Bind each environment to a random pooled object, grouping envs that pick the same object."""
         choices = rng.integers(0, len(objects), size=n_envs)
         for object_idx in np.unique(choices):
@@ -94,7 +94,7 @@ def main():
         obj.set_pos(spawn_pos, zero_velocity=True)
         gs.logger.info(f"Objects: {[type(objects[c]).__name__ for c in choices]}")
 
-    def randomize_size():
+    def apply_randomize_size():
         """Give each environment a random per-axis (x, y, z) scale, stretching and squashing objects.
 
         The geometry pool applies per-axis scale directly (unlike the base set_scale path, it does not
@@ -105,22 +105,35 @@ def main():
         obj.set_pos(spawn_pos, zero_velocity=True)
         gs.logger.info(f"Sizes:\n{sizes.round(2)}")
 
+    # The viewer runs in its own thread, so keybind callbacks fire there - not on this stepping thread. They
+    # must not touch the GPU directly: set_active_object / set_scale launch kernels that would race the
+    # scene.step() kernels below, corrupting device state (swapped-in objects silently fail to upload, and
+    # the process can crash). So a callback only raises a request flag; the main loop drains it and runs the
+    # actual work between steps, keeping every kernel launch on this one thread.
+    requested = {"objects": False, "size": False}
     is_running = True
 
     def stop():
         nonlocal is_running
         is_running = False
 
-    # Start with a varied scene when run interactively; skip the (mesh-processing) load under pytest so the
-    # example test just builds and steps the base entity quickly.
-    if "PYTEST_VERSION" not in os.environ:
-        randomize_objects()
     scene.viewer.register_keybinds(
-        Keybind("randomize_objects", Key.R, KeyAction.PRESS, callback=randomize_objects, allow_overload=False),
-        Keybind("randomize_size", Key.T, KeyAction.PRESS, callback=randomize_size),
+        Keybind(
+            "randomize_objects",
+            Key.R,
+            KeyAction.PRESS,
+            callback=lambda: requested.__setitem__("objects", True),
+            allow_overload=False,
+        ),
+        Keybind("randomize_size", Key.T, KeyAction.PRESS, callback=lambda: requested.__setitem__("size", True)),
         Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=stop),
         overwrite=True,
     )
+
+    # Start with a varied scene when run interactively; skip the (mesh-processing) load under pytest so the
+    # example test just builds and steps the base entity quickly.
+    if "PYTEST_VERSION" not in os.environ:
+        apply_randomize_objects()
 
     print("\nGeometry-pool controls:")
     print("R   - randomize each environment's object")
@@ -128,6 +141,12 @@ def main():
     print("ESC - quit\n")
 
     while is_running and scene.viewer.is_alive():
+        if requested["objects"]:
+            requested["objects"] = False
+            apply_randomize_objects()
+        if requested["size"]:
+            requested["size"] = False
+            apply_randomize_size()
         scene.step()
         if "PYTEST_VERSION" in os.environ:
             break
