@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 import torch
 import trimesh
+from PIL import Image
 from scipy.spatial import ConvexHull
 from scipy.spatial.qhull import QhullError
 
@@ -4962,20 +4963,29 @@ def test_mjcf_parsing_with_include():
     assert_allclose(robot1.get_qpos(), robot3.get_qpos(), tol=gs.EPS)
 
 
-def test_mjcf_parsing_with_include_default_mesh(tmp_path):
-    # A `<default><mesh .../></default>` declaration has no `file` attribute; the include preprocessor must skip
-    # such default-only mesh elements instead of unconditionally rewriting their (missing) `file` path.
+def test_mjcf_parsing_with_include_relative_assets(tmp_path):
+    # Regression for two `<include>` preprocessing bugs, both exercised from a single included file:
+    #  - a `<default><mesh .../></default>` declaration has no `file` attribute and must not be treated as an asset;
+    #  - relative asset paths (here a texture) in an included file living in a subdirectory must be rewritten to
+    #    resolve against that file's directory, not the top-level model directory.
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    Image.new("RGB", (4, 4), color=(128, 64, 32)).save(asset_dir / "checker.png")
+
     included = ET.Element("mujoco", model="included")
     default = ET.SubElement(included, "default")
     ET.SubElement(default, "mesh", maxhullvert="64")
+    asset = ET.SubElement(included, "asset")
+    ET.SubElement(asset, "texture", name="tex", type="2d", file="checker.png")
+    ET.SubElement(asset, "material", name="mat", texture="tex")
     worldbody = ET.SubElement(included, "worldbody")
     body = ET.SubElement(worldbody, "body", name="box_body", pos="0 0 1")
     ET.SubElement(body, "freejoint")
-    ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1")
-    ET.ElementTree(included).write(tmp_path / "included.xml", encoding="utf-8", xml_declaration=True)
+    ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", material="mat")
+    ET.ElementTree(included).write(asset_dir / "included.xml", encoding="utf-8", xml_declaration=True)
 
     main = ET.Element("mujoco", model="main")
-    ET.SubElement(main, "include", file="included.xml")
+    ET.SubElement(main, "include", file="assets/included.xml")
     main_path = tmp_path / "main.xml"
     ET.ElementTree(main).write(main_path, encoding="utf-8", xml_declaration=True)
 

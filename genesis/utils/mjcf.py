@@ -97,12 +97,16 @@ def build_model(xml, discard_visual, default_armature=None, merge_fixed_links=Fa
             for elem in tuple(xml_root.findall("include")):
                 include_path = parent_path / elem.attrib["file"]
                 include_root = ET.parse(Path(asset_path) / include_path).getroot()
-                for include_elem in include_root.findall(".//mesh"):
-                    # `<default><mesh .../></default>` declarations have no `file` attribute, so leave them untouched
-                    # and only rewrite relative paths for mesh assets that reference a file.
-                    mesh_file = include_elem.attrib.get("file")
-                    if mesh_file is not None:
-                        include_elem.attrib["file"] = str(include_path.parent / mesh_file)
+                # Rewrite relative asset paths so they resolve against the included file's directory once its
+                # children are flattened into the parent model. `<default>` blocks (e.g.
+                # `<default><mesh maxhullvert="64"/></default>`) carry no `file` attribute and are left untouched.
+                # `<include>` paths are intentionally excluded here: nested includes are resolved on their own via
+                # `include_path` when popped from the stack.
+                for asset_tag in ("mesh", "texture", "hfield", "skin"):
+                    for include_elem in include_root.findall(f".//{asset_tag}"):
+                        asset_file = include_elem.attrib.get("file")
+                        if asset_file is not None:
+                            include_elem.attrib["file"] = str(include_path.parent / asset_file)
                 for child in include_root:
                     mjcf.append(child)
                 mjcf.remove(elem)
