@@ -14,9 +14,10 @@ Usage:
     python heterogeneous_interactive.py --cpu     # run on CPU
 
 Controls:
-    R   - randomize each environment's object (box / sphere / cylinder / duck / bunny / dragon)
-    T   - randomize each environment's size
-    ESC - quit
+    R           - randomize each environment's object (box / sphere / cylinder / duck / bunny / dragon)
+    T           - randomize each environment's size
+    left-drag   - grab and drag an object (MouseInteraction plugin)
+    ESC         - quit
 """
 
 import argparse
@@ -80,6 +81,9 @@ def main():
         ),
     )
 
+    # Drag objects around with the mouse (left-click and drag) to probe the swapped-in collision geometry.
+    scene.viewer.add_plugin(gs.vis.viewer_plugins.MouseInteractionPlugin(color=(0.1, 0.6, 0.8, 0.6)))
+
     scene.build(n_envs=n_envs, env_spacing=(0.7, 0.7))
 
     rng = np.random.default_rng(args.seed)
@@ -136,9 +140,10 @@ def main():
         apply_randomize_objects()
 
     print("\nGeometry-pool controls:")
-    print("R   - randomize each environment's object")
-    print("T   - randomize each environment's size")
-    print("ESC - quit\n")
+    print("R         - randomize each environment's object")
+    print("T         - randomize each environment's size")
+    print("left-drag - grab and drag an object")
+    print("ESC       - quit\n")
 
     while is_running and scene.viewer.is_alive():
         if requested["objects"]:
