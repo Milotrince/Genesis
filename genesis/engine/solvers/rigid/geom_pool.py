@@ -53,6 +53,7 @@ class GeomPoolSegment:
     # Residency bookkeeping (Stage 2). A slot is free when resident_key is None. A slot is evictable when its
     # refcount is 0 (no env currently bound) and it is not pinned.
     resident_key: list = field(default_factory=list)  # slot -> object key | None
+    resident_morph: list = field(default_factory=list)  # slot -> the resident morph (kept alive so id() stays valid)
     refcount: list = field(default_factory=list)  # slot -> #envs currently bound
     pinned: list = field(default_factory=list)  # slot -> bool (excluded from eviction)
     inertial: list = field(default_factory=list)  # slot -> LinkInertial-like of the resident object
@@ -63,6 +64,7 @@ class GeomPoolSegment:
 
     def __post_init__(self):
         self.resident_key = [None] * self.n_slots
+        self.resident_morph = [None] * self.n_slots
         self.refcount = [0] * self.n_slots
         self.pinned = [False] * self.n_slots
         self.inertial = [None] * self.n_slots

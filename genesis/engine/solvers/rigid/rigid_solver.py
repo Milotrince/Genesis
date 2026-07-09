@@ -2651,14 +2651,17 @@ class RigidSolver(KinematicSolver):
         # evictable and can be reused for this object (its refcount drops to 0 before acquire runs).
         self._pool_release_envs(segment, envs_idx_np)
 
-        # Resolve (or fill) the slot holding this object. A slot is keyed by the morph object; re-binding the
-        # same morph reuses its slot. Uploading only happens the first time an object is made resident.
+        # Resolve (or fill) the slot holding this object. A slot is keyed by the morph object's id; the segment
+        # keeps a reference to each resident morph (resident_morph) so its id stays valid while resident -
+        # otherwise a garbage-collected transient morph's id could be reused by a later one, aliasing slots.
+        # Re-binding the same morph reuses its slot; uploading happens only the first time it is made resident.
         key = id(object_ref)
         slot = segment.key_to_slot.get(key)
         if slot is None:
             slot = self._pool_acquire_slot(segment)
             inertial, n_live = self._pool_upload_object(entity, segment, slot, object_ref)
             segment.resident_key[slot] = key
+            segment.resident_morph[slot] = object_ref
             segment.inertial[slot] = inertial
             segment.n_live_geoms[slot] = n_live
             segment.key_to_slot[key] = slot
@@ -2715,6 +2718,7 @@ class RigidSolver(KinematicSolver):
             if segment.refcount[slot] == 0 and not segment.pinned[slot]:
                 segment.key_to_slot.pop(segment.resident_key[slot], None)
                 segment.resident_key[slot] = None
+                segment.resident_morph[slot] = None
                 segment.inertial[slot] = None
                 segment.n_live_geoms[slot] = 0
                 return slot
