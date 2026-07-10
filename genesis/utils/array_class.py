@@ -76,6 +76,12 @@ def V_SCALAR_FROM(dtype, value):
     return data
 
 
+def V_FROM(dtype, shape, value):
+    data = V(dtype=dtype, shape=shape)
+    data.fill(value)
+    return data
+
+
 # =========================================== ErrorCode ===========================================
 
 
@@ -123,7 +129,12 @@ class RigidGlobalInfo:
     mass_parent_mask: qd.Tensor
     gravity: qd.Tensor
     # Runtime constants
-    substep_dt: qd.Tensor
+    substep_dt: qd.Tensor  # per-env [_B]: the macro integration timestep, indexed [i_b]
+    # Per-DOF effective timestep [n_dofs, _B]: the dt actually used to integrate DOF i_d this (sub)step. Equals the
+    # macro substep_dt for every DOF under uniform stepping; with per-island adaptive rates a DOF whose island runs at
+    # macro_dt / r carries that smaller dt here. All integration and implicit-damping kernels read dofs_dt[i_d, i_b];
+    # the three non-DOF consumers (coupler impulse, drone vgeom, equality timeconst) keep reading the macro substep_dt.
+    dofs_dt: qd.Tensor
     iterations: qd.Tensor
     tolerance: qd.Tensor
     ls_iterations: qd.Tensor
@@ -199,7 +210,8 @@ def get_rigid_global_info(solver, kinematic_only):
             dofs_mass_block_start=V(dtype=gs.qd_int, shape=()),
             dofs_mass_block_end=V(dtype=gs.qd_int, shape=()),
             mass_parent_mask=V(dtype=gs.qd_float, shape=()),
-            substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=0.0),
+            substep_dt=V_FROM(dtype=gs.qd_float, shape=(_B,), value=0.0),
+            dofs_dt=V_FROM(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), value=0.0),
             iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=0),
             tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=0.0),
             ls_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=0),
@@ -236,7 +248,8 @@ def get_rigid_global_info(solver, kinematic_only):
         dofs_mass_block_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_block_end=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         mass_parent_mask=V(dtype=gs.qd_float, shape=(solver.n_dofs_, solver.n_dofs_)),
-        substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._substep_dt),
+        substep_dt=V_FROM(dtype=gs.qd_float, shape=(_B,), value=solver._substep_dt),
+        dofs_dt=V_FROM(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), value=solver._substep_dt),
         iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=solver._options.iterations),
         tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._options.tolerance),
         ls_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=solver._options.ls_iterations),

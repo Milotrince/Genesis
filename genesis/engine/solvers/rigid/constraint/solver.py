@@ -1782,7 +1782,7 @@ def kernel_add_weld_constraint(
             equalities_info.eq_data[i_e, i_b][10] = 1.0
 
             equalities_info.sol_params[i_e, i_b] = qd.Vector(
-                [2 * rigid_global_info.substep_dt[None], 1.0, 0.9, 0.95, 0.001, 0.5, 2.0]
+                [2 * rigid_global_info.substep_dt[i_b], 1.0, 0.9, 0.95, 0.001, 0.5, 2.0]
             )
 
             constraint_state.qd_n_equalities[i_b] = constraint_state.qd_n_equalities[i_b] + 1

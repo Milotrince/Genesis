@@ -59,7 +59,7 @@ def update_qacc_from_qvel_delta(
                 )
                 dofs_state.acc[i_d, i_b] = (
                     dofs_state.vel[i_d, i_b] - dofs_state.vel_prev[i_d, i_b]
-                ) / rigid_global_info.substep_dt[None]
+                ) / rigid_global_info.dofs_dt[i_d, i_b]
                 dofs_state.vel[i_d, i_b] = dofs_state.vel_prev[i_d, i_b]
 
 
@@ -90,7 +90,7 @@ def update_qvel(
                 )
                 dofs_state.vel_prev[i_d, i_b] = dofs_state.vel[i_d, i_b]
                 dofs_state.vel[i_d, i_b] = (
-                    dofs_state.vel[i_d, i_b] + dofs_state.acc[i_d, i_b] * rigid_global_info.substep_dt[None]
+                    dofs_state.vel[i_d, i_b] + dofs_state.acc[i_d, i_b] * rigid_global_info.dofs_dt[i_d, i_b]
                 )
 
 
@@ -474,13 +474,13 @@ def func_compute_mass_matrix(
         for i_d, i_b in qd.ndrange(dofs_state.f_ang.shape[0], links_state.pos.shape[1]):
             I_d = [i_d, i_b] if qd.static(static_rigid_sim_config.batch_dofs_info) else i_d
             rigid_global_info.mass_mat[i_d, i_d, i_b] = (
-                rigid_global_info.mass_mat[i_d, i_d, i_b] + dofs_info.damping[I_d] * rigid_global_info.substep_dt[None]
+                rigid_global_info.mass_mat[i_d, i_d, i_b] + dofs_info.damping[I_d] * rigid_global_info.dofs_dt[i_d, i_b]
             )
             if dofs_state.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
                 # qM += d qfrc_actuator / d qvel = -act_bias[2] * dt
                 rigid_global_info.mass_mat[i_d, i_d, i_b] = (
                     rigid_global_info.mass_mat[i_d, i_d, i_b]
-                    - dofs_info.act_bias[I_d][2] * rigid_global_info.substep_dt[None]
+                    - dofs_info.act_bias[I_d][2] * rigid_global_info.dofs_dt[i_d, i_b]
                 )
 
 
@@ -568,13 +568,13 @@ def func_factor_mass_tiled(
                     I_d = [i_d, i_b] if qd.static(static_rigid_sim_config.batch_dofs_info) else i_d
                     rigid_global_info.mass_mat_tiled_scratch[i_b, d_s + i_d_, d_s + i_d_] = (
                         rigid_global_info.mass_mat_tiled_scratch[i_b, d_s + i_d_, d_s + i_d_]
-                        + dofs_info.damping[I_d] * rigid_global_info.substep_dt[None]
+                        + dofs_info.damping[I_d] * rigid_global_info.dofs_dt[i_d, i_b]
                     )
                     if qd.static(static_rigid_sim_config.integrator == gs.integrator.implicitfast):
                         if dofs_state.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
                             rigid_global_info.mass_mat_tiled_scratch[i_b, d_s + i_d_, d_s + i_d_] = (
                                 rigid_global_info.mass_mat_tiled_scratch[i_b, d_s + i_d_, d_s + i_d_]
-                                - dofs_info.act_bias[I_d][2] * rigid_global_info.substep_dt[None]
+                                - dofs_info.act_bias[I_d][2] * rigid_global_info.dofs_dt[i_d, i_b]
                             )
                 i_d_ = i_d_ + T
             qd.simt.block.sync()
@@ -713,13 +713,13 @@ def func_factor_mass(
                             I_d = [i_d, i_b] if qd.static(static_rigid_sim_config.batch_dofs_info) else i_d
                             rigid_global_info.mass_mat_L[i_d, i_d, i_b] = (
                                 rigid_global_info.mass_mat_L[i_d, i_d, i_b]
-                                + dofs_info.damping[I_d] * rigid_global_info.substep_dt[None]
+                                + dofs_info.damping[I_d] * rigid_global_info.dofs_dt[i_d, i_b]
                             )
                             if qd.static(static_rigid_sim_config.integrator == gs.integrator.implicitfast):
                                 if dofs_state.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
                                     rigid_global_info.mass_mat_L[i_d, i_d, i_b] = (
                                         rigid_global_info.mass_mat_L[i_d, i_d, i_b]
-                                        - dofs_info.act_bias[I_d][2] * rigid_global_info.substep_dt[None]
+                                        - dofs_info.act_bias[I_d][2] * rigid_global_info.dofs_dt[i_d, i_b]
                                     )
                         i_d_ = i_d_ + BLOCK_DIM
                     qd.simt.block.sync()
@@ -785,13 +785,13 @@ def func_factor_mass(
                             I_d = [i_d, i_b] if qd.static(static_rigid_sim_config.batch_dofs_info) else i_d
                             rigid_global_info.mass_mat_L[i_d, i_d, i_b] = (
                                 rigid_global_info.mass_mat_L[i_d, i_d, i_b]
-                                + dofs_info.damping[I_d] * rigid_global_info.substep_dt[None]
+                                + dofs_info.damping[I_d] * rigid_global_info.dofs_dt[i_d, i_b]
                             )
                             if qd.static(static_rigid_sim_config.integrator == gs.integrator.implicitfast):
                                 if dofs_state.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
                                     rigid_global_info.mass_mat_L[i_d, i_d, i_b] = (
                                         rigid_global_info.mass_mat_L[i_d, i_d, i_b]
-                                        - dofs_info.act_bias[I_d][2] * rigid_global_info.substep_dt[None]
+                                        - dofs_info.act_bias[I_d][2] * rigid_global_info.dofs_dt[i_d, i_b]
                                     )
 
                     for i_d_ in range(n_dofs):
@@ -853,13 +853,13 @@ def func_factor_mass(
                             i_d = entity_dof_start + i_d_
                             I_d = [i_d, i_b] if qd.static(static_rigid_sim_config.batch_dofs_info) else i_d
                             mass_mat[i_d_, i_d_] = (
-                                mass_mat[i_d_, i_d_] + dofs_info.damping[I_d] * rigid_global_info.substep_dt[None]
+                                mass_mat[i_d_, i_d_] + dofs_info.damping[I_d] * rigid_global_info.dofs_dt[i_d, i_b]
                             )
                             if qd.static(static_rigid_sim_config.integrator == gs.integrator.implicitfast):
                                 if dofs_state.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
                                     mass_mat[i_d_, i_d_] = (
                                         mass_mat[i_d_, i_d_]
-                                        - dofs_info.act_bias[I_d][2] * rigid_global_info.substep_dt[None]
+                                        - dofs_info.act_bias[I_d][2] * rigid_global_info.dofs_dt[i_d, i_b]
                                     )
                             i_d_ = i_d_ + BLOCK_DIM
                         qd.simt.block.sync()
@@ -928,13 +928,13 @@ def func_factor_mass(
                         I_d = [i_d, i_b] if qd.static(static_rigid_sim_config.batch_dofs_info) else i_d
                         qd.atomic_add(
                             rigid_global_info.mass_mat_L_bw[0, i_pr, i_pr, i_b],
-                            (dofs_info.damping[I_d] * rigid_global_info.substep_dt[None]),
+                            (dofs_info.damping[I_d] * rigid_global_info.dofs_dt[i_d, i_b]),
                         )
                         if qd.static(static_rigid_sim_config.integrator == gs.integrator.implicitfast):
                             if dofs_state.ctrl_mode[i_d, i_b] <= gs.CTRL_MODE.VELOCITY:
                                 qd.atomic_add(
                                     rigid_global_info.mass_mat_L_bw[0, i_pr, i_pr, i_b],
-                                    -dofs_info.act_bias[I_d][2] * rigid_global_info.substep_dt[None],
+                                    -dofs_info.act_bias[I_d][2] * rigid_global_info.dofs_dt[i_d, i_b],
                                 )
 
                 # Cholesky-Banachiewicz algorithm (in the perturbed indices), access pattern is safe for autodiff
@@ -1610,7 +1610,7 @@ def func_integrate(
                 )
 
                 dofs_state.vel_next[i_d, i_b] = (
-                    dofs_state.vel[i_d, i_b] + dofs_state.acc[i_d, i_b] * rigid_global_info.substep_dt[None]
+                    dofs_state.vel[i_d, i_b] + dofs_state.acc[i_d, i_b] * rigid_global_info.dofs_dt[i_d, i_b]
                 )
 
     qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
@@ -1661,9 +1661,9 @@ def func_integrate(
                         )
                         # Backward pass requires atomic add
                         if qd.static(BW):
-                            qd.atomic_add(pos, vel * rigid_global_info.substep_dt[None])
+                            qd.atomic_add(pos, vel * rigid_global_info.dofs_dt[dof_start, i_b])
                         else:
-                            pos = pos + vel * rigid_global_info.substep_dt[None]
+                            pos = pos + vel * rigid_global_info.dofs_dt[dof_start, i_b]
                         for j in qd.static(range(3)):
                             rigid_global_info.qpos_next[q_start + j, i_b] = pos[j]
                     if joint_type == gs.JOINT_TYPE.SPHERICAL or joint_type == gs.JOINT_TYPE.FREE:
@@ -1684,7 +1684,7 @@ def func_integrate(
                                     dofs_state.vel_next[dof_start + rot_offset + 2, i_b],
                                 ]
                             )
-                            * rigid_global_info.substep_dt[None]
+                            * rigid_global_info.dofs_dt[dof_start, i_b]
                         )
                         qrot = gu.qd_rotvec_to_quat(ang, EPS)
                         rot = gu.qd_transform_quat_by_quat(qrot, rot0)
@@ -1696,7 +1696,8 @@ def func_integrate(
                             if j < q_end:
                                 rigid_global_info.qpos_next[j, i_b] = (
                                     rigid_global_info.qpos[j, i_b]
-                                    + dofs_state.vel_next[dof_start + j_, i_b] * rigid_global_info.substep_dt[None]
+                                    + dofs_state.vel_next[dof_start + j_, i_b]
+                                    * rigid_global_info.dofs_dt[dof_start + j_, i_b]
                                 )
 
 
