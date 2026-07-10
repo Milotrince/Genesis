@@ -671,6 +671,10 @@ class IslandState:
     # envelope iterate each constraint's own support (jac_dofs_idx) instead of scanning the whole island.
     dof_local_pos: qd.Tensor
     dofs_island_idx: qd.Tensor
+    # Per-island integer rate r: the island integrates at macro_dt / r. Only allocated under use_adaptive_timestep
+    # (scalar () otherwise); defaults to 1 (uniform stepping). Indexed [i_island, i_b] and persists across steps
+    # (rebuilt islands keep their rate by index) until the rate-assignment pass overwrites it.
+    island_rate: qd.Tensor
     # Per-island skyline envelope: dof_env_start_local[dof_slices.start[i] + ld] is the smallest island-local column
     # that can be structurally nonzero in local row ld of island i's Hessian block (from constraint supports and mass
     # coupling). The per-island assembly, Cholesky factor and triangular solve visit only [env_start, ld], so a large
@@ -748,6 +752,7 @@ def get_island_state(solver, collider):
         dof_id=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         dof_local_pos=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         dofs_island_idx=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
+        island_rate=V_FROM(dtype=gs.qd_int, shape=maybe_shape((n_links, _B), solver._use_adaptive_timestep), value=1),
         dof_env_start_local=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         dof_env_col_end=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         contact_slices=get_slices(solver, is_active),
@@ -2283,6 +2288,9 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     requires_grad: bool
     prefer_decomposed_solver: int = -1  # -1 = None (auto), 0 = False, 1 = True
     use_contact_island: bool = False  # per-island Newton solve (gated; the legacy island solver is retired)
+    # Per-island adaptive timestep: each island integrates at macro_dt / rate. Gated to require use_contact_island.
+    use_adaptive_timestep: bool = False
+    adaptive_timestep_max_rate: int = 1  # upper bound on an island's rate; also caps the micro-step schedule length
     # Consecutive sub-tolerance steps a body's max DOF velocity must hold before it is ready to hibernate. Guards
     # against a body that is only momentarily slow (e.g. at the apex of a toss) sleeping prematurely.
     hibernation_min_steps: int = 10

@@ -476,6 +476,13 @@ class RigidOptions(Options):
         Whether to partition the constraint solve into independent per-island blocks. It has no effect on a scene that
         is a single dense-coupled tree (one island) or is differentiable, where the dense whole-scene solve is used
         regardless. Defaults to True.
+    use_adaptive_timestep : bool, optional
+        Whether to let each contact island advance at its own integer sub-multiple of the macro timestep, so a fast or
+        stiff island (e.g. a robot in contact) sub-steps while a settled island (e.g. a resting pile) takes one big
+        step. Requires ``use_contact_island`` and is disabled under ``requires_grad``. Defaults to False.
+    adaptive_timestep_max_rate : int, optional
+        Upper bound on an island's rate ``r`` (its dt is ``macro_dt / r``) when ``use_adaptive_timestep`` is enabled.
+        Caps the worst-case number of micro-steps per macro step. Defaults to 8.
     use_hibernation : bool, optional
         Whether to put bodies that have come to rest to sleep, so the solver skips them until they are disturbed. It
         quietly has no effect on a body that is differentiable, prunable, or under no-slip friction. Defaults to False.
@@ -531,6 +538,8 @@ class RigidOptions(Options):
     sparse_solve: StrictBool | None = None
     constraint_timeconst: PositiveFloat = 0.01
     use_contact_island: StrictBool = True
+    use_adaptive_timestep: StrictBool = False
+    adaptive_timestep_max_rate: PositiveInt = 8
     box_box_detection: StrictBool = False
 
     # hibernation threshold
