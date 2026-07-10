@@ -1237,12 +1237,15 @@ class RigidSolver(KinematicSolver):
             )
             return
 
-        # Multi-rate schedule: one macro step is R_max micro-ticks. Islands re-detect and re-solve every tick, but an
-        # island of rate r only integrates on ticks that are multiples of R_max / r (its dt is macro_dt / r); the rest
-        # of the time kernel_update_dofs_dt sets its DOFs' dt to 0 so func_integrate holds them. R_max == 1 (adaptive
-        # off) collapses this to the single-substep path with no scatter, bit-identical to uniform stepping.
-        n_ticks = self._adaptive_timestep_max_rate if self._use_adaptive_timestep else 1
-        for tick in range(n_ticks):
+        # Multi-rate schedule: one macro step is `sched_len` micro-ticks, where sched_len is the fastest island's rate
+        # assigned this step (<= adaptive_timestep_max_rate). Islands re-detect and re-solve every tick, but an island
+        # of rate r only integrates on ticks that are multiples of sched_len / r (its dt is macro_dt / r); the rest of
+        # the time kernel_update_dofs_dt sets its DOFs' dt to 0 so func_integrate holds them. sched_len is read after
+        # the tick-0 rate assignment, so a scene where nothing needs sub-stepping runs a single pass, bit-identical to
+        # uniform stepping (adaptive off runs one pass with no scatter).
+        max_ticks = self._adaptive_timestep_max_rate if self._use_adaptive_timestep else 1
+        sched_len = 1
+        for tick in range(max_ticks):
             kernel_step_1(
                 self.links_state,
                 self.links_info,
@@ -1263,18 +1266,22 @@ class RigidSolver(KinematicSolver):
             )
             self._func_constraint_force()
             if self._use_adaptive_timestep:
+                island_state = self.constraint_solver.island_state
                 # Assign per-island rates once, at the macro boundary, from pre-integration velocities; they then
-                # persist across this macro step's micro-ticks. The scatter converts them to per-DOF dt each tick.
+                # persist across this macro step's micro-ticks. sched_len (the fastest rate) then bounds the loop.
                 if tick == 0:
+                    island_state.island_rate_max.fill(1)
                     kernel_assign_island_rates(
                         self.dofs_state,
-                        self.constraint_solver.island_state,
+                        island_state,
                         self._rigid_global_info,
                         self._static_rigid_sim_config,
                     )
+                    sched_len = int(qd_to_numpy(island_state.island_rate_max)[0])
                 kernel_update_dofs_dt(
                     tick,
-                    self.constraint_solver.island_state,
+                    sched_len,
+                    island_state,
                     self._rigid_global_info,
                     self._static_rigid_sim_config,
                 )
@@ -1306,6 +1313,9 @@ class RigidSolver(KinematicSolver):
                     self._rigid_adjoint_cache,
                     self._static_rigid_sim_config,
                 )
+            # All islands have advanced by a full macro step once the fastest island has taken sched_len micro-steps.
+            if self._use_adaptive_timestep and tick + 1 >= sched_len:
+                break
 
     def get_error_envs_mask(self):
         return qd_to_torch(self._errno) > 0
@@ -3491,22 +3501,24 @@ def kernel_assign_island_rates(
             while rate < R_max and rate < ratio:
                 rate = rate * 2
             island_state.island_rate[i_island, i_b] = rate
+            qd.atomic_max(island_state.island_rate_max[0], rate)
 
 
 @qd.kernel(fastcache=True)
 def kernel_update_dofs_dt(
     tick: qd.i32,
+    sched_len: qd.i32,
     island_state: array_class.IslandState,
     rigid_global_info: array_class.RigidGlobalInfo,
     static_rigid_sim_config: qd.template(),
 ):
-    """Set the per-DOF effective timestep for micro-step `tick` of the multi-rate schedule.
+    """Set the per-DOF effective timestep for micro-step `tick` of a `sched_len`-tick multi-rate schedule.
 
-    An island with rate r integrates at macro_dt / r and is active only on ticks that are multiples of R_max / r
-    (r divides R_max). On its active ticks a DOF gets dofs_dt = macro_dt / r; otherwise dofs_dt = 0, which makes
-    func_integrate a no-op (vel += acc*0, pos += vel*0) so the island holds until its next active tick.
+    sched_len is the fastest island's rate this macro step (so the loop runs exactly sched_len ticks). An island of
+    rate r integrates at macro_dt / r and is active only on ticks that are multiples of sched_len / r (r divides
+    sched_len, both powers of two). On its active ticks a DOF gets dofs_dt = macro_dt / r; otherwise dofs_dt = 0,
+    which makes func_integrate a no-op (vel += acc*0, pos += vel*0) so the island holds until its next active tick.
     """
-    R_max = qd.static(static_rigid_sim_config.adaptive_timestep_max_rate)
     n_dofs = rigid_global_info.dofs_dt.shape[0]
     _B = rigid_global_info.dofs_dt.shape[1]
     qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
@@ -3515,14 +3527,14 @@ def kernel_update_dofs_dt(
         rate = 1
         if i_island >= 0:
             rate = island_state.island_rate[i_island, i_b]
-        # Clamp to [1, R_max] so R_max // rate stays >= 1 (rate-assignment should already quantize to a divisor of
-        # R_max; this only guards against a stray out-of-range value crashing the schedule).
+        # Clamp to [1, sched_len] so sched_len // rate stays >= 1 (assignment already quantizes to a power-of-two
+        # divisor <= sched_len; this only guards against a stray out-of-range value crashing the schedule).
         if rate < 1:
             rate = 1
-        elif rate > R_max:
-            rate = R_max
+        elif rate > sched_len:
+            rate = sched_len
         scale = 0.0
-        if tick % (R_max // rate) == 0:
+        if tick % (sched_len // rate) == 0:
             scale = 1.0 / rate
         rigid_global_info.dofs_dt[i_d, i_b] = rigid_global_info.substep_dt[i_b] * scale
 
