@@ -2876,6 +2876,11 @@ class RigidSolver(KinematicSolver):
                 continue
             self._bind_link_variant(link, variant_idx, envs_idx_np)
 
+        # For a ragged entity the variants differ in kinematic topology, so also rebind each switched
+        # environment's joint type + DOF/q mapping + link parent/pose to its new variant.
+        if entity._has_ragged_topology:
+            self._bind_entity_topology(entity, variant_idx, envs_idx_np)
+
         # The inertial changed, so the neutral-rest invweight/meaninertia must be recomputed. That routine
         # momentarily drives the selected environments to qpos0, so the current joint configuration is saved
         # and restored; the restoring set_qpos also resets contact caches and re-runs forward kinematics to
@@ -2885,6 +2890,16 @@ class RigidSolver(KinematicSolver):
             qpos_saved = qd_to_torch(self.qpos, envs_idx, transpose=True, copy=True)
             if self.n_envs == 0:
                 qpos_saved = qpos_saved[0]
+            # A topology switch remaps which joints occupy the entity's q-slots, so the preserved qpos no
+            # longer applies; reset just this entity's q-range to each new variant's neutral pose.
+            if entity._has_ragged_topology and entity.n_qs > 0:
+                variant_qpos = np.stack([entity._variant_init_qpos[v] for v in variant_idx])
+                variant_qpos = torch.as_tensor(variant_qpos, dtype=qpos_saved.dtype, device=qpos_saved.device)
+                q_s, q_e = entity.q_start, entity.q_end
+                if self.n_envs == 0:
+                    qpos_saved[q_s:q_e] = variant_qpos[0]
+                else:
+                    qpos_saved[:, q_s:q_e] = variant_qpos
             self._init_invweight_and_meaninertia(envs_idx=restore_envs)
             self.set_qpos(qpos_saved, envs_idx=restore_envs)
         else:

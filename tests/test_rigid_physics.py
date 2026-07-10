@@ -7515,6 +7515,17 @@ def test_topology_variant_ragged_links(show_viewer, tol):
     with pytest.raises(AssertionError):  # the two chain lengths evolve their shared first joint differently
         assert_allclose(dofs_pos[0, 0], dofs_pos[1, 0], tol=tol)
 
+    # set_active_variant rebinds the full topology (not just geometry) for a ragged entity, so the two
+    # environments can swap chain lengths at runtime: now env 0 is the 1-link variant, env 1 the 2-link one.
+    ragged.set_active_variant([1, 0], envs_idx=[0, 1])
+    dof1_env0 = ragged.get_dofs_position()[0, 1].clone()  # inert now; frozen at its current value
+    for _ in range(40):
+        scene.step()
+    dofs_pos = ragged.get_dofs_position()
+    assert not torch.isnan(dofs_pos).any()
+    assert_allclose(dofs_pos[0, 1], dof1_env0, tol=tol)  # env 0 now 1-link: second DOF inert (does not evolve)
+    assert (dofs_pos[1, 1].abs() > 0.01).all()  # env 1 now 2-link: second DOF active
+
 
 @pytest.mark.required
 def test_heterogeneous_invalid_material_raises():
