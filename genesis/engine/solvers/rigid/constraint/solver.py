@@ -2404,6 +2404,31 @@ def func_island_assemble_factor_solve_tiled(
 
 
 @qd.func
+def func_island_solve_skip(
+    island_state: array_class.IslandState,
+    i_island: qd.i32,
+    i_b: qd.i32,
+    static_rigid_sim_config: qd.template(),
+):
+    """Whether island i_island's per-island factor/solve can be skipped this (sub)step.
+
+    Skipped if the island is hibernated (all links asleep) or, under adaptive timestep, inactive on the current
+    micro-tick (a slow island that already took its macro step and is frozen for the remaining ticks). Both cases
+    leave the island's qacc/qfrc from its last active solve untouched, which is correct because it does not integrate.
+    Each branch is statically compiled only when its feature is enabled, so the non-adaptive/non-hibernation solve is
+    unchanged.
+    """
+    skip = False
+    if qd.static(static_rigid_sim_config.use_hibernation):
+        if island_state.is_hibernated[i_island, i_b]:
+            skip = True
+    if qd.static(static_rigid_sim_config.use_adaptive_timestep):
+        if island_state.island_inactive[i_island, i_b]:
+            skip = True
+    return skip
+
+
+@qd.func
 def func_island_tiled_factor_solve_all(
     entities_info: array_class.EntitiesInfo,
     constraint_state: array_class.ConstraintState,
@@ -2447,9 +2472,8 @@ def func_island_tiled_factor_solve_all(
             i_island = island_state.factor_worklist_i_island[i_work]
             if constraint_state.n_constraints[i_b] > 0 and constraint_state.improved[i_b]:
                 do_island = True
-                if qd.static(static_rigid_sim_config.use_hibernation):
-                    if island_state.is_hibernated[i_island, i_b]:
-                        do_island = False
+                if func_island_solve_skip(island_state, i_island, i_b, static_rigid_sim_config):
+                    do_island = False
                 if do_island:
                     func_island_assemble_factor_solve_tiled(
                         i_b,
@@ -2995,9 +3019,8 @@ def func_hessian_and_cholesky_factor_direct_batch(
     # island's structural skyline envelope first (callers do this once per step, then leave it False).
     if qd.static(static_rigid_sim_config.enable_per_island_solve):
         for i_island in range(island_state.n_islands[i_b]):
-            if qd.static(static_rigid_sim_config.use_hibernation):
-                if island_state.is_hibernated[i_island, i_b]:
-                    continue
+            if func_island_solve_skip(island_state, i_island, i_b, static_rigid_sim_config):
+                continue
             if qd.static(compute_envelope):
                 func_compute_island_envelope(i_b, i_island, island_state, constraint_state, rigid_global_info)
             func_hessian_direct_batch(
@@ -3055,9 +3078,8 @@ def func_hessian_and_cholesky_factor_direct(
         )
         for i_b, i_island in qd.ndrange(_B, max_islands):
             if i_island < island_state.n_islands[i_b]:
-                if qd.static(static_rigid_sim_config.use_hibernation):
-                    if island_state.is_hibernated[i_island, i_b]:
-                        continue
+                if func_island_solve_skip(island_state, i_island, i_b, static_rigid_sim_config):
+                    continue
                 if qd.static(compute_envelope):
                     func_compute_island_envelope(i_b, i_island, island_state, constraint_state, rigid_global_info)
                 func_hessian_direct_batch(
@@ -4716,9 +4738,8 @@ def func_update_gradient_batch(
         if qd.static(static_rigid_sim_config.enable_per_island_solve):
             # Mgrad = H^{-1} @ grad solved per island on each island's local tile (factored above).
             for i_island in range(island_state.n_islands[i_b]):
-                if qd.static(static_rigid_sim_config.use_hibernation):
-                    if island_state.is_hibernated[i_island, i_b]:
-                        continue
+                if func_island_solve_skip(island_state, i_island, i_b, static_rigid_sim_config):
+                    continue
                 func_cholesky_solve_batch(i_b, i_island, island_state, constraint_state, static_rigid_sim_config)
         else:
             # Whole-env solve (matching the whole-env factor): the block-diagonal L's per-island blocks are solved
@@ -5338,9 +5359,8 @@ def func_solve_iter(
                 and not static_rigid_sim_config.sparse_envelope
             ):
                 for i_island in range(island_state.n_islands[i_b]):
-                    if qd.static(static_rigid_sim_config.use_hibernation):
-                        if island_state.is_hibernated[i_island, i_b]:
-                            continue
+                    if func_island_solve_skip(island_state, i_island, i_b, static_rigid_sim_config):
+                        continue
                     func_factor_island_incremental_or_direct(
                         i_b,
                         i_island,

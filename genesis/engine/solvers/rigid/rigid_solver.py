@@ -1245,7 +1245,15 @@ class RigidSolver(KinematicSolver):
         # uniform stepping (adaptive off runs one pass with no scatter).
         max_ticks = self._adaptive_timestep_max_rate if self._use_adaptive_timestep else 1
         sched_len = 1
+        island_state = self.constraint_solver.island_state
         for tick in range(max_ticks):
+            if self._use_adaptive_timestep:
+                # Flag which islands are frozen on this tick before the solve, so it skips them. Tick 0 is the macro
+                # boundary (all islands active); later ticks reuse the rates assigned at tick 0 (stable by index).
+                if tick == 0:
+                    island_state.island_inactive.fill(0)
+                else:
+                    kernel_mark_active_islands(tick, sched_len, island_state, self._static_rigid_sim_config)
             kernel_step_1(
                 self.links_state,
                 self.links_info,
@@ -1266,7 +1274,6 @@ class RigidSolver(KinematicSolver):
             )
             self._func_constraint_force()
             if self._use_adaptive_timestep:
-                island_state = self.constraint_solver.island_state
                 # Assign per-island rates once, at the macro boundary, from pre-integration velocities; they then
                 # persist across this macro step's micro-ticks. sched_len (the fastest rate) then bounds the loop.
                 if tick == 0:
@@ -3502,6 +3509,31 @@ def kernel_assign_island_rates(
                 rate = rate * 2
             island_state.island_rate[i_island, i_b] = rate
             qd.atomic_max(island_state.island_rate_max[0], rate)
+
+
+@qd.kernel(fastcache=True)
+def kernel_mark_active_islands(
+    tick: qd.i32,
+    sched_len: qd.i32,
+    island_state: array_class.IslandState,
+    static_rigid_sim_config: qd.template(),
+):
+    """Flag islands frozen (inactive) on micro-step `tick`, so the per-island solve skips them.
+
+    An island of rate r is active iff tick is a multiple of sched_len / r; an inactive island does not integrate this
+    tick, so its factor/solve is redundant and func_island_solve_skip skips it. Run before the constraint solve, using
+    the rates assigned at the macro boundary (which persist by island index across the macro step's re-partitions).
+    """
+    n_links = island_state.island_inactive.shape[0]
+    _B = island_state.island_inactive.shape[1]
+    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_island, i_b in qd.ndrange(n_links, _B):
+        rate = island_state.island_rate[i_island, i_b]
+        if rate < 1:
+            rate = 1
+        elif rate > sched_len:
+            rate = sched_len
+        island_state.island_inactive[i_island, i_b] = 0 if tick % (sched_len // rate) == 0 else 1
 
 
 @qd.kernel(fastcache=True)

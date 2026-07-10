@@ -679,6 +679,11 @@ class IslandState:
     # before each assign). The substep loop reads it once to run exactly that many micro-ticks instead of the static
     # max-rate cap, so a scene where nothing needs sub-stepping costs a single pass. Shape (1,) under adaptive.
     island_rate_max: qd.Tensor
+    # Per-island "frozen this micro-tick" flag (1 = skip its factor/solve, 0 = active). Set each fast tick from
+    # island_rate and the tick index; the solver's per-island loops skip it via func_island_solve_skip so a slow
+    # island is not re-solved on ticks where it does not integrate. Reset to 0 (all active) at the macro boundary.
+    # Only allocated under use_adaptive_timestep (scalar () otherwise).
+    island_inactive: qd.Tensor
     # Per-island skyline envelope: dof_env_start_local[dof_slices.start[i] + ld] is the smallest island-local column
     # that can be structurally nonzero in local row ld of island i's Hessian block (from constraint supports and mass
     # coupling). The per-island assembly, Cholesky factor and triangular solve visit only [env_start, ld], so a large
@@ -758,6 +763,9 @@ def get_island_state(solver, collider):
         dofs_island_idx=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         island_rate=V_FROM(dtype=gs.qd_int, shape=maybe_shape((n_links, _B), solver._use_adaptive_timestep), value=1),
         island_rate_max=V_FROM(dtype=gs.qd_int, shape=maybe_shape((1,), solver._use_adaptive_timestep), value=1),
+        island_inactive=V_FROM(
+            dtype=gs.qd_int, shape=maybe_shape((n_links, _B), solver._use_adaptive_timestep), value=0
+        ),
         dof_env_start_local=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         dof_env_col_end=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         contact_slices=get_slices(solver, is_active),
