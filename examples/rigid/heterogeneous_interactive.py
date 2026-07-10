@@ -20,7 +20,7 @@ Usage:
     python heterogeneous_interactive.py --cpu
 
 Controls (pool):        R randomize objects, T randomize size, left-drag grab, ESC quit
-Controls (articulated): R randomize joint pose, left-drag grab, ESC quit
+Controls (articulated): R randomize robots, T randomize size, Y randomize joint pose, left-drag grab, ESC quit
 """
 
 import argparse
@@ -178,20 +178,19 @@ def run_pool(scene, args, n_envs):
 
 
 def run_articulated(scene, args, n_envs):
-    """Ragged-topology demo: each environment is a Franka arm with or without its gripper."""
+    """Ragged-topology demo: each environment is a different robot, swapped/rescaled/posed at runtime."""
     scene.add_entity(gs.morphs.Plane())
     # A mix of genuinely different robots per environment - a Franka with and without its gripper, a KUKA iiwa,
     # and a simple 2-link arm. The first morph defines the skeleton and must be the largest (most links, widest
     # joint per slot): the Franka-with-gripper is a superset of the others, whose missing links/DOFs are the
-    # trailing slots they leave inert.
-    robot = scene.add_entity(
-        morph=(
-            gs.morphs.URDF(file="urdf/panda_bullet/panda.urdf", fixed=True),
-            gs.morphs.URDF(file="urdf/panda_bullet/panda_nohand.urdf", fixed=True),
-            gs.morphs.URDF(file="urdf/kuka_iiwa/model.urdf", fixed=True),
-            gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf", fixed=True),
-        ),
+    # trailing slots they leave inert. batch_fixed_verts lets the fixed base be rescaled per environment.
+    variants = (
+        gs.morphs.URDF(file="urdf/panda_bullet/panda.urdf", fixed=True, batch_fixed_verts=True),
+        gs.morphs.URDF(file="urdf/panda_bullet/panda_nohand.urdf", fixed=True, batch_fixed_verts=True),
+        gs.morphs.URDF(file="urdf/kuka_iiwa/model.urdf", fixed=True, batch_fixed_verts=True),
+        gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf", fixed=True, batch_fixed_verts=True),
     )
+    robot = scene.add_entity(morph=variants)
 
     scene.viewer.add_plugin(
         gs.vis.viewer_plugins.MouseInteractionPlugin(
@@ -206,40 +205,61 @@ def run_articulated(scene, args, n_envs):
         f"their extra slots inert."
     )
 
-    # Hold each arm at a joint-position target against gravity; R re-samples the target within the joint limits.
-    kp = np.full(robot.n_dofs, 200.0, dtype=np.float32)
-    kv = np.full(robot.n_dofs, 20.0, dtype=np.float32)
-    robot.set_dofs_kp(kp)
-    robot.set_dofs_kv(kv)
+    # Position control holds each arm at a joint target against gravity; Y re-samples the target.
+    robot.set_dofs_kp(np.full(robot.n_dofs, 200.0, dtype=np.float32))
+    robot.set_dofs_kv(np.full(robot.n_dofs, 20.0, dtype=np.float32))
     limits = robot.get_dofs_limit()  # (lower, upper), each (n_dofs,)
     lower = np.nan_to_num(tensor_to_array(limits[0]), neginf=-np.pi)
     upper = np.nan_to_num(tensor_to_array(limits[1]), posinf=np.pi)
     rng = np.random.default_rng(args.seed)
 
-    def sample_targets():
-        return rng.uniform(lower, upper, size=(n_envs, robot.n_dofs)).astype(np.float32)
+    def apply_randomize_objects():
+        """Swap which robot each environment simulates (runtime topology rebind via set_active_variant)."""
+        robot.set_active_variant(rng.integers(0, len(variants), size=n_envs), envs_idx=list(range(n_envs)))
+        robot.control_dofs_position(rng.uniform(lower, upper, size=(n_envs, robot.n_dofs)).astype(np.float32))
 
-    requested = {"pose": False}
+    def apply_randomize_size():
+        """Give each environment a random isotropic scale (per-env geom scaling of the whole robot)."""
+        scales = rng.uniform(0.6, 1.4, size=n_envs).astype(np.float32)
+        robot.set_scale(np.repeat(scales[:, None], 3, axis=1))
+
+    def apply_randomize_pose():
+        """Re-sample each environment's joint-position target within the joint limits."""
+        robot.control_dofs_position(rng.uniform(lower, upper, size=(n_envs, robot.n_dofs)).astype(np.float32))
+
+    # Keybind callbacks fire on the viewer thread and must not launch GPU kernels concurrently with the main
+    # loop's scene.step(); each only raises a request flag that the loop drains between steps (see run_pool).
+    requested = {"objects": False, "size": False, "pose": False}
     is_running = [True]
 
     scene.viewer.register_keybinds(
-        Keybind("randomize_pose", Key.R, KeyAction.PRESS, callback=lambda: requested.__setitem__("pose", True)),
+        Keybind("randomize_objects", Key.R, KeyAction.PRESS, callback=lambda: requested.__setitem__("objects", True)),
+        Keybind("randomize_size", Key.T, KeyAction.PRESS, callback=lambda: requested.__setitem__("size", True)),
+        Keybind("randomize_pose", Key.Y, KeyAction.PRESS, callback=lambda: requested.__setitem__("pose", True)),
         Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=lambda: is_running.__setitem__(0, False)),
         overwrite=True,
     )
 
     if "PYTEST_VERSION" not in os.environ:
-        robot.control_dofs_position(sample_targets())
+        apply_randomize_pose()
 
     print("\nArticulated controls:")
-    print("R         - randomize each environment's joint pose")
+    print("R         - randomize each environment's robot")
+    print("T         - randomize each environment's size")
+    print("Y         - randomize each environment's joint pose")
     print("left-drag - grab and drag a link")
     print("ESC       - quit\n")
 
     while is_running[0] and scene.viewer.is_alive():
+        if requested["objects"]:
+            requested["objects"] = False
+            apply_randomize_objects()
+        if requested["size"]:
+            requested["size"] = False
+            apply_randomize_size()
         if requested["pose"]:
             requested["pose"] = False
-            robot.control_dofs_position(sample_targets())
+            apply_randomize_pose()
         scene.step()
         if "PYTEST_VERSION" in os.environ:
             break
@@ -259,6 +279,7 @@ def main():
 
     if args.articulated:
         scene = gs.Scene(
+            rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(3.0, -3.0, 2.0),
                 camera_lookat=(0.0, 0.0, 0.4),
