@@ -424,6 +424,10 @@ def kernel_update_heterogeneous_topology(
     links_dof_end: qd.types.ndarray(),
     links_q_start: qd.types.ndarray(),
     links_q_end: qd.types.ndarray(),
+    links_parent_idx: qd.types.ndarray(),
+    links_root_idx: qd.types.ndarray(),
+    links_pos: qd.types.ndarray(),
+    links_quat: qd.types.ndarray(),
     joint_idxs: qd.types.ndarray(),
     joints_type: qd.types.ndarray(),
     joints_n_dofs: qd.types.ndarray(),
@@ -464,6 +468,12 @@ def kernel_update_heterogeneous_topology(
             links_info.dof_end[i_l, i_b] = links_dof_end[i_l_, i_b_]
             links_info.q_start[i_l, i_b] = links_q_start[i_l_, i_b_]
             links_info.q_end[i_l, i_b] = links_q_end[i_l_, i_b_]
+            links_info.parent_idx[i_l, i_b] = links_parent_idx[i_l_, i_b_]
+            links_info.root_idx[i_l, i_b] = links_root_idx[i_l_, i_b_]
+            for j in qd.static(range(3)):
+                links_info.pos[i_l, i_b][j] = links_pos[i_l_, i_b_, j]
+            for j in qd.static(range(4)):
+                links_info.quat[i_l, i_b][j] = links_quat[i_l_, i_b_, j]
         for i_j_ in range(joint_idxs.shape[0]):
             i_j = joint_idxs[i_j_]
             joints_info.type[i_j, i_b] = joints_type[i_j_, i_b_]

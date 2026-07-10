@@ -1110,6 +1110,10 @@ class RigidSolver(KinematicSolver):
         links_dof_end = np.empty((len(links), n_sel), dtype=gs.np_int)
         links_q_start = np.empty((len(links), n_sel), dtype=gs.np_int)
         links_q_end = np.empty((len(links), n_sel), dtype=gs.np_int)
+        links_parent_idx = np.empty((len(links), n_sel), dtype=gs.np_int)
+        links_root_idx = np.empty((len(links), n_sel), dtype=gs.np_int)
+        links_pos = np.empty((len(links), n_sel, 3), dtype=gs.np_float)
+        links_quat = np.empty((len(links), n_sel, 4), dtype=gs.np_float)
         joints_type = np.empty((len(joints), n_sel), dtype=gs.np_int)
         joints_n_dofs = np.empty((len(joints), n_sel), dtype=gs.np_int)
         joints_dof_start = np.empty((len(joints), n_sel), dtype=gs.np_int)
@@ -1131,8 +1135,11 @@ class RigidSolver(KinematicSolver):
         dofs_force_range = np.empty((len(dof_idxs), n_sel, 2), dtype=gs.np_float)
         dofs_force_range[..., 0], dofs_force_range[..., 1] = -np.inf, np.inf
 
+        link_start = entity.link_start
         for i_b_, variant in enumerate(variant_idx):
-            variant_links_j_infos = entity._variant_links_j_infos[variant]
+            variant_l_infos = entity._variant_links_l_infos[variant]
+            variant_j_infos = entity._variant_links_j_infos[variant]
+            n_variant_links = len(variant_l_infos)
             i_j_flat = 0
             for i_l_, link in enumerate(links):
                 if len(link.joints) > 1:
@@ -1140,37 +1147,57 @@ class RigidSolver(KinematicSolver):
                         f"Ragged heterogeneous topology requires single-joint links; link '{link.name}' has "
                         f"{len(link.joints)} joints."
                     )
+                # A slot beyond this variant's link count is inert in its environments: keep the primary link's
+                # graph position + local pose but make it massless + frozen (FIXED joint, all DOFs inert).
+                is_active = i_l_ < n_variant_links
+                if is_active:
+                    v_l_info = variant_l_infos[i_l_]
+                    parent_idx = v_l_info["parent_idx"]
+                    root_idx = v_l_info.get("root_idx")
+                    links_parent_idx[i_l_, i_b_] = parent_idx + link_start if parent_idx >= 0 else -1
+                    links_root_idx[i_l_, i_b_] = (
+                        root_idx + link_start if (root_idx is not None and root_idx >= 0) else -1
+                    )
+                    links_pos[i_l_, i_b_] = v_l_info["pos"]
+                    links_quat[i_l_, i_b_] = v_l_info["quat"]
+                else:
+                    links_parent_idx[i_l_, i_b_] = link.parent_idx
+                    links_root_idx[i_l_, i_b_] = link.root_idx if link.root_idx is not None else -1
+                    links_pos[i_l_, i_b_] = link.pos
+                    links_quat[i_l_, i_b_] = link.quat
+
                 link_n_dofs = 0
                 link_n_qs = 0
                 for i_j_local, p_joint in enumerate(link.joints):
-                    v_j_info = variant_links_j_infos[i_l_][i_j_local]
-                    v_n_dofs = v_j_info["n_dofs"]
-                    v_n_qs = v_j_info["n_qs"]
-                    joints_type[i_j_flat, i_b_] = int(v_j_info["type"])
+                    v_j_info = variant_j_infos[i_l_][i_j_local] if is_active else None
+                    v_n_dofs = v_j_info["n_dofs"] if is_active else 0
+                    v_n_qs = v_j_info["n_qs"] if is_active else 0
+                    joints_type[i_j_flat, i_b_] = int(v_j_info["type"]) if is_active else int(gs.JOINT_TYPE.FIXED)
                     joints_n_dofs[i_j_flat, i_b_] = v_n_dofs
                     joints_dof_start[i_j_flat, i_b_] = p_joint.dof_start
                     joints_dof_end[i_j_flat, i_b_] = p_joint.dof_start + v_n_dofs
                     joints_q_start[i_j_flat, i_b_] = p_joint.q_start
                     joints_q_end[i_j_flat, i_b_] = p_joint.q_start + v_n_qs
-                    v_armature = v_j_info.get("dofs_armature", np.zeros(v_n_dofs, dtype=gs.np_float))
-                    v_stiffness = v_j_info.get("dofs_stiffness", np.zeros(v_n_dofs, dtype=gs.np_float))
-                    v_damping = v_j_info.get("dofs_damping", np.zeros(v_n_dofs, dtype=gs.np_float))
-                    v_frictionloss = v_j_info.get("dofs_frictionloss", np.zeros(v_n_dofs, dtype=gs.np_float))
-                    v_act_gain = v_j_info.get("dofs_act_gain", np.zeros(v_n_dofs, dtype=gs.np_float))
-                    v_act_bias = v_j_info.get("dofs_act_bias", np.zeros((v_n_dofs, 3), dtype=gs.np_float))
-                    v_limit = v_j_info.get("dofs_limit", np.tile([-np.inf, np.inf], (v_n_dofs, 1)))
-                    v_force_range = v_j_info.get("dofs_force_range", np.tile([-np.inf, np.inf], (v_n_dofs, 1)))
-                    v_motion_ang = v_j_info.get("dofs_motion_ang")
-                    v_motion_vel = v_j_info.get("dofs_motion_vel")
-                    if v_motion_ang is None:
-                        v_motion_ang = np.eye(6, 3, -3) if v_n_dofs == 6 else np.zeros((v_n_dofs, 3))
-                    if v_motion_vel is None:
-                        v_motion_vel = np.eye(6, 3) if v_n_dofs == 6 else np.zeros((v_n_dofs, 3))
+                    if is_active:
+                        v_armature = v_j_info.get("dofs_armature", np.zeros(v_n_dofs, dtype=gs.np_float))
+                        v_stiffness = v_j_info.get("dofs_stiffness", np.zeros(v_n_dofs, dtype=gs.np_float))
+                        v_damping = v_j_info.get("dofs_damping", np.zeros(v_n_dofs, dtype=gs.np_float))
+                        v_frictionloss = v_j_info.get("dofs_frictionloss", np.zeros(v_n_dofs, dtype=gs.np_float))
+                        v_act_gain = v_j_info.get("dofs_act_gain", np.zeros(v_n_dofs, dtype=gs.np_float))
+                        v_act_bias = v_j_info.get("dofs_act_bias", np.zeros((v_n_dofs, 3), dtype=gs.np_float))
+                        v_limit = v_j_info.get("dofs_limit", np.tile([-np.inf, np.inf], (v_n_dofs, 1)))
+                        v_force_range = v_j_info.get("dofs_force_range", np.tile([-np.inf, np.inf], (v_n_dofs, 1)))
+                        v_motion_ang = v_j_info.get("dofs_motion_ang")
+                        v_motion_vel = v_j_info.get("dofs_motion_vel")
+                        if v_motion_ang is None:
+                            v_motion_ang = np.eye(6, 3, -3) if v_n_dofs == 6 else np.zeros((v_n_dofs, 3))
+                        if v_motion_vel is None:
+                            v_motion_vel = np.eye(6, 3) if v_n_dofs == 6 else np.zeros((v_n_dofs, 3))
                     for i_d_slot in range(p_joint.n_dofs):
                         i_d_local = p_joint.dof_start + i_d_slot - entity.dof_start
-                        # Active DOFs take the variant's full property set; trailing padding DOFs keep the inert
-                        # defaults from the array init above, except armature which must be 1 (mass diagonal 1).
-                        if i_d_slot < v_n_dofs:
+                        # Active DOFs take the variant's full property set; trailing padding DOFs (and every DOF
+                        # of an inert slot) keep the inert defaults above, except armature which must be 1.
+                        if is_active and i_d_slot < v_n_dofs:
                             dofs_armature[i_d_local, i_b_] = v_armature[i_d_slot]
                             dofs_motion_ang[i_d_local, i_b_] = v_motion_ang[i_d_slot]
                             dofs_motion_vel[i_d_local, i_b_] = v_motion_vel[i_d_slot]
@@ -1200,6 +1227,10 @@ class RigidSolver(KinematicSolver):
             links_dof_end,
             links_q_start,
             links_q_end,
+            links_parent_idx,
+            links_root_idx,
+            links_pos,
+            links_quat,
             joint_idxs,
             joints_type,
             joints_n_dofs,

@@ -96,9 +96,12 @@ class KinematicEntity(Entity):
         # Set heterogeneous support before super().__init__() because _get_morph_identifier() needs it
         self._morph_heterogeneous = morph_heterogeneous if morph_heterogeneous is not None else []
         self._enable_heterogeneous = bool(self._morph_heterogeneous)
-        # Per-variant parsed joint infos (primary + each variant), captured only for heterogeneous entities so
-        # per-env kinematic topology (joint type + DOF mapping) can be rebound per environment. None otherwise.
+        # Per-variant parsed link + joint infos (primary + each variant), captured only for heterogeneous
+        # entities so per-env kinematic topology (link parent chain + poses, joint type + DOF mapping) can be
+        # rebound per environment. None otherwise.
+        self._primary_links_l_infos = None
         self._primary_links_j_infos = None
+        self._variant_links_l_infos = None
         self._variant_links_j_infos = None
         # True when heterogeneous variants differ in joint type or DOF count at a shared slot (ragged per-env
         # topology). The first morph defines the skeleton slot widths; narrower variants inert the padding DOFs.
@@ -202,8 +205,9 @@ class KinematicEntity(Entity):
         self._variant_init_qpos = [self.init_qpos]
         self._variant_offset_pos = [self._offset_pos]
         self._variant_offset_quat = [self._offset_quat]
-        # Per-variant parsed per-link joint infos, variant 0 = primary (captured in _load_scene). Basic-object
-        # (Mesh/Primitive) variants carry no joint structure, so they record None (a single free/fixed base).
+        # Per-variant parsed per-link link + joint infos, variant 0 = primary (captured in _load_scene).
+        # Basic-object (Mesh/Primitive) variants carry no scene structure, so they record None.
+        self._variant_links_l_infos = [self._primary_links_l_infos]
         self._variant_links_j_infos = [self._primary_links_j_infos]
 
         n_links = len(self._links)
@@ -214,27 +218,28 @@ class KinematicEntity(Entity):
                 # Parse variant scene file
                 morph._enable_mujoco_compatibility = self._morph._enable_mujoco_compatibility
                 v_l_infos, v_links_j_infos, v_links_g_infos, _ = self._parse_scene(morph, self._surface)
+                self._variant_links_l_infos.append(v_l_infos)
                 self._variant_links_j_infos.append(v_links_j_infos)
 
-                # Validate that the variant has the same joint structure as the primary
-                if len(v_l_infos) != n_links:
+                # A variant may have FEWER links than the first morph (ragged topology): its links map
+                # positionally to the leading skeleton slots and the trailing slots are inert in that
+                # environment. A variant with MORE links needs a longer primary - order the morph with the most
+                # links first. Variants map by slot position, not joint name, so names need not match.
+                if len(v_l_infos) > n_links:
                     gs.raise_exception(
-                        f"Heterogeneous variant has {len(v_l_infos)} links, "
-                        f"but primary has {n_links}. All variants must have the same link count."
+                        f"Heterogeneous variant has {len(v_l_infos)} links, exceeding the first morph's "
+                        f"{n_links}. Order the variants so the one with the most links comes first."
                     )
+                if len(v_l_infos) != n_links:
+                    self._has_ragged_topology = True
                 for i_l, (link, v_j_infos) in enumerate(zip(self._links, v_links_j_infos)):
                     primary_joints = link.joints
                     if len(v_j_infos) != len(primary_joints):
                         gs.raise_exception(
-                            f"Heterogeneous variant link {i_l} has {len(v_j_infos)} joints, "
-                            f"but primary has {len(primary_joints)}."
+                            f"Heterogeneous variant link {i_l} has {len(v_j_infos)} joints, but its skeleton "
+                            f"slot has {len(primary_joints)} (a link's joint count must match its slot)."
                         )
                     for p_joint, v_j_info in zip(primary_joints, v_j_infos):
-                        if p_joint.name != v_j_info["name"]:
-                            gs.raise_exception(
-                                f"Joint name mismatch at link {i_l}: primary has '{p_joint.name}', "
-                                f"variant has '{v_j_info['name']}'. All variants must have the same joint names."
-                            )
                         # Joint type and DOF count may differ per variant (per-env joint locking / DOF-count
                         # variation); the variant joint must fit the skeleton slot's DOF/q width, which the first
                         # morph defines. A wider variant joint needs a wider primary - order the widest first.
@@ -302,6 +307,15 @@ class KinematicEntity(Entity):
                             cg_infos,
                         )
                     )
+                # Trailing skeleton slots this (shorter) variant does not fill are inert in its environments:
+                # record an empty geom range and a zero inertial so per-env binding treats them as massless.
+                for i_link in range(len(v_l_infos), n_links):
+                    self._add_heterogeneous_variant(self._links[i_link], [], [])
+                    self._align_inertials[i_link].append(
+                        self._finalize_inertial(
+                            0.0, gu.zero_pos(), gu.identity_quat(), np.zeros((3, 3), dtype=gs.np_float), []
+                        )
+                    )
 
             elif isinstance(morph, (gs.morphs.Mesh, gs.morphs.Primitive)):
                 if isinstance(morph, gs.morphs.Mesh):
@@ -318,7 +332,8 @@ class KinematicEntity(Entity):
                 offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
 
                 self._add_heterogeneous_variant(self._links[0], cg_infos, vg_infos)
-                # Mesh/Primitive variants have no explicit joint structure (single fixed/free base).
+                # Mesh/Primitive variants have no explicit scene structure (single fixed/free base).
+                self._variant_links_l_infos.append(None)
                 self._variant_links_j_infos.append(None)
                 # Mesh/Primitive variants have no explicit inertial; the anchor inertia comes from their geometry.
                 self._align_inertials[0].append(self._finalize_inertial(None, None, None, None, cg_infos))
@@ -2558,9 +2573,11 @@ class RigidEntity(KinematicEntity):
         l_infos, links_j_infos, links_g_infos, eqs_info = self._parse_scene(morph, surface)
 
         # For a heterogeneous entity the first (primary) morph defines the skeleton slots; keep its parsed
-        # per-link joint infos so per-env topology (joint type + DOF mapping) can be rebound for variant 0
-        # alongside the other variants (recorded in _load_heterogeneous_morphs). Non-heterogeneous stays None.
+        # per-link link + joint infos so per-env topology (link parent chain + poses, joint type + DOF
+        # mapping) can be rebound for variant 0 alongside the other variants (recorded in
+        # _load_heterogeneous_morphs). Non-heterogeneous stays None.
         if self._enable_heterogeneous and self._primary_links_j_infos is None:
+            self._primary_links_l_infos = l_infos
             self._primary_links_j_infos = links_j_infos
 
         # Make sure that the entity is not object

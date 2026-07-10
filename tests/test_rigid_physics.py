@@ -7479,6 +7479,44 @@ def test_topology_variant_contact(show_viewer, tol):
 
 
 @pytest.mark.required
+def test_topology_variant_ragged_links(show_viewer, tol):
+    # A ragged entity with different LINK counts: a 2-link pendulum in one env, a 1-link pendulum in the other.
+    # The 1-link env leaves the second link slot inert (massless, frozen), so under gravity its second DOF
+    # stays 0 (decoupled) while each env's first DOF swings as its own chain would.
+    def arm(n_links):
+        mjcf = ET.Element("mujoco", model=f"arm_{n_links}")
+        ET.SubElement(mjcf, "option", gravity="0 0 -9.81")
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        link1 = ET.SubElement(worldbody, "body", name="l1", pos="0 0 0.5")
+        ET.SubElement(link1, "joint", name="j1", type="hinge", axis="0 1 0")
+        ET.SubElement(link1, "geom", type="capsule", fromto="0 0 0 0.2 0 0", size="0.02", mass="0.1")
+        if n_links == 2:
+            link2 = ET.SubElement(link1, "body", name="l2", pos="0.2 0 0")
+            ET.SubElement(link2, "joint", name="j2", type="hinge", axis="0 1 0")
+            ET.SubElement(link2, "geom", type="capsule", fromto="0 0 0 0.2 0 0", size="0.02", mass="0.1")
+        return ET.tostring(mjcf, encoding="unicode")
+
+    scene = gs.Scene(show_viewer=show_viewer)
+    ragged = scene.add_entity(
+        morph=(gs.morphs.MJCF(file=arm(2)), gs.morphs.MJCF(file=arm(1))),
+    )
+    scene.build(n_envs=2)
+    assert scene.rigid_solver._enable_ragged_topology
+    assert ragged.n_dofs == 2  # superset = the 2-link variant
+
+    for _ in range(40):
+        scene.step()
+    dofs_pos = ragged.get_dofs_position()
+    assert not torch.isnan(dofs_pos).any()
+    # env 0 = 2-link variant, env 1 = 1-link variant (balanced mapping).
+    assert_allclose(dofs_pos[1, 1], 0.0, tol=tol)  # the 1-link env's inert second-link DOF stays frozen
+    assert (dofs_pos[0, 0].abs() > 0.01).all()  # both envs' first joint swings under gravity
+    assert (dofs_pos[1, 0].abs() > 0.01).all()
+    with pytest.raises(AssertionError):  # the two chain lengths evolve their shared first joint differently
+        assert_allclose(dofs_pos[0, 0], dofs_pos[1, 0], tol=tol)
+
+
+@pytest.mark.required
 def test_heterogeneous_invalid_material_raises():
     """Test that heterogeneous morphs with unsupported material raises an exception."""
     scene = gs.Scene(
