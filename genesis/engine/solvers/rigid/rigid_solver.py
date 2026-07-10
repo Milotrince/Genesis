@@ -3509,6 +3509,10 @@ def kernel_assign_island_rates(
                 rate = rate * 2
             island_state.island_rate[i_island, i_b] = rate
             qd.atomic_max(island_state.island_rate_max[0], rate)
+            # Push the island rate down to its DOFs. dofs_rate is keyed to the (fixed) DOF index, so it stays valid if
+            # this island later merges with another mid-macro-step.
+            for i_local in range(island_state.dof_slices.n[i_island, i_b]):
+                island_state.dofs_rate[island_state.dof_id[i_start + i_local, i_b], i_b] = rate
 
 
 @qd.kernel(fastcache=True)
@@ -3528,12 +3532,20 @@ def kernel_mark_active_islands(
     _B = island_state.island_inactive.shape[1]
     qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
     for i_island, i_b in qd.ndrange(n_links, _B):
-        rate = island_state.island_rate[i_island, i_b]
-        if rate < 1:
-            rate = 1
-        elif rate > sched_len:
-            rate = sched_len
-        island_state.island_inactive[i_island, i_b] = 0 if tick % (sched_len // rate) == 0 else 1
+        if i_island < island_state.n_islands[i_b]:
+            # Active if ANY of the island's DOFs integrates this tick. A merged island holding both a fast and a slow
+            # body is thus solved (the fast DOF is active), while the slow body's DOFs stay frozen via dofs_dt.
+            any_active = False
+            i_start = island_state.dof_slices.start[i_island, i_b]
+            for i_local in range(island_state.dof_slices.n[i_island, i_b]):
+                rate = island_state.dofs_rate[island_state.dof_id[i_start + i_local, i_b], i_b]
+                if rate < 1:
+                    rate = 1
+                elif rate > sched_len:
+                    rate = sched_len
+                if tick % (sched_len // rate) == 0:
+                    any_active = True
+            island_state.island_inactive[i_island, i_b] = 0 if any_active else 1
 
 
 @qd.kernel(fastcache=True)
@@ -3555,10 +3567,7 @@ def kernel_update_dofs_dt(
     _B = rigid_global_info.dofs_dt.shape[1]
     qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
     for i_d, i_b in qd.ndrange(n_dofs, _B):
-        i_island = island_state.dofs_island_idx[i_d, i_b]
-        rate = 1
-        if i_island >= 0:
-            rate = island_state.island_rate[i_island, i_b]
+        rate = island_state.dofs_rate[i_d, i_b]
         # Clamp to [1, sched_len] so sched_len // rate stays >= 1 (assignment already quantizes to a power-of-two
         # divisor <= sched_len; this only guards against a stray out-of-range value crashing the schedule).
         if rate < 1:

@@ -671,10 +671,15 @@ class IslandState:
     # envelope iterate each constraint's own support (jac_dofs_idx) instead of scanning the whole island.
     dof_local_pos: qd.Tensor
     dofs_island_idx: qd.Tensor
-    # Per-island integer rate r: the island integrates at macro_dt / r. Only allocated under use_adaptive_timestep
-    # (scalar () otherwise); defaults to 1 (uniform stepping). Indexed [i_island, i_b] and persists across steps
-    # (rebuilt islands keep their rate by index) until the rate-assignment pass overwrites it.
+    # Per-island integer rate r (island integrates at macro_dt / r), computed by the rate assignment for reporting and
+    # the sched_len reduction. Consumers key off dofs_rate instead (below), which survives re-partitioning. Only
+    # allocated under use_adaptive_timestep (scalar () otherwise); defaults to 1 (uniform stepping). Indexed [i_island].
     island_rate: qd.Tensor
+    # Per-DOF rate, written by the rate assignment from each DOF's island rate at the macro boundary. Keyed to the DOF
+    # index (fixed across the step, unlike island labels), so it stays correct when islands merge/split mid-step: a
+    # merged island then simply holds mixed-rate DOFs - the fast body keeps sub-stepping, the frozen body stays frozen,
+    # and the island is solved whenever any of its DOFs is active. Indexed [i_d, i_b]; allocated only under adaptive.
+    dofs_rate: qd.Tensor
     # Max island rate across all islands and envs this macro step, atomic-max'd by the rate assignment (reset to 1
     # before each assign). The substep loop reads it once to run exactly that many micro-ticks instead of the static
     # max-rate cap, so a scene where nothing needs sub-stepping costs a single pass. Shape (1,) under adaptive.
@@ -762,6 +767,7 @@ def get_island_state(solver, collider):
         dof_local_pos=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         dofs_island_idx=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         island_rate=V_FROM(dtype=gs.qd_int, shape=maybe_shape((n_links, _B), solver._use_adaptive_timestep), value=1),
+        dofs_rate=V_FROM(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), solver._use_adaptive_timestep), value=1),
         island_rate_max=V_FROM(dtype=gs.qd_int, shape=maybe_shape((1,), solver._use_adaptive_timestep), value=1),
         island_inactive=V_FROM(
             dtype=gs.qd_int, shape=maybe_shape((n_links, _B), solver._use_adaptive_timestep), value=0

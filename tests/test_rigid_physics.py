@@ -8188,3 +8188,60 @@ def test_adaptive_timestep_per_island_rates(n_envs, show_viewer):
     assert (fast_z > 0.05).all()
     fast_vel = np.atleast_2d(tensor_to_array(fast.get_dofs_velocity())[..., :3])
     assert (np.linalg.norm(fast_vel, axis=-1) < 0.5).all()
+
+
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_adaptive_timestep_cross_rate_contact(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            substeps=1,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            use_adaptive_timestep=True,
+            adaptive_timestep_max_rate=4,
+            adaptive_timestep_ref_speed=1.0,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    ball = scene.add_entity(
+        gs.morphs.Sphere(
+            radius=0.1,
+            pos=(-1.0, 0.0, 0.1),
+        ),
+    )
+    box = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(1.0, 0.0, 0.1),
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    # Fire the ball into the resting box: the ball is a fast (sub-stepping) island and the box a frozen rate-1 island,
+    # so they belong to different rate classes and merge on contact mid-macro-step. Robust handling (per-DOF rates)
+    # must resolve that contact - pushing the box - rather than tunneling through it or freezing the ball by a stale
+    # island-index rate mapping.
+    ball.set_dofs_velocity([5.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    box_x0 = np.atleast_1d(box.get_pos()[..., 0])
+
+    max_speed = 0.0
+    for _ in range(120):
+        scene.step()
+        for entity in (ball, box):
+            vel = np.atleast_2d(tensor_to_array(entity.get_dofs_velocity()))[..., :3]
+            max_speed = max(max_speed, float(np.linalg.norm(vel, axis=-1).max()))
+
+    # No blow-up: the contact stays stable (bounded speeds, finite positions).
+    ball_x = np.atleast_1d(ball.get_pos()[..., 0])
+    box_x = np.atleast_1d(box.get_pos()[..., 0])
+    assert max_speed < 50.0
+    assert np.isfinite(ball_x).all() and np.isfinite(box_x).all()
+    # The box was pushed forward: the cross-rate contact was actually solved, not skipped/tunneled.
+    assert (box_x > box_x0 + 0.02).all()
+    # The ball did not tunnel far past the box.
+    assert (ball_x < box_x + 0.3).all()
