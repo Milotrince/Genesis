@@ -1,23 +1,26 @@
 """
-Interactive Geometry Pool
-=========================
+Interactive heterogeneous environments
+======================================
 
-Each parallel environment can show a different object, swapped in at runtime from a dynamic GPU geometry pool
-(`add_entity(geom_pool=...)` + `entity.set_active_object(...)`), and resized per environment with per-env geom
-scaling (`entity.set_scale(...)`). Unlike a fixed heterogeneous morph list, pool objects are processed and
-uploaded on demand, so a large catalog of shapes (primitives, convex-decomposed and nonconvex meshes) shares a
-small reserved slot budget.
+Two ways a single `add_entity` can give each parallel environment a different body, both interactive:
+
+- Default (geometry pool): each environment shows a different object swapped in at runtime from a dynamic GPU
+  geometry pool (`add_entity(geom_pool=...)` + `entity.set_active_object(...)`), resized per environment with
+  per-env geom scaling (`entity.set_scale(...)`). A large catalog of shapes shares a small reserved slot
+  budget.
+- `--articulated`: each environment simulates an articulated robot with a different kinematic topology from a
+  single `add_entity(morph=[variant, ...])` - here a Franka arm with a gripper in some environments and
+  without in others (the gripper's finger links/DOFs are inert where absent). This is the backbone for
+  cross-embodiment RL and morphology domain randomization.
 
 Usage:
-    python heterogeneous_interactive.py           # 9 environments, GPU
-    python heterogeneous_interactive.py -n 16     # 16 environments
-    python heterogeneous_interactive.py --cpu     # run on CPU
+    python heterogeneous_interactive.py                 # geometry pool, 9 environments, GPU
+    python heterogeneous_interactive.py --articulated   # ragged articulated topology
+    python heterogeneous_interactive.py -n 16
+    python heterogeneous_interactive.py --cpu
 
-Controls:
-    R           - randomize each environment's object (box / sphere / cylinder / duck / bunny / dragon)
-    T           - randomize each environment's size
-    left-drag   - grab and drag an object (MouseInteraction plugin)
-    ESC         - quit
+Controls (pool):        R randomize objects, T randomize size, left-drag grab, ESC quit
+Controls (articulated): R randomize joint pose, left-drag grab, ESC quit
 """
 
 import argparse
@@ -31,28 +34,8 @@ from genesis.vis.keybindings import Key, KeyAction, Keybind
 SPAWN_POS = (0.0, 0.0, 0.5)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-n", "--n_envs", type=int, default=9)
-    parser.add_argument("-s", "--seed", type=int, default=0)
-    parser.add_argument("--cpu", action="store_true", default=False)
-    args = parser.parse_args()
-
-    n_envs = max(1, args.n_envs)
-
-    gs.init(backend=gs.cpu if args.cpu else gs.gpu, precision="32")
-
-    scene = gs.Scene(
-        rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(4.0, -4.0, 3.0),
-            camera_lookat=(0.0, 0.0, 0.2),
-        ),
-        show_viewer=True,
-    )
-
-    scene.add_entity(gs.morphs.Plane())
-
+def run_pool(scene, args, n_envs):
+    """Geometry-pool demo: swap and rescale each environment's object at runtime."""
     # The catalog of objects the pool can hold. Meshes are normalized to ~0.2 m and kept nonconvex (single
     # geom, colliding via the vertex-vs-SDF narrowphase, rendering their real shape) with decimation to keep
     # the vertex count - hence contact/SDF-scan cost - low. These morph objects persist so their pool residency
@@ -107,9 +90,6 @@ def main():
         geom_pool=objects,
     )
 
-    # Drag objects around with the mouse (left-click and drag) to probe the swapped-in collision geometry.
-    # Force mode springs the grabbed link toward the cursor using its true per-env inertial, so it stays stable
-    # for the swapped-in / scaled object bound to whichever environment is picked.
     scene.viewer.add_plugin(
         gs.vis.viewer_plugins.MouseInteractionPlugin(
             color=(0.1, 0.6, 0.8, 0.6),
@@ -158,11 +138,7 @@ def main():
     # the process can crash). So a callback only raises a request flag; the main loop drains it and runs the
     # actual work between steps, keeping every kernel launch on this one thread.
     requested = {"objects": False, "size": False}
-    is_running = True
-
-    def stop():
-        nonlocal is_running
-        is_running = False
+    is_running = [True]
 
     scene.viewer.register_keybinds(
         Keybind(
@@ -173,7 +149,7 @@ def main():
             allow_overload=False,
         ),
         Keybind("randomize_size", Key.T, KeyAction.PRESS, callback=lambda: requested.__setitem__("size", True)),
-        Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=stop),
+        Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=lambda: is_running.__setitem__(0, False)),
         overwrite=True,
     )
 
@@ -188,7 +164,7 @@ def main():
     print("left-drag - grab and drag an object")
     print("ESC       - quit\n")
 
-    while is_running and scene.viewer.is_alive():
+    while is_running[0] and scene.viewer.is_alive():
         if requested["objects"]:
             requested["objects"] = False
             apply_randomize_objects()
@@ -198,6 +174,103 @@ def main():
         scene.step()
         if "PYTEST_VERSION" in os.environ:
             break
+
+
+def run_articulated(scene, args, n_envs):
+    """Ragged-topology demo: each environment is a Franka arm with or without its gripper."""
+    scene.add_entity(gs.morphs.Plane())
+    # The first morph defines the skeleton and must be the largest: the arm-with-gripper is a superset of the
+    # arm-without (its finger links/DOFs are the trailing slots the gripper-less variant leaves inert).
+    robot = scene.add_entity(
+        morph=(
+            gs.morphs.URDF(file="urdf/panda_bullet/panda.urdf", fixed=True),
+            gs.morphs.URDF(file="urdf/panda_bullet/panda_nohand.urdf", fixed=True),
+        ),
+    )
+
+    scene.viewer.add_plugin(
+        gs.vis.viewer_plugins.MouseInteractionPlugin(
+            color=(0.1, 0.6, 0.8, 0.6),
+            use_force=True,
+        ),
+    )
+
+    scene.build(n_envs=n_envs, env_spacing=(1.2, 1.2))
+    gs.logger.info(
+        f"Ragged robot: {robot.n_links} links, {robot.n_dofs} DOFs (gripper-less envs leave the fingers inert)."
+    )
+
+    # Hold each arm at a joint-position target against gravity; R re-samples the target within the joint limits.
+    kp = np.full(robot.n_dofs, 200.0, dtype=np.float32)
+    kv = np.full(robot.n_dofs, 20.0, dtype=np.float32)
+    robot.set_dofs_kp(kp)
+    robot.set_dofs_kv(kv)
+    limits = robot.get_dofs_limit()  # (lower, upper), each (n_dofs,)
+    lower = np.nan_to_num(np.asarray(limits[0]), neginf=-np.pi)
+    upper = np.nan_to_num(np.asarray(limits[1]), posinf=np.pi)
+    rng = np.random.default_rng(args.seed)
+
+    def sample_targets():
+        return rng.uniform(lower, upper, size=(n_envs, robot.n_dofs)).astype(np.float32)
+
+    requested = {"pose": False}
+    is_running = [True]
+
+    scene.viewer.register_keybinds(
+        Keybind("randomize_pose", Key.R, KeyAction.PRESS, callback=lambda: requested.__setitem__("pose", True)),
+        Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=lambda: is_running.__setitem__(0, False)),
+        overwrite=True,
+    )
+
+    if "PYTEST_VERSION" not in os.environ:
+        robot.control_dofs_position(sample_targets())
+
+    print("\nArticulated controls:")
+    print("R         - randomize each environment's joint pose")
+    print("left-drag - grab and drag a link")
+    print("ESC       - quit\n")
+
+    while is_running[0] and scene.viewer.is_alive():
+        if requested["pose"]:
+            requested["pose"] = False
+            robot.control_dofs_position(sample_targets())
+        scene.step()
+        if "PYTEST_VERSION" in os.environ:
+            break
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-n", "--n_envs", type=int, default=9)
+    parser.add_argument("-s", "--seed", type=int, default=0)
+    parser.add_argument("--cpu", action="store_true", default=False)
+    parser.add_argument("--articulated", action="store_true", default=False)
+    args = parser.parse_args()
+
+    n_envs = max(1, args.n_envs)
+
+    gs.init(backend=gs.cpu if args.cpu else gs.gpu, precision="32")
+
+    if args.articulated:
+        scene = gs.Scene(
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(3.0, -3.0, 2.0),
+                camera_lookat=(0.0, 0.0, 0.4),
+            ),
+            show_viewer=True,
+        )
+        run_articulated(scene, args, n_envs)
+    else:
+        scene = gs.Scene(
+            rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(4.0, -4.0, 3.0),
+                camera_lookat=(0.0, 0.0, 0.2),
+            ),
+            show_viewer=True,
+        )
+        scene.add_entity(gs.morphs.Plane())
+        run_pool(scene, args, n_envs)
 
 
 if __name__ == "__main__":
