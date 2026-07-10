@@ -2146,6 +2146,22 @@ class KinematicEntity(Entity):
             return f"{len(self.morphs)} morph variants"
         return f"{self.main_morph}"
 
+    def set_scale(self, scale, envs_idx=None):
+        """Set a per-environment geometry scale for this entity at runtime.
+
+        `scale` is a scalar (isotropic), a length-3 vector `(sx, sy, sz)`, or a per-environment
+        `(n_envs, 3)` array. Requires the scene built with `RigidOptions(enable_geom_scaling=True)`. Scales
+        the entity's collision geometry, AABBs and inertial about each geom's frame origin; the joint
+        configuration is preserved. Radial primitives (capsule, cylinder) require an isotropic radial scale.
+        """
+        if not self._solver.is_built:
+            gs.raise_exception("set_scale can only be called after the scene is built.")
+        self._solver.set_entity_scale(self, scale, envs_idx)
+
+    def get_scale(self, envs_idx=None):
+        """Return this entity's per-environment geometry scale as `(n_envs, 3)` (or `(3,)` for a single env)."""
+        return qd_to_numpy(self._solver.geoms_state.scale, envs_idx, self._geom_start, transpose=True)
+
     @property
     def n_joints(self):
         """The number of `RigidJoint` in the entity."""
@@ -2277,6 +2293,9 @@ class KinematicEntity(Entity):
             init = torch.as_tensor(vgeom.init_vverts, dtype=gs.tc_float, device=gs.device)
             pos = vgeoms_pos[..., vgeom.idx, :].unsqueeze(-2)
             quat = vgeoms_quat[..., vgeom.idx, :].unsqueeze(-2)
+            vscale = vgeom._vscale(envs_idx)
+            if vscale is not None:
+                init = vscale * init
             parts.append(gu.transform_by_trans_quat(init, pos, quat))
         tensor = torch.cat(parts, dim=-2)
         return tensor[0] if self._solver.n_envs == 0 else tensor
@@ -3527,8 +3546,10 @@ class RigidEntity(KinematicEntity):
         if self.n_geoms == 0:
             gs.raise_exception("Entity has no collision geometries.")
 
-        # Already computed internally by the solver. Let's access it directly for efficiency.
-        if allow_fast_approx and isinstance(self.sim.coupler, LegacyCoupler):
+        # Already computed internally by the solver. Let's access it directly for efficiency. Not usable for
+        # heterogeneous entities: the solver aggregates the full contiguous geom range, which includes variant
+        # geoms inactive in a given env, over-sizing that env's AABB. Fall through to the active-masked branch.
+        if allow_fast_approx and isinstance(self.sim.coupler, LegacyCoupler) and not self._enable_heterogeneous:
             return self._solver.get_AABB(entities_idx=[self._idx_in_solver], envs_idx=envs_idx)[..., 0, :]
 
         # For heterogeneous entities, compute AABB per-environment respecting active_envs_idx.
@@ -4264,9 +4285,16 @@ class RigidEntity(KinematicEntity):
         """
         gravity = self._solver.get_gravity(envs_idx=envs_idx)  # (3,) or (n_envs, 3)
         links_pos = self.get_links_pos(envs_idx=envs_idx, ref="link_com")  # (..., n_links, 3)
-        # Link masses are static properties (not batched per environment),
-        # so always fetch without envs_idx to avoid indexing conflicts.
-        links_mass = self.get_links_inertial_mass()  # (n_links,)
+        # Link masses are batched per environment for heterogeneous or per-env-scaled entities (the runtime
+        # inertial differs per env); otherwise they are a static per-link vector. When batched, fetch all envs
+        # (the solver forbids envs_idx for batched links) and index down to the requested envs so the mass axis
+        # aligns with links_pos.
+        if (self._enable_heterogeneous or self._solver._enable_geom_scaling) and self._solver.n_envs > 0:
+            links_mass = self.get_links_inertial_mass()  # (n_envs, n_links)
+            if envs_idx is not None:
+                links_mass = links_mass[self._scene._sanitize_envs_idx(envs_idx)]
+        else:
+            links_mass = self.get_links_inertial_mass()  # (n_links,)
 
         # PE_i = m_i * g^T * p_i => PE = sum_i(m_i * (g . p_i))
         # g is (..., 3), links_pos is (..., n_links, 3) -> broadcast g to (..., 1, 3)
@@ -4540,7 +4568,7 @@ class RigidEntity(KinematicEntity):
             The total mass of the entity in kg. For heterogeneous entities, returns
             an array of shape (n_envs,) with per-environment masses.
         """
-        if self._enable_heterogeneous:
+        if self._enable_heterogeneous or self._solver._enable_geom_scaling:
             links_idx = slice(self.link_start, self.link_end)
             links_mass = qd_to_numpy(self._solver.links_info.inertial_mass, None, links_idx, transpose=True)
             return links_mass.sum(axis=1)

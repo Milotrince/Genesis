@@ -157,6 +157,7 @@ class KinematicSolver(Solver):
         self._enable_mujoco_compatibility = False
         self._requires_grad = False
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
+        self._enable_geom_scaling = False  # RigidSolver overrides from RigidOptions(enable_geom_scaling)
 
         self.collider = None
         self.constraint_solver = None
@@ -306,9 +307,10 @@ class KinematicSolver(Solver):
         self.n_custom_vfaces_ = max(1, self.n_custom_vfaces)
         self.n_entities_ = max(1, self.n_entities)
 
-        # batch_links_info is required when heterogeneous simulation is used.
-        # We must update options because get_links_info reads from solver._options.batch_links_info.
-        if self._enable_heterogeneous:
+        # batch_links_info is required for per-environment link info: heterogeneous variants (per-env geom
+        # ranges + inertial) and per-env geom scaling (per-env inertial write). We must update options
+        # because get_links_info reads from solver._options.batch_links_info.
+        if self._enable_heterogeneous or self._enable_geom_scaling:
             self._options.batch_links_info = True
 
         self._build_static_config()
@@ -563,6 +565,7 @@ class KinematicSolver(Solver):
                 vgeoms_vface_end=np.array([vgeom.vface_end for vgeom in vgeoms], dtype=gs.np_int),
                 vgeoms_color=np.array([vgeom._color for vgeom in vgeoms], dtype=gs.np_float),
                 vgeoms_info=self.vgeoms_info,
+                vgeoms_state=self.vgeoms_state,
                 static_rigid_sim_config=self._static_rigid_sim_config,
             )
 

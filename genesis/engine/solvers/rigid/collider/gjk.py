@@ -356,6 +356,11 @@ def func_gjk_contact(
                         # (2) Both of the geometries should be discrete,
                         # (3) [enable_mujoco_multi_contact] should be True. Default to False.
                         if i_f >= 0 and func_is_discrete_geoms(geoms_info, i_ga, i_gb, i_b):
+                            mc_scale_a = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+                            mc_scale_b = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+                            if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                                mc_scale_a = gjk_state.geom_scale[i_b, 0]
+                                mc_scale_b = gjk_state.geom_scale[i_b, 1]
                             func_multi_contact(
                                 geoms_info,
                                 verts_info,
@@ -370,6 +375,8 @@ def func_gjk_contact(
                                 quat_b,
                                 i_b,
                                 i_f,
+                                mc_scale_a,
+                                mc_scale_b,
                             )
                             gjk_state.multi_contact_flag[i_b] = True
     else:
@@ -1614,6 +1621,9 @@ def func_search_valid_simplex_vertex(
             id1 = geoms_info.vert_start[i_ga] + i
             id2 = geoms_info.vert_start[i_gb] + j
             for p in range(2):
+                scale_p = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+                if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                    scale_p = gjk_state.geom_scale[i_b, p]
                 obj, local_obj = func_get_discrete_geom_vertex(
                     geoms_info,
                     verts_info,
@@ -1621,6 +1631,7 @@ def func_search_valid_simplex_vertex(
                     pos_a if p == 0 else pos_b,
                     quat_a if p == 0 else quat_b,
                     i if p == 0 else j,
+                    scale_p,
                 )
                 if p == 0:
                     obj1 = obj
@@ -1698,9 +1709,13 @@ def func_get_discrete_geom_vertex(
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
     i_v,
+    scale: qd.types.vector(3),
 ):
     """
     Get the discrete vertex of the geometry for the given index [i_v].
+
+    [scale] is the per-env geom scale (diagonal, about the geom origin); it must match the scaling applied
+    by the support driver leaves so this brute-force discrete-geom path stays consistent. Identity when 1.
     """
     geom_type = geoms_info.type[i_g]
 
@@ -1720,6 +1735,8 @@ def func_get_discrete_geom_vertex(
     elif geom_type == gs.GEOM_TYPE.MESH:
         vert_start = geoms_info.vert_start[i_g]
         v_ = verts_info.init_pos[vert_start + i_v]
+
+    v_ = scale * v_
 
     # Transform the vertex position to the world frame using thread-local pos/quat
     v = gu.qd_transform_by_trans_quat(v_, pos, quat)

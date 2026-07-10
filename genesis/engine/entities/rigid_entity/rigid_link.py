@@ -1032,18 +1032,34 @@ class RigidLink(KinematicLink):
                 f"Impossible to set per-env mass of link '{self.name}'. Please specify "
                 "'RigidOptions.batch_links_info=True'."
             )
+        if mass.ndim > 0 and mass.shape[0] != self._solver.n_envs:
+            gs.raise_exception(
+                f"Per-env mass of link '{self.name}' must have length n_envs ({self._solver.n_envs}), "
+                f"got {mass.shape[0]}."
+            )
 
-        ratio = mass / self._inertial_mass
+        # Use the current runtime mass so the ratio is correct even after per-env changes (scaling /
+        # heterogeneous variants), where the solver field - not the build-time Python mirror - is the truth.
+        # get_mass returns a per-env vector in that case (else the build-time scalar).
+        is_per_env = self.entity._enable_heterogeneous or self._solver._enable_geom_scaling
+        ratio = mass / self.get_mass()
         self._solver.set_links_inertia(ratio, [self.idx])
-        self._inertial_mass = mass
-        self._inertial_i = self._inertial_i * ratio[..., None, None]
-        self._invweight = self._invweight / ratio[..., None]
+        if not is_per_env:
+            self._inertial_mass = mass
+            self._inertial_i = self._inertial_i * ratio[..., None, None]
+            self._invweight = self._invweight / ratio[..., None]
 
     @gs.assert_built
     def get_mass(self):
         """
         Get the mass of the link.
+
+        Returns the per-environment mass (shape ``(n_envs,)``) when the runtime inertial can differ per
+        environment (heterogeneous variants or per-env geom scaling); otherwise the scalar build-time mass.
         """
+        if self.entity._enable_heterogeneous or self._solver._enable_geom_scaling:
+            # get_links_inertial_mass keeps a singleton link axis; drop it to return a per-env vector.
+            return tensor_to_array(self._solver.get_links_inertial_mass(self._idx))[..., 0]
         return self._inertial_mass
 
     def set_friction(self, friction):
