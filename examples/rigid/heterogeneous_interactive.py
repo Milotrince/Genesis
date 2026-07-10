@@ -29,6 +29,7 @@ import os
 import numpy as np
 
 import genesis as gs
+from genesis.utils.misc import tensor_to_array
 from genesis.vis.keybindings import Key, KeyAction, Keybind
 
 SPAWN_POS = (0.0, 0.0, 0.5)
@@ -206,8 +207,8 @@ def run_articulated(scene, args, n_envs):
     robot.set_dofs_kp(kp)
     robot.set_dofs_kv(kv)
     limits = robot.get_dofs_limit()  # (lower, upper), each (n_dofs,)
-    lower = np.nan_to_num(np.asarray(limits[0]), neginf=-np.pi)
-    upper = np.nan_to_num(np.asarray(limits[1]), posinf=np.pi)
+    lower = np.nan_to_num(tensor_to_array(limits[0]), neginf=-np.pi)
+    upper = np.nan_to_num(tensor_to_array(limits[1]), posinf=np.pi)
     rng = np.random.default_rng(args.seed)
 
     def sample_targets():
