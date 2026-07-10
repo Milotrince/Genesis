@@ -8339,3 +8339,49 @@ def test_adaptive_timestep_with_hibernation(n_envs, show_viewer):
     assert resting_hibernated.all()
     # A hibernated body is frozen exactly in place.
     assert_allclose(np.atleast_1d(resting.get_pos()[..., 2]), resting_z0, tol=1e-3)
+
+
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_adaptive_timestep_stiff_contact(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            substeps=1,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            use_adaptive_timestep=True,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    stiff = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(0.0, 0.0, 0.1),
+        ),
+    )
+    default = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(2.0, 0.0, 0.1),
+        ),
+    )
+    # A contact time constant stiffer than the macro step can resolve (< 2*dt = 0.02) must make the box's island
+    # sub-step even at rest; the default box stays at rate 1. Set before build so it survives the (adaptive) geom
+    # time-constant floor of 2*macro_dt/max_rate.
+    stiff.geoms[0].set_sol_params([0.005, 1.0, 0.9, 0.95, 0.001, 0.5, 2.0])
+    scene.build(n_envs=n_envs)
+
+    island_state = scene.sim.rigid_solver.constraint_solver.island_state
+    stiff_z0 = np.atleast_1d(stiff.get_pos()[..., 2])
+    for _ in range(30):
+        scene.step()
+
+    rates = qd_to_numpy(island_state.dofs_rate, transpose=True)
+    assert (rates[..., stiff.dof_start] > 1).all()
+    assert (rates[..., default.dof_start] == 1).all()
+    # The stiff contact stays stable (the box does not sink or blow up).
+    assert_allclose(np.atleast_1d(stiff.get_pos()[..., 2]), stiff_z0, tol=5e-2)

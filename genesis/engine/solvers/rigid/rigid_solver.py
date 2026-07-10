@@ -1100,7 +1100,14 @@ class RigidSolver(KinematicSolver):
         if self.n_geoms > 0:
             geoms = self.geoms
             geoms_sol_params = np.array([geom.sol_params for geom in geoms], dtype=gs.np_float)
-            _sanitize_sol_params(geoms_sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
+            # Under adaptive timestep, let an explicitly stiff contact time constant survive down to 2*macro_dt/max_rate
+            # (the finest island dt) instead of being softened to 2*macro_dt: the rate criterion then sub-steps its
+            # island enough (rate ~ 2*macro_dt/timeconst) to keep it stable at that finer dt. Unspecified time constants
+            # still resolve to the soft default (2*macro_dt -> rate 1), so default scenes are unaffected.
+            geom_min_timeconst = self._sol_min_timeconst
+            if self._use_adaptive_timestep:
+                geom_min_timeconst = self._sol_min_timeconst / self._adaptive_timestep_max_rate
+            _sanitize_sol_params(geoms_sol_params, geom_min_timeconst, self._sol_default_timeconst)
 
             # Accurately compute the center of mass of each geometry if possible.
             # Note that the mean vertex position is a bad approximation, which is impeding the ability of MPR to
@@ -1293,6 +1300,7 @@ class RigidSolver(KinematicSolver):
                     kernel_assign_island_rates(
                         self.dofs_state,
                         self.dofs_info,
+                        self.collider._collider_state,
                         island_state,
                         self._rigid_global_info,
                         self._static_rigid_sim_config,
@@ -3513,17 +3521,19 @@ def kernel_step_1(
 def kernel_assign_island_rates(
     dofs_state: array_class.DofsState,
     dofs_info: array_class.DofsInfo,
+    collider_state: array_class.ColliderState,
     island_state: array_class.IslandState,
     rigid_global_info: array_class.RigidGlobalInfo,
     static_rigid_sim_config: qd.template(),
 ):
-    """Assign each island a power-of-two rate from its dynamics (a per-body CFL).
+    """Assign each island a power-of-two rate from its dynamics (a per-body CFL plus a contact-stiffness CFL).
 
-    Per DOF the criterion estimates how many sub-steps keep one macro step's motion within budget: the automatic
-    (default) criterion uses macro_dt * |vel| * dof_cfl_inv_travel (body-surface travel vs the body's thinnest size),
-    while a manual adaptive_timestep_ref_speed instead compares |vel| to that fixed speed. The island rate is
-    clamp(next_pow2(max over its DOFs), 1, R_max), so a settled island stays at rate 1 and a fast/small one sub-steps.
-    Assigned at the macro boundary from pre-integration velocities and left to persist across the macro step's ticks.
+    Per DOF the automatic (default) criterion uses macro_dt * |vel| * dof_cfl_inv_travel (body-surface travel vs the
+    body's thinnest size); a manual adaptive_timestep_ref_speed instead compares |vel| to that fixed speed. Per island
+    contact, a time constant stiffer than the macro step can stably resolve (timeconst < 2 * macro_dt) demands
+    2 * macro_dt / timeconst sub-steps so that 2 * island_dt stays below timeconst. The island rate is
+    clamp(next_pow2(max over its DOFs and contacts), 1, R_max): a settled island stays at rate 1, a fast/small/stiff
+    one sub-steps. Assigned at the macro boundary from the previous step's velocities and contacts (a one-step lag).
     """
     R_max = qd.static(static_rigid_sim_config.adaptive_timestep_max_rate)
     v_ref = qd.static(static_rigid_sim_config.adaptive_timestep_ref_speed)  # 0.0 = auto (geometry CFL)
@@ -3546,6 +3556,17 @@ def kernel_assign_island_rates(
                     d = v * macro_dt * dofs_info.dof_cfl_inv_travel[I_d]
                 if d > demand:
                     demand = d
+            # Contact-stiffness CFL: a contact whose (possibly explicitly stiff) time constant is below 2 * macro_dt
+            # needs 2 * macro_dt / timeconst sub-steps to stay stable. Uses the previous step's island contacts (a
+            # one-step lag, like the partition). contact_id holds the contact_data index directly.
+            i_c_start = island_state.contact_slices.start[i_island, i_b]
+            for i_local in range(island_state.contact_slices.n[i_island, i_b]):
+                i_col = island_state.contact_id[i_c_start + i_local, i_b]
+                timeconst = collider_state.contact_data.sol_params[i_col, i_b][0]
+                if timeconst > 0.0:
+                    stiff_demand = 2.0 * macro_dt / timeconst
+                    if stiff_demand > demand:
+                        demand = stiff_demand
             demanded = 1
             while demanded < R_max and demanded < demand:
                 demanded = demanded * 2
