@@ -497,6 +497,76 @@ def make_box_pyramid(n_envs, solver=None, gjk=None, n_cubes=3, **scene_kwargs):
     return scene, step, SceneMeta(compile_time=compile_time)
 
 
+def make_adaptive_islands(n_envs, solver=None, gjk=None, adaptive=True, n_rest=36, **scene_kwargs):
+    # A large resting pile (a touching grid of boxes -> one coupled island with an expensive Cholesky) plus one
+    # perpetually fast-moving ball that forces its own island to sub-step. With adaptive timestep on, the resting
+    # island is skipped on the ball's fast micro-ticks; the uniform-fine baseline (adaptive=False, substeps=MAX_RATE)
+    # solves every island on every tick at the same finest dt. Comparing the two FPS figures isolates the per-island
+    # solve-skip (the speedup grows with the skipped island's solve cost, i.e. with n_rest).
+    MAX_RATE = 8
+    SPEED = 5.0  # ball speed, well above adaptive_timestep_ref_speed so its island stays at the max rate throughout
+
+    if adaptive:
+        rigid_options = gs.options.RigidOptions(
+            **get_rigid_solver_options(
+                dt=STEP_DT,
+                use_adaptive_timestep=True,
+                adaptive_timestep_max_rate=MAX_RATE,
+                adaptive_timestep_ref_speed=0.5,
+                **(dict(constraint_solver=solver) if solver is not None else {}),
+                **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
+            )
+        )
+        substeps = 1
+    else:
+        rigid_options = gs.options.RigidOptions(
+            **get_rigid_solver_options(
+                dt=STEP_DT,
+                **(dict(constraint_solver=solver) if solver is not None else {}),
+                **(dict(use_gjk_collision=gjk) if gjk is not None else {}),
+            )
+        )
+        substeps = MAX_RATE
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(dt=STEP_DT, substeps=substeps),
+        rigid_options=rigid_options,
+        **{"show_viewer": False, "show_FPS": False, **scene_kwargs},
+    )
+
+    scene.add_entity(gs.morphs.Plane())
+    box_size = 0.2
+    spacing = (1.0 - 1e-3) * box_size  # touching, so the pile coalesces into a single coupled island
+    side = int(math.ceil(math.sqrt(n_rest)))
+    placed = 0
+    for gx in range(side):
+        for gy in range(side):
+            if placed >= n_rest:
+                break
+            scene.add_entity(
+                gs.morphs.Box(size=(box_size, box_size, box_size), pos=(spacing * gx + 2.0, spacing * gy - 1.5, 0.1))
+            )
+            placed += 1
+    ball = scene.add_entity(gs.morphs.Sphere(radius=0.12, pos=(0.0, 0.0, 0.5)))
+
+    time_start = time.time()
+    scene.build(n_envs=n_envs)
+    compile_time = time.time() - time_start
+
+    # Drive the ball on a fast horizontal circle (hovering above the plane) so its island stays at the max rate for the
+    # whole run without drifting into the resting boxes.
+    angle = [0.0]
+
+    def step():
+        angle[0] += 0.1
+        vx = SPEED * math.cos(angle[0])
+        vy = SPEED * math.sin(angle[0])
+        ball.set_dofs_velocity([vx, vy, 0.0, 0.0, 0.0, 0.0])
+        scene.step()
+
+    return scene, step, SceneMeta(compile_time=compile_time)
+
+
 def make_g1_fall(n_envs, solver=None, gjk=None, **scene_kwargs):
     step_dt = 0.005
 
@@ -1031,6 +1101,18 @@ def box_pyramid_6(solver, n_envs, gjk):
 
 
 @pytest.fixture
+def adaptive_islands(solver, n_envs, gjk):
+    _, step_fn, meta = make_adaptive_islands(n_envs, solver=solver, gjk=gjk, adaptive=True)
+    return run_benchmark(step_fn, n_envs=n_envs, meta=meta)
+
+
+@pytest.fixture
+def uniform_islands(solver, n_envs, gjk):
+    _, step_fn, meta = make_adaptive_islands(n_envs, solver=solver, gjk=gjk, adaptive=False)
+    return run_benchmark(step_fn, n_envs=n_envs, meta=meta)
+
+
+@pytest.fixture
 def g1_fall(solver, n_envs, gjk):
     _, step_fn, meta = make_g1_fall(n_envs, solver=solver, gjk=gjk)
     return run_benchmark(step_fn, n_envs=n_envs, meta=meta)
@@ -1100,6 +1182,10 @@ def dex_hand(solver, n_envs, gjk):
         ("double_smplx", gs.constraint_solver.Newton, None, 4096, gs.gpu),
         ("shadow_hand_cubes", None, None, 0, gs.cpu),
         ("shadow_hand_cubes_sparse", None, None, 0, gs.cpu),
+        # Adaptive per-island timestep vs the equal-fidelity uniform-fine baseline: compare the two FPS figures to
+        # track the per-island solve-skip speedup and catch regressions.
+        ("adaptive_islands", None, None, 0, gs.cpu),
+        ("uniform_islands", None, None, 0, gs.cpu),
         ("dex_hand", None, None, 4096, gs.gpu),
     ],
 )
