@@ -494,6 +494,10 @@ class RigidOptions(Options):
         rate ``clamp(next_pow2(ceil(v / ref_speed)), 1, max_rate)``. If None (default), the rate is derived
         automatically from geometry (the travel-fraction CFL above) so no per-scene tuning is needed. Must be positive
         when set.
+    adaptive_timestep_downgrade_steps : int, optional
+        Rate hysteresis: a DOF's rate rises immediately when demanded but is only lowered after its demand stays below
+        the current rate for this many consecutive macro steps, preventing thrashing near a power-of-two boundary. Only
+        used when ``use_adaptive_timestep`` is enabled. Defaults to 10.
     use_hibernation : bool, optional
         Whether to put bodies that have come to rest to sleep, so the solver skips them until they are disturbed. It
         quietly has no effect on a body that is differentiable, prunable, or under no-slip friction. Defaults to False.
@@ -553,6 +557,7 @@ class RigidOptions(Options):
     adaptive_timestep_max_rate: PositiveInt = 8
     adaptive_timestep_cfl: PositiveFloat = 0.5
     adaptive_timestep_ref_speed: PositiveFloat | None = None
+    adaptive_timestep_downgrade_steps: PositiveInt = 10
     box_box_detection: StrictBool = False
 
     # hibernation threshold

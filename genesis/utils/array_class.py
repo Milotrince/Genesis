@@ -680,6 +680,11 @@ class IslandState:
     # merged island then simply holds mixed-rate DOFs - the fast body keeps sub-stepping, the frozen body stays frozen,
     # and the island is solved whenever any of its DOFs is active. Indexed [i_d, i_b]; allocated only under adaptive.
     dofs_rate: qd.Tensor
+    # Per-DOF dwell counter for rate hysteresis (DOF-keyed like dofs_rate). Counts consecutive macro steps the DOF's
+    # demanded rate has been below its current rate; the rate is only stepped down once it reaches
+    # adaptive_timestep_downgrade_steps, while an increase applies immediately. Prevents rate thrashing near a
+    # power-of-two boundary. Only allocated under use_adaptive_timestep.
+    dofs_high_rate_steps: qd.Tensor
     # Max island rate across all islands and envs this macro step, atomic-max'd by the rate assignment (reset to 1
     # before each assign). The substep loop reads it once to run exactly that many micro-ticks instead of the static
     # max-rate cap, so a scene where nothing needs sub-stepping costs a single pass. Shape (1,) under adaptive.
@@ -763,6 +768,9 @@ def get_island_state(solver, collider):
         dofs_island_idx=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         island_rate=V_FROM(dtype=gs.qd_int, shape=maybe_shape((n_links, _B), solver._use_adaptive_timestep), value=1),
         dofs_rate=V_FROM(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), solver._use_adaptive_timestep), value=1),
+        dofs_high_rate_steps=V_FROM(
+            dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), solver._use_adaptive_timestep), value=0
+        ),
         island_rate_max=V_FROM(dtype=gs.qd_int, shape=maybe_shape((1,), solver._use_adaptive_timestep), value=1),
         dof_env_start_local=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         dof_env_col_end=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
@@ -2311,6 +2319,7 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # Manual rate criterion: DOF speed above which an island sub-steps. 0.0 is the sentinel for "auto" (derive the rate
     # from geometry via the per-DOF dof_cfl_inv_travel travel-fraction CFL instead).
     adaptive_timestep_ref_speed: float = 0.0
+    adaptive_timestep_downgrade_steps: int = 10  # consecutive low-demand steps before a DOF's rate is lowered one level
     # Consecutive sub-tolerance steps a body's max DOF velocity must hold before it is ready to hibernate. Guards
     # against a body that is only momentarily slow (e.g. at the apex of a toss) sleeping prematurely.
     hibernation_min_steps: int = 10

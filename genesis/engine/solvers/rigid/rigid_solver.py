@@ -267,6 +267,7 @@ class RigidSolver(KinematicSolver):
         self._adaptive_timestep_max_rate = options.adaptive_timestep_max_rate
         self._adaptive_timestep_cfl = options.adaptive_timestep_cfl
         self._adaptive_timestep_ref_speed = options.adaptive_timestep_ref_speed
+        self._adaptive_timestep_downgrade_steps = options.adaptive_timestep_downgrade_steps
         if self._use_adaptive_timestep:
             if not self._use_contact_island:
                 gs.raise_exception(
@@ -543,6 +544,7 @@ class RigidSolver(KinematicSolver):
             adaptive_timestep_max_rate=self._adaptive_timestep_max_rate if self._use_adaptive_timestep else 1,
             # 0.0 is the "auto" sentinel (derive the rate from geometry via dof_cfl_inv_travel).
             adaptive_timestep_ref_speed=(self._adaptive_timestep_ref_speed or 0.0),
+            adaptive_timestep_downgrade_steps=self._adaptive_timestep_downgrade_steps,
             # The per-island solve engages wherever islands are on by default (CPU, where it composes with the sparse
             # skyline). The GPU block below narrows it to exclude the whole-env-fits-shared no-hibernation case, which
             # factors faster through the whole-env path (its block-diagonal Cholesky is the exact per-island result).
@@ -3542,15 +3544,36 @@ def kernel_assign_island_rates(
                     d = v * macro_dt * dofs_info.dof_cfl_inv_travel[I_d]
                 if d > demand:
                     demand = d
-            rate = 1
-            while rate < R_max and rate < demand:
-                rate = rate * 2
-            island_state.island_rate[i_island, i_b] = rate
-            qd.atomic_max(island_state.island_rate_max[0], rate)
-            # Push the island rate down to its DOFs. dofs_rate is keyed to the (fixed) DOF index, so it stays valid if
-            # this island later merges with another mid-macro-step.
+            demanded = 1
+            while demanded < R_max and demanded < demand:
+                demanded = demanded * 2
+            # Apply per-DOF hysteresis and push the rate down to each DOF. dofs_rate/dofs_high_rate_steps are keyed to
+            # the (fixed) DOF index, so they survive a mid-macro-step re-partition: a rate rises to the island's demand
+            # immediately but is only halved once demand has stayed below it for adaptive_timestep_downgrade_steps
+            # consecutive steps, preventing thrashing near a power-of-two boundary.
+            n_down = qd.static(static_rigid_sim_config.adaptive_timestep_downgrade_steps)
+            island_rate = 1
             for i_local in range(island_state.dof_slices.n[i_island, i_b]):
-                island_state.dofs_rate[island_state.dof_id[i_start + i_local, i_b], i_b] = rate
+                i_d = island_state.dof_id[i_start + i_local, i_b]
+                prev = island_state.dofs_rate[i_d, i_b]
+                if prev < 1:
+                    prev = 1
+                new_rate = prev
+                steps = island_state.dofs_high_rate_steps[i_d, i_b]
+                if demanded >= prev:
+                    new_rate = demanded
+                    steps = 0
+                else:
+                    steps = steps + 1
+                    if steps >= n_down:
+                        new_rate = prev // 2
+                        steps = 0
+                island_state.dofs_rate[i_d, i_b] = new_rate
+                island_state.dofs_high_rate_steps[i_d, i_b] = steps
+                if new_rate > island_rate:
+                    island_rate = new_rate
+            island_state.island_rate[i_island, i_b] = island_rate
+            qd.atomic_max(island_state.island_rate_max[0], island_rate)
 
 
 @qd.kernel(fastcache=True)
