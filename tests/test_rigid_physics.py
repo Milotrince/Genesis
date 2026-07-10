@@ -8136,3 +8136,55 @@ def test_energy_analytical_and_conservation(show_viewer, tol, integrator):
     # Damped sphere_b: energy strictly decreased
     te_b_final = ke_b[-1] + pe_b[-1]
     assert te_b_final < te_initial
+
+
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_adaptive_timestep_per_island_rates(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            substeps=1,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            use_adaptive_timestep=True,
+            adaptive_timestep_max_rate=4,
+            adaptive_timestep_ref_speed=2.0,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    fast = scene.add_entity(
+        gs.morphs.Sphere(
+            radius=0.1,
+            pos=(0.0, 0.0, 1.5),
+        ),
+    )
+    rest = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(5.0, 0.0, 0.1),
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    # A falling sphere exceeds ref_speed, so its island must sub-step; the box sits at its rest height in a separate
+    # island that must stay at rate 1 and never drift (its rate-1 island integrates once per macro step, frozen on the
+    # other micro-ticks).
+    island_state = scene.sim.rigid_solver.constraint_solver.island_state
+    max_rate_seen = 0
+    for _ in range(80):
+        scene.step()
+        max_rate_seen = max(max_rate_seen, int(qd_to_numpy(island_state.island_rate).max()))
+
+    # The fast island exceeded ref_speed, so adaptive sub-stepping actually engaged.
+    assert max_rate_seen > 1
+    # The resting box did not move: the freeze holds a slow island exactly in place.
+    assert_allclose(np.atleast_1d(rest.get_pos()[..., 2]), 0.1, tol=1e-3)
+    # The sphere settled onto the plane without tunneling and came to rest.
+    fast_z = np.atleast_1d(fast.get_pos()[..., 2])
+    assert (fast_z > 0.05).all()
+    fast_vel = np.atleast_2d(tensor_to_array(fast.get_dofs_velocity())[..., :3])
+    assert (np.linalg.norm(fast_vel, axis=-1) < 0.5).all()
