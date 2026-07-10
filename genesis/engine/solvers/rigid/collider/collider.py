@@ -390,6 +390,40 @@ class Collider:
         geom_type = np.array([g.type for g in geoms], dtype=np.int32)
         geom_is_convex = np.array([g.is_convex for g in geoms], dtype=bool)
 
+        # Extend the per-geom attribute arrays with the reserved geometry-pool slots (Phase 3). Each slot's
+        # collision identity is its owning entity's (contype/conaffinity/link/root/entity), declared at build,
+        # so pair validity precomputes even though the slot is empty until set_active_object fills it. Slots are
+        # typed as nonconvex meshes so the SDF narrowphase is compiled (an uploaded object may be nonconvex).
+        # The concatenation order matches the reserved global geom indices [n_geoms, n_geoms_): segments are
+        # laid out in order, each occupying a contiguous block, and every geom in a segment shares its attrs.
+        n_pool = 0
+        if self._solver._geom_pool is not None:
+            attrs = {k: [] for k in ("link", "root", "fixed", "eid", "contype", "conaff", "lmask")}
+            for seg in self._solver._geom_pool.segments:
+                base = seg.entity.base_link
+                for _ in range(seg.total("geom")):
+                    attrs["link"].append(seg.link_idx)
+                    attrs["root"].append(base.root_idx)
+                    attrs["fixed"].append(base.is_fixed)
+                    attrs["eid"].append(id(seg.entity))
+                    attrs["contype"].append(seg.entity._morph.contype)
+                    attrs["conaff"].append(seg.entity._morph.conaffinity)
+                    attrs["lmask"].append(seg.entity.is_local_collision_mask)
+            n_pool = len(attrs["link"])
+        if n_pool:
+            geom_link_idx = np.concatenate([geom_link_idx, np.array(attrs["link"], dtype=np.int32)])
+            geom_root_idx = np.concatenate([geom_root_idx, np.array(attrs["root"], dtype=np.int32)])
+            geom_is_fixed = np.concatenate([geom_is_fixed, np.array(attrs["fixed"], dtype=bool)])
+            geom_entity_id = np.concatenate([geom_entity_id, np.array(attrs["eid"], dtype=np.int64)])
+            geom_contype = np.concatenate([geom_contype, np.array(attrs["contype"], dtype=np.int64)])
+            geom_conaffinity = np.concatenate([geom_conaffinity, np.array(attrs["conaff"], dtype=np.int64)])
+            geom_local_mask = np.concatenate([geom_local_mask, np.array(attrs["lmask"], dtype=bool)])
+            geom_is_ipc_only = np.concatenate([geom_is_ipc_only, np.zeros(n_pool, dtype=bool)])
+            geom_is_ipc_deleg = np.concatenate([geom_is_ipc_deleg, np.zeros(n_pool, dtype=bool)])
+            geom_type = np.concatenate([geom_type, np.full(n_pool, gs.GEOM_TYPE.MESH, dtype=np.int32)])
+            geom_is_convex = np.concatenate([geom_is_convex, np.zeros(n_pool, dtype=bool)])
+        n_geoms_total = n_geoms + n_pool
+
         # Build weld pairs set for O(1) lookup (use sorted tuple keys)
         weld_pairs = set()
         for eq in self._solver.equalities:
@@ -398,7 +432,7 @@ class Collider:
                 weld_pairs.add((min(a, b), max(a, b)))
 
         # --- Vectorized filtering: build upper-triangular valid-pair mask ---
-        row, col = np.triu_indices(n_geoms, k=1)
+        row, col = np.triu_indices(n_geoms_total, k=1)
 
         link_a = geom_link_idx[row]
         link_b = geom_link_idx[col]
@@ -427,6 +461,15 @@ class Collider:
         same_root = geom_root_idx[row] == geom_root_idx[col]
         if not self._solver._enable_self_collision:
             valid &= ~same_root
+
+        # A reserved pool slot must never collide with another geom of the same entity — its own base geometry
+        # or a sibling slot, which are all mutually-exclusive alternatives sharing the entity root. Invalidate
+        # those pairs up front regardless of the self-collision setting; this also keeps the Python
+        # self-collision loop below from indexing solver.geoms for a slot (slots are not RigidGeom objects).
+        if n_pool:
+            is_slot = np.zeros(n_geoms_total, dtype=bool)
+            is_slot[n_geoms:] = True
+            valid &= ~((is_slot[row] | is_slot[col]) & same_root)
 
         # Weld constraint filtering
         if weld_pairs:
@@ -512,7 +555,7 @@ class Collider:
         # --- Build collision_pair_idx, valid pairs list, and count ---
         valid_indices = np.where(valid)[0]
         n_possible_pairs = len(valid_indices)
-        collision_pair_idx = np.full((n_geoms, n_geoms), fill_value=-1, dtype=gs.np_int)
+        collision_pair_idx = np.full((n_geoms_total, n_geoms_total), fill_value=-1, dtype=gs.np_int)
         collision_pair_idx[row[valid_indices], col[valid_indices]] = np.arange(n_possible_pairs, dtype=gs.np_int)
 
         valid_collision_pairs = np.stack([row[valid_indices], col[valid_indices]], axis=1).astype(gs.np_int)
@@ -583,6 +626,14 @@ class Collider:
                 (valid_type_a == gs.GEOM_TYPE.BOX) & (valid_type_b == gs.GEOM_TYPE.BOX)
             )
 
+        # A geometry-pool slot can hold ANY geometry at runtime (box, radial primitive, convex or nonconvex
+        # mesh), but slots are typed nonconvex-mesh at build; force every narrowphase specialization to compile
+        # so a later-uploaded sphere/cylinder/convex-mesh does not fall through an uncompiled branch.
+        if self._solver._geom_pool is not None:
+            has_convex_specialization = True
+            has_non_box_plane_convex_convex = True
+            has_nonconvex_vs_nonterrain = True
+
         return (
             n_possible_pairs,
             collision_pair_idx,
@@ -593,6 +644,14 @@ class Collider:
             has_nonconvex_vs_nonterrain,
             large_contact_mask,
         )
+
+    def _pool_geom_link_idx(self):
+        """Owning-link index of every reserved pool-slot geom, in global-index order (empty if no pool)."""
+        out = []
+        if self._solver._geom_pool is not None:
+            for seg in self._solver._geom_pool.segments:
+                out.extend([seg.link_idx] * seg.total("geom"))
+        return np.array(out, dtype=np.int64)
 
     def _compute_verts_connectivity(self):
         """
@@ -619,6 +678,15 @@ class Collider:
         if self._n_possible_pairs == 0:
             self._collider_info.collision_pair_idx.fill(-1)
             return
+        # The device field is sized (n_geoms_, n_geoms_), which exceeds the real geom count when a dynamic
+        # geometry pool reserves trailing slots. Pad the host matrix with -1 (no pair) so reserved rows/cols
+        # never produce a valid pair; set_active_object patches in a slot's real pairs when it is filled.
+        n_geoms_ = self._solver.n_geoms_
+        if collision_pair_idx.shape[0] != n_geoms_:
+            padded = np.full((n_geoms_, n_geoms_), fill_value=-1, dtype=gs.np_int)
+            n = collision_pair_idx.shape[0]
+            padded[:n, :n] = collision_pair_idx
+            collision_pair_idx = padded
         self._collider_info.collision_pair_idx.from_numpy(collision_pair_idx)
 
     def _init_valid_pairs(self):
@@ -627,6 +695,13 @@ class Collider:
 
     def _init_verts_connectivity(self, vert_neighbors, vert_neighbor_start, vert_n_neighbors):
         if self._solver.n_verts > 0:
+            # The per-vert start/count fields are sized (n_verts_,), which exceeds the real vert count when a
+            # geometry pool reserves trailing vertex rows. Pad those two with zeros (reserved verts have no
+            # neighbors); set_active_object fills a slot's real connectivity when it is loaded.
+            n_verts_ = self._solver.n_verts_
+            if vert_neighbor_start.shape[0] != n_verts_:
+                vert_neighbor_start = np.pad(vert_neighbor_start, (0, n_verts_ - vert_neighbor_start.shape[0]))
+                vert_n_neighbors = np.pad(vert_n_neighbors, (0, n_verts_ - vert_n_neighbors.shape[0]))
             self._collider_info.vert_neighbors.from_numpy(vert_neighbors)
             self._collider_info.vert_neighbor_start.from_numpy(vert_neighbor_start)
             self._collider_info.vert_n_neighbors.from_numpy(vert_n_neighbors)
@@ -663,6 +738,11 @@ class Collider:
             and self._solver._options.contact_pruning_tolerance is not None
         ):
             geoms_link_idx = np.array([geom.link.idx for geom in self._solver.geoms], dtype=np.int64)
+            # Extend with the reserved pool slots (each bound to its owning entity's link) so slot-inclusive
+            # valid pairs index correctly.
+            pool_link_idx = self._pool_geom_link_idx()
+            if len(pool_link_idx):
+                geoms_link_idx = np.concatenate([geoms_link_idx, pool_link_idx])
             pairs_link_idx = geoms_link_idx[self._valid_collision_pairs]
             pairs_key = self._solver.n_links * pairs_link_idx.min(axis=1) + pairs_link_idx.max(axis=1)
             _, pairs_group_idx = np.unique(pairs_key, return_inverse=True)

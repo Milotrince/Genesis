@@ -90,11 +90,25 @@ class KinematicEntity(Entity):
         custom_vvert_start: int,
         custom_vface_start: int,
         morph_heterogeneous: list[Morph] | None = None,
+        geom_pool=None,
         name: str | None = None,
     ):
         # Set heterogeneous support before super().__init__() because _get_morph_identifier() needs it
         self._morph_heterogeneous = morph_heterogeneous if morph_heterogeneous is not None else []
         self._enable_heterogeneous = bool(self._morph_heterogeneous)
+        # Per-variant parsed link + joint infos (primary + each variant), captured only for heterogeneous
+        # entities so per-env kinematic topology (link parent chain + poses, joint type + DOF mapping) can be
+        # rebound per environment. None otherwise.
+        self._primary_links_l_infos = None
+        self._primary_links_j_infos = None
+        self._variant_links_l_infos = None
+        self._variant_links_j_infos = None
+        # True when heterogeneous variants differ in joint type or DOF count at a shared slot (ragged per-env
+        # topology). The first morph defines the skeleton slot widths; narrower variants inert the padding DOFs.
+        self._has_ragged_topology = False
+        # Per-entity dynamic geometry pool request (Phase 3); the solver reserves its slots at build.
+        self._geom_pool_options = geom_pool
+        self._enable_geom_pool = geom_pool is not None
 
         super().__init__(idx, scene, morph, solver, material, surface, name=name)
 
@@ -191,45 +205,56 @@ class KinematicEntity(Entity):
         self._variant_init_qpos = [self.init_qpos]
         self._variant_offset_pos = [self._offset_pos]
         self._variant_offset_quat = [self._offset_quat]
+        # Per-variant parsed per-link link + joint infos, variant 0 = primary (captured in _load_scene).
+        # Basic-object (Mesh/Primitive) variants carry no scene structure, so they record None.
+        self._variant_links_l_infos = [self._primary_links_l_infos]
+        self._variant_links_j_infos = [self._primary_links_j_infos]
 
         n_links = len(self._links)
 
         # Load additional heterogeneous variants
         for morph in self._morph_heterogeneous:
-            if isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF)):
-                # Parse variant scene file
-                morph._enable_mujoco_compatibility = self._morph._enable_mujoco_compatibility
+            if isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF, gs.morphs.USD)):
+                # Parse variant scene file. A USD variant parses into the same link/joint tree as URDF/MJCF - a
+                # single free/fixed base body yields one link (basic, is_robot False), a jointed one yields the
+                # articulated tree - so both flow through this branch and the ragged machinery below reconciles
+                # differing link/joint/DOF counts across variants.
+                if isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF)):
+                    morph._enable_mujoco_compatibility = self._morph._enable_mujoco_compatibility
                 v_l_infos, v_links_j_infos, v_links_g_infos, _ = self._parse_scene(morph, self._surface)
+                self._variant_links_l_infos.append(v_l_infos)
+                self._variant_links_j_infos.append(v_links_j_infos)
 
-                # Validate that the variant has the same joint structure as the primary
-                if len(v_l_infos) != n_links:
+                # A variant may have FEWER links than the first morph (ragged topology): its links map
+                # positionally to the leading skeleton slots and the trailing slots are inert in that
+                # environment. A variant with MORE links needs a longer primary - order the morph with the most
+                # links first. Variants map by slot position, not joint name, so names need not match.
+                if len(v_l_infos) > n_links:
                     gs.raise_exception(
-                        f"Heterogeneous variant has {len(v_l_infos)} links, "
-                        f"but primary has {n_links}. All variants must have the same link count."
+                        f"Heterogeneous variant has {len(v_l_infos)} links, exceeding the first morph's "
+                        f"{n_links}. Order the variants so the one with the most links comes first."
                     )
+                if len(v_l_infos) != n_links:
+                    self._has_ragged_topology = True
                 for i_l, (link, v_j_infos) in enumerate(zip(self._links, v_links_j_infos)):
                     primary_joints = link.joints
                     if len(v_j_infos) != len(primary_joints):
                         gs.raise_exception(
-                            f"Heterogeneous variant link {i_l} has {len(v_j_infos)} joints, "
-                            f"but primary has {len(primary_joints)}."
+                            f"Heterogeneous variant link {i_l} has {len(v_j_infos)} joints, but its skeleton "
+                            f"slot has {len(primary_joints)} (a link's joint count must match its slot)."
                         )
                     for p_joint, v_j_info in zip(primary_joints, v_j_infos):
-                        if p_joint.name != v_j_info["name"]:
+                        # Joint type and DOF count may differ per variant (per-env joint locking / DOF-count
+                        # variation); the variant joint must fit the skeleton slot's DOF/q width, which the first
+                        # morph defines. A wider variant joint needs a wider primary - order the widest first.
+                        if v_j_info["n_dofs"] > p_joint.n_dofs or v_j_info["n_qs"] > p_joint.n_qs:
                             gs.raise_exception(
-                                f"Joint name mismatch at link {i_l}: primary has '{p_joint.name}', "
-                                f"variant has '{v_j_info['name']}'. All variants must have the same joint names."
+                                f"Heterogeneous variant joint '{p_joint.name}' has {v_j_info['n_dofs']} DOFs / "
+                                f"{v_j_info['n_qs']} qs, exceeding the first morph's slot ({p_joint.n_dofs} / "
+                                f"{p_joint.n_qs}). Order the variants so the joint with the most DOFs comes first."
                             )
-                        if p_joint.type != v_j_info["type"]:
-                            gs.raise_exception(
-                                f"Joint type mismatch for '{p_joint.name}': primary has {p_joint.type}, "
-                                f"variant has {v_j_info['type']}."
-                            )
-                        if p_joint.n_dofs != v_j_info["n_dofs"]:
-                            gs.raise_exception(
-                                f"DoF count mismatch for joint '{p_joint.name}': primary has {p_joint.n_dofs}, "
-                                f"variant has {v_j_info['n_dofs']}."
-                            )
+                        if p_joint.type != v_j_info["type"] or p_joint.n_dofs != v_j_info["n_dofs"]:
+                            self._has_ragged_topology = True
 
                 # Post-process each link's geoms. The COM/principal-axis anchoring of the floating base is deferred to
                 # '_align_free_roots' after build (where the finalized per-variant composite inertia is known); here
@@ -242,12 +267,14 @@ class KinematicEntity(Entity):
                     cg_infos, vg_infos = self._postprocess_geoms_info(morph, v_g_infos, is_robot)
                     cg_vg_infos.append((cg_infos, vg_infos))
 
-                # Extract variant's init_qpos from parsed joint infos, composing the morph offset into the free joint so
-                # relative getters report the variant's user frame.
+                # Extract the variant's init_qpos in the skeleton's superset q-layout: each joint's qpos sits at
+                # its slot and any trailing padding qs (a narrower variant joint) are zero, so every variant
+                # shares the entity's q-width for per-environment dispatch. Compose the morph offset into a free
+                # root joint so relative getters report the variant's user frame.
                 variant_init_qpos_parts = []
-                for v_l_info, v_j_infos in zip(v_l_infos, v_links_j_infos):
+                for link, v_l_info, v_j_infos in zip(self._links, v_l_infos, v_links_j_infos):
                     is_root = v_l_info["parent_idx"] == -1
-                    for j_info in v_j_infos:
+                    for p_joint, j_info in zip(link.joints, v_j_infos):
                         qpos = j_info["init_qpos"]
                         if is_root and j_info["type"] == gs.JOINT_TYPE.FREE:
                             init_pos, init_quat = gu.transform_pos_quat_by_trans_quat(
@@ -257,7 +284,15 @@ class KinematicEntity(Entity):
                                 qpos[3:7],
                             )
                             qpos = np.concatenate([init_pos, init_quat])
+                        n_pad = p_joint.n_qs - len(qpos)
+                        if n_pad > 0:
+                            qpos = np.concatenate([qpos, np.zeros(n_pad, dtype=gs.np_float)])
                         variant_init_qpos_parts.append(qpos)
+                # Trailing skeleton slots this (shorter) variant lacks contribute zero qs, so every variant
+                # fills the entity's full superset q-layout for per-environment dispatch.
+                for i_l in range(len(v_l_infos), n_links):
+                    for p_joint in self._links[i_l].joints:
+                        variant_init_qpos_parts.append(np.zeros(p_joint.n_qs, dtype=gs.np_float))
                 if variant_init_qpos_parts:
                     self._variant_init_qpos.append(np.concatenate(variant_init_qpos_parts))
                 else:
@@ -281,6 +316,18 @@ class KinematicEntity(Entity):
                             cg_infos,
                         )
                     )
+                # Trailing skeleton slots this (shorter) variant does not fill are inert in its environments:
+                # record an empty geom range, an empty scene-inertial entry (resolves to the near-zero
+                # empty-geometry fallback in link._build), and a zero align inertial, all kept per-variant
+                # aligned so link._build indexes them by variant without going out of range.
+                for i_link in range(len(v_l_infos), n_links):
+                    self._add_heterogeneous_variant(self._links[i_link], [], [])
+                    self._on_heterogeneous_scene_variant_loaded(self._links[i_link], morph, {})
+                    self._align_inertials[i_link].append(
+                        self._finalize_inertial(
+                            0.0, gu.zero_pos(), gu.identity_quat(), np.zeros((3, 3), dtype=gs.np_float), []
+                        )
+                    )
 
             elif isinstance(morph, (gs.morphs.Mesh, gs.morphs.Primitive)):
                 if isinstance(morph, gs.morphs.Mesh):
@@ -297,6 +344,9 @@ class KinematicEntity(Entity):
                 offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
 
                 self._add_heterogeneous_variant(self._links[0], cg_infos, vg_infos)
+                # Mesh/Primitive variants have no explicit scene structure (single fixed/free base).
+                self._variant_links_l_infos.append(None)
+                self._variant_links_j_infos.append(None)
                 # Mesh/Primitive variants have no explicit inertial; the anchor inertia comes from their geometry.
                 self._align_inertials[0].append(self._finalize_inertial(None, None, None, None, cg_infos))
 
@@ -315,7 +365,8 @@ class KinematicEntity(Entity):
                 self._variant_offset_quat.append(offset_quat)
             else:
                 gs.raise_exception(
-                    f"Heterogeneous morphs only support URDF, MJCF, Primitive, and Mesh, got: {type(morph).__name__}."
+                    f"Heterogeneous morphs only support URDF, MJCF, USD, Primitive, and Mesh, got: "
+                    f"{type(morph).__name__}."
                 )
 
         # For multi-link entities, reassign indices and recompute variant ranges
@@ -1793,8 +1844,10 @@ class KinematicEntity(Entity):
         if self.n_vgeoms == 0:
             gs.raise_exception("Entity has no visual geometries.")
 
-        # For heterogeneous entities, compute AABB per-environment respecting active_envs_idx
-        if self._enable_heterogeneous:
+        # For heterogeneous or geometry-pool entities, compute the AABB per environment respecting each
+        # vgeom's active_envs_mask (pool placeholders are visible only in the envs bound to their slot, and the
+        # base morph vgeoms are hidden in envs showing a pooled object).
+        if self._enable_heterogeneous or self._enable_geom_pool:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
             n_envs = len(envs_idx)
             aabb_min = torch.full((n_envs, 3), float("inf"), dtype=gs.tc_float, device=gs.device)
@@ -2146,6 +2199,52 @@ class KinematicEntity(Entity):
             return f"{len(self.morphs)} morph variants"
         return f"{self.main_morph}"
 
+    def set_active_variant(self, variant_idx, envs_idx=None):
+        """Rebind which heterogeneous geometry variant each environment simulates, at runtime.
+
+        Only valid for entities built with a heterogeneous morph list (`morph=[m0, m1, ...]`). Variant 0
+        is the primary morph and 1..N are the additional variants. `variant_idx` is a single index applied
+        to all selected environments, or one index per selected environment. The joint configuration is
+        preserved; this changes the active geometry, collision shape and inertial per environment.
+        """
+        if not self._enable_heterogeneous:
+            gs.raise_exception(
+                "set_active_variant is only supported for heterogeneous entities (built with morph=[...])."
+            )
+        if not self._solver.is_built:
+            gs.raise_exception("set_active_variant can only be called after the scene is built.")
+        self._solver.set_active_variant(self, variant_idx, envs_idx)
+
+    def set_active_object(self, object_ref, envs_idx=None):
+        """Load a processed object into this entity's geometry pool and bind environments to it at runtime.
+
+        Only valid for entities built with `add_entity(geom_pool=...)`. `object_ref` is a `gs.morphs.Mesh` or
+        `gs.morphs.Primitive`; it is processed to collision geometry, uploaded into a free pool slot (reused if
+        already resident), and the selected environments are rebound to it. The object inherits this entity's
+        collision filters and base link; the joint configuration is preserved.
+        """
+        if not self._enable_geom_pool:
+            gs.raise_exception("set_active_object is only supported for entities built with add_entity(geom_pool=...).")
+        if not self._solver.is_built:
+            gs.raise_exception("set_active_object can only be called after the scene is built.")
+        self._solver.set_active_object(self, object_ref, envs_idx)
+
+    def set_scale(self, scale, envs_idx=None):
+        """Set a per-environment geometry scale for this entity at runtime.
+
+        `scale` is a scalar (isotropic), a length-3 vector `(sx, sy, sz)`, or a per-environment
+        `(n_envs, 3)` array. Requires the scene built with `RigidOptions(enable_geom_scaling=True)`. Scales
+        the entity's collision geometry, AABBs and inertial about each geom's frame origin; the joint
+        configuration is preserved. Radial primitives (capsule, cylinder) require an isotropic radial scale.
+        """
+        if not self._solver.is_built:
+            gs.raise_exception("set_scale can only be called after the scene is built.")
+        self._solver.set_entity_scale(self, scale, envs_idx)
+
+    def get_scale(self, envs_idx=None):
+        """Return this entity's per-environment geometry scale as `(n_envs, 3)` (or `(3,)` for a single env)."""
+        return qd_to_numpy(self._solver.geoms_state.scale, envs_idx, self._geom_start, transpose=True)
+
     @property
     def n_joints(self):
         """The number of `RigidJoint` in the entity."""
@@ -2277,6 +2376,9 @@ class KinematicEntity(Entity):
             init = torch.as_tensor(vgeom.init_vverts, dtype=gs.tc_float, device=gs.device)
             pos = vgeoms_pos[..., vgeom.idx, :].unsqueeze(-2)
             quat = vgeoms_quat[..., vgeom.idx, :].unsqueeze(-2)
+            vscale = vgeom._vscale(envs_idx)
+            if vscale is not None:
+                init = vscale * init
             parts.append(gu.transform_by_trans_quat(init, pos, quat))
         tensor = torch.cat(parts, dim=-2)
         return tensor[0] if self._solver.n_envs == 0 else tensor
@@ -2347,6 +2449,7 @@ class RigidEntity(KinematicEntity):
         equality_start=0,
         visualize_contact: bool = False,
         morph_heterogeneous: list[Morph] | None = None,
+        geom_pool=None,
         name: str | None = None,
     ):
         self._geom_start = geom_start
@@ -2381,6 +2484,7 @@ class RigidEntity(KinematicEntity):
             custom_vvert_start,
             custom_vface_start,
             morph_heterogeneous,
+            geom_pool,
             name,
         )
 
@@ -2480,6 +2584,14 @@ class RigidEntity(KinematicEntity):
         from genesis.engine.couplers import IPCCoupler
 
         l_infos, links_j_infos, links_g_infos, eqs_info = self._parse_scene(morph, surface)
+
+        # For a heterogeneous entity the first (primary) morph defines the skeleton slots; keep its parsed
+        # per-link link + joint infos so per-env topology (link parent chain + poses, joint type + DOF
+        # mapping) can be rebound for variant 0 alongside the other variants (recorded in
+        # _load_heterogeneous_morphs). Non-heterogeneous stays None.
+        if self._enable_heterogeneous and self._primary_links_j_infos is None:
+            self._primary_links_l_infos = l_infos
+            self._primary_links_j_infos = links_j_infos
 
         # Make sure that the entity is not object
         if (
@@ -3527,9 +3639,22 @@ class RigidEntity(KinematicEntity):
         if self.n_geoms == 0:
             gs.raise_exception("Entity has no collision geometries.")
 
-        # Already computed internally by the solver. Let's access it directly for efficiency.
-        if allow_fast_approx and isinstance(self.sim.coupler, LegacyCoupler):
+        # Already computed internally by the solver. Let's access it directly for efficiency. Not usable for
+        # heterogeneous entities: the solver aggregates the full contiguous geom range, which includes variant
+        # geoms inactive in a given env, over-sizing that env's AABB. Fall through to the active-masked branch.
+        if (
+            allow_fast_approx
+            and isinstance(self.sim.coupler, LegacyCoupler)
+            and not self._enable_heterogeneous
+            and not self._enable_geom_pool
+        ):
             return self._solver.get_AABB(entities_idx=[self._idx_in_solver], envs_idx=envs_idx)[..., 0, :]
+
+        # For a geometry-pool entity, the per-env active geoms live in the reserved pool block (bound via
+        # links_info per env), not in the entity's contiguous range and not as RigidGeom objects. Reduce the
+        # device per-env AABBs over each env's link geom ranges.
+        if self._enable_geom_pool and self._solver.n_envs > 0:
+            return self._solver.get_entity_aabb_per_env(self, envs_idx)
 
         # For heterogeneous entities, compute AABB per-environment respecting active_envs_idx.
         # FIXME: Remove this branch after implementing 'get_verts'.
@@ -3718,6 +3843,11 @@ class RigidEntity(KinematicEntity):
         """
         if self._enable_heterogeneous:
             gs.raise_exception("This method is not supported by heterogeneous entities.")
+        if self._enable_geom_pool:
+            gs.raise_exception(
+                "get_verts is not supported for geometry-pool entities (the active geometry is per-env); "
+                "use get_AABB for per-env bounds."
+            )
 
         self._solver.update_verts_for_geoms(slice(self.geom_start, self.geom_end))
 
@@ -4264,9 +4394,16 @@ class RigidEntity(KinematicEntity):
         """
         gravity = self._solver.get_gravity(envs_idx=envs_idx)  # (3,) or (n_envs, 3)
         links_pos = self.get_links_pos(envs_idx=envs_idx, ref="link_com")  # (..., n_links, 3)
-        # Link masses are static properties (not batched per environment),
-        # so always fetch without envs_idx to avoid indexing conflicts.
-        links_mass = self.get_links_inertial_mass()  # (n_links,)
+        # Link masses are batched per environment for heterogeneous or per-env-scaled entities (the runtime
+        # inertial differs per env); otherwise they are a static per-link vector. When batched, fetch all envs
+        # (the solver forbids envs_idx for batched links) and index down to the requested envs so the mass axis
+        # aligns with links_pos.
+        if (self._enable_heterogeneous or self._solver._enable_geom_scaling) and self._solver.n_envs > 0:
+            links_mass = self.get_links_inertial_mass()  # (n_envs, n_links)
+            if envs_idx is not None:
+                links_mass = links_mass[self._scene._sanitize_envs_idx(envs_idx)]
+        else:
+            links_mass = self.get_links_inertial_mass()  # (n_links,)
 
         # PE_i = m_i * g^T * p_i => PE = sum_i(m_i * (g . p_i))
         # g is (..., 3), links_pos is (..., n_links, 3) -> broadcast g to (..., 1, 3)
@@ -4540,7 +4677,7 @@ class RigidEntity(KinematicEntity):
             The total mass of the entity in kg. For heterogeneous entities, returns
             an array of shape (n_envs,) with per-environment masses.
         """
-        if self._enable_heterogeneous:
+        if self._enable_heterogeneous or self._solver._enable_geom_scaling or self._enable_geom_pool:
             links_idx = slice(self.link_start, self.link_end)
             links_mass = qd_to_numpy(self._solver.links_info.inertial_mass, None, links_idx, transpose=True)
             return links_mass.sum(axis=1)

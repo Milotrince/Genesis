@@ -16,6 +16,7 @@ from genesis.utils.misc import (
     indices_to_mask,
     broadcast_tensor,
     assign_indexed_tensor,
+    tensor_to_array,
 )
 
 from .base_solver import Solver, StateChange, mutates
@@ -69,6 +70,20 @@ def _balanced_variant_mapping(n_variants, B):
         return np.repeat(np.arange(n_variants), sizes)
     else:
         return np.arange(B)
+
+
+def _update_geom_active_envs(geom, starts, ends, envs_idx, B):
+    """Record which environments a geom/vgeom is active in for the bound variant.
+
+    'starts'/'ends' are the per-selected-environment geom-range bounds (positionally aligned with
+    'envs_idx'); the geom is active in an environment when its index falls in that environment's range.
+    Only the entries for 'envs_idx' are updated, so a runtime rebind of a subset leaves the rest intact.
+    """
+    is_active = (starts <= geom.idx) & (geom.idx < ends)
+    if geom.active_envs_mask is None:
+        geom.active_envs_mask = torch.zeros(B, dtype=torch.bool, device=gs.device)
+    geom.active_envs_mask[torch.as_tensor(envs_idx, device=gs.device)] = torch.as_tensor(is_active, device=gs.device)
+    (geom.active_envs_idx,) = np.where(tensor_to_array(geom.active_envs_mask))
 
 
 def _select_links_offset(offset, links_idx, envs_idx):
@@ -157,6 +172,9 @@ class KinematicSolver(Solver):
         self._enable_mujoco_compatibility = False
         self._requires_grad = False
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
+        self._enable_geom_scaling = False  # RigidSolver overrides from RigidOptions(enable_geom_scaling)
+        self._enable_geom_pool = False  # RigidSolver overrides from RigidOptions(geom_pool)
+        self._geom_pool = None  # RigidSolver builds the GeometryPool when a pool is enabled
 
         self.collider = None
         self.constraint_solver = None
@@ -299,16 +317,21 @@ class KinematicSolver(Solver):
         self.n_dofs_ = max(1, self.n_dofs)
         self.n_links_ = max(1, self.n_links)
         self.n_joints_ = max(1, self.n_joints)
-        self.n_vgeoms_ = max(1, self.n_vgeoms)
+        # A geometry pool with visual pooling reserves trailing vgeom rows; enlarge the vgeom allocation so
+        # placeholder visual geoms for pool slots have device rows (collision reservation is done earlier in
+        # RigidSolver.build). Rigid visual pooling needs no extra vvert/vface rows (host trimesh is rendered).
+        pool_vgeoms = self._geom_pool.n_vgeoms if self._geom_pool is not None else 0
+        self.n_vgeoms_ = max(1, self.n_vgeoms + pool_vgeoms)
         self.n_vfaces_ = max(1, self.n_vfaces)
         self.n_vverts_ = max(1, self.n_vverts)
         self.n_custom_vverts_ = max(1, self.n_custom_vverts)
         self.n_custom_vfaces_ = max(1, self.n_custom_vfaces)
         self.n_entities_ = max(1, self.n_entities)
 
-        # batch_links_info is required when heterogeneous simulation is used.
-        # We must update options because get_links_info reads from solver._options.batch_links_info.
-        if self._enable_heterogeneous:
+        # batch_links_info is required for per-environment link info: heterogeneous variants (per-env geom
+        # ranges + inertial) and per-env geom scaling (per-env inertial write). We must update options
+        # because get_links_info reads from solver._options.batch_links_info.
+        if self._enable_heterogeneous or self._enable_geom_scaling or self._enable_geom_pool:
             self._options.batch_links_info = True
 
         self._build_static_config()
@@ -494,25 +517,35 @@ class KinematicSolver(Solver):
 
         # Dispatch heterogeneous variant vgeom ranges per-environment
         self._dispatch_heterogeneous_vgeoms()
+        # Dispatch per-env kinematic topology (joint type + DOF mapping) for ragged variants. No-op unless the
+        # RigidSolver override handles it; kinematic-only scenes carry no dynamics topology.
+        self._dispatch_heterogeneous_topology()
+
+    def _dispatch_heterogeneous_topology(self):
+        """Bind per-env kinematic topology for ragged heterogeneous variants. No-op in the base solver."""
 
     def _dispatch_heterogeneous_vgeoms(self):
-        """Override per-link vgeom ranges for heterogeneous variants. RigidSolver extends this."""
+        """Bind each heterogeneous link's build-time variant assignment across all environments."""
+        envs_idx = np.arange(self._B, dtype=gs.np_int)
         for link in self.links:
             if link._variant_vgeom_ranges is None:
                 continue
-
             n_variants = len(link._variant_vgeom_ranges)
             variant_idx = _balanced_variant_mapping(n_variants, self._B)
+            self._bind_link_variant(link, variant_idx, envs_idx)
 
-            vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
-            vgeom_ends = np.array([link._variant_vgeom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
+    def _bind_link_variant(self, link, variant_idx, envs_idx):
+        """Bind a per-environment variant selection for one link's vgeom ranges and active-env masks.
 
-            kernel_update_heterogeneous_links_vgeom(link.idx, vgeom_starts, vgeom_ends, self.links_info)
-
-            for vgeom in link.vgeoms:
-                active_envs_mask = (vgeom_starts <= vgeom.idx) & (vgeom.idx < vgeom_ends)
-                vgeom.active_envs_mask = torch.tensor(active_envs_mask, device=gs.device)
-                (vgeom.active_envs_idx,) = np.where(active_envs_mask)
+        'variant_idx[i]' is the variant used by environment 'envs_idx[i]'. Shared by build-time dispatch
+        and runtime rebind. RigidSolver extends this to also bind collision geom ranges and per-variant
+        inertial properties.
+        """
+        vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
+        vgeom_ends = np.array([link._variant_vgeom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
+        kernel_update_heterogeneous_links_vgeom(link.idx, envs_idx, vgeom_starts, vgeom_ends, self.links_info)
+        for vgeom in link.vgeoms:
+            _update_geom_active_envs(vgeom, vgeom_starts, vgeom_ends, envs_idx, self._B)
 
     def _init_vvert_fields(self):
         self.vverts_info = self.data_manager.vverts_info
@@ -562,6 +595,7 @@ class KinematicSolver(Solver):
                 vgeoms_vface_end=np.array([vgeom.vface_end for vgeom in vgeoms], dtype=gs.np_int),
                 vgeoms_color=np.array([vgeom._color for vgeom in vgeoms], dtype=gs.np_float),
                 vgeoms_info=self.vgeoms_info,
+                vgeoms_state=self.vgeoms_state,
                 static_rigid_sim_config=self._static_rigid_sim_config,
             )
 

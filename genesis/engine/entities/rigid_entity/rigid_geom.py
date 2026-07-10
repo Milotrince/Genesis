@@ -862,8 +862,26 @@ class RigidVisGeom(RBC):
         self._metadata = vmesh.metadata
         self._color = vmesh._color
 
+        # Geometry-pool visual slot (Phase 3): a placeholder vgeom whose mesh is swapped at runtime by
+        # set_active_object. `_pool_render_dirty` flags the rasterizer to (re)create its render node.
+        self._is_pool_slot = False
+        self._pool_render_dirty = False
+
     def _build(self):
         pass
+
+    def set_pool_mesh(self, vmesh):
+        """Swap this pool-slot placeholder's visual mesh (runtime), flagging the renderer to re-mesh its node."""
+        self._vmesh = vmesh
+        self._init_vverts = vmesh.verts
+        self._init_vfaces = vmesh.faces
+        self._init_vnormals = vmesh.normals
+        self._uvs = vmesh.uvs
+        self._surface = vmesh.surface
+        self._metadata = vmesh.metadata
+        self._color = vmesh._color
+        self._aabb_verts = None  # rebuilt lazily from the new mesh
+        self._pool_render_dirty = True
 
     def get_trimesh(self):
         """
@@ -916,8 +934,20 @@ class RigidVisGeom(RBC):
             self.link.get_pos(envs_idx, relative=False),
             self.link.get_quat(envs_idx, relative=False),
         )
-        vverts_pos = pos[..., None, :] + gu.transform_by_quat(self._aabb_verts, quat[..., None, :])
+        # Scale the hull verts about the vgeom frame (before the world rotation) when per-env scaling is on.
+        aabb_verts = self._aabb_verts
+        vscale = self._vscale(envs_idx)
+        if vscale is not None:
+            aabb_verts = vscale * aabb_verts
+        vverts_pos = pos[..., None, :] + gu.transform_by_quat(aabb_verts, quat[..., None, :])
         return torch.stack((vverts_pos.min(dim=-2).values, vverts_pos.max(dim=-2).values), dim=-2)
+
+    def _vscale(self, envs_idx=None):
+        """This vgeom's per-env visual scale as a (..., 1, 3) tensor for broadcasting, or None when scaling is off."""
+        if not self._solver._enable_geom_scaling:
+            return None
+        scale = qd_to_torch(self._solver.vgeoms_state.scale, envs_idx, transpose=True, copy=None)
+        return scale[..., self.idx, :].unsqueeze(-2)
 
     @gs.assert_built
     def set_vverts(self, vverts, envs_idx=None):
@@ -958,6 +988,9 @@ class RigidVisGeom(RBC):
         init = torch.as_tensor(self.init_vverts, dtype=gs.tc_float, device=gs.device)
         pos = vgeoms_pos[..., self.idx, :].unsqueeze(-2)
         quat = vgeoms_quat[..., self.idx, :].unsqueeze(-2)
+        vscale = self._vscale(envs_idx)
+        if vscale is not None:
+            init = vscale * init
         tensor = gu.transform_by_trans_quat(init, pos, quat)
         return tensor[0] if self._solver.n_envs == 0 else tensor
 

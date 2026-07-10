@@ -1,7 +1,7 @@
 from typing import Any, Literal
 
 import numpy as np
-from pydantic import PrivateAttr, StrictBool, model_validator
+from pydantic import Field, PrivateAttr, StrictBool, model_validator
 
 import genesis as gs
 from genesis.typing import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, UnitVec4FType, Vec3FType
@@ -393,6 +393,71 @@ class ToolOptions(Options):
     floor_height: float | None = None
 
 
+class GeomPoolOptions(Options):
+    """
+    Options configuring a dynamic GPU geometry residency pool for a heterogeneous-capable rigid entity.
+
+    The pool reserves, at build time, a fixed block of ``n_slots`` uniform geometry slots appended to the
+    solver's global geometry/vertex arrays. The block starts empty (inert) and is filled at runtime by
+    ``entity.set_active_object(...)``, which uploads a processed object into a free slot and rebinds the
+    selected environments to it. Because the engine's device fields are statically shaped at build, every
+    per-slot budget below is a hard capacity: an object whose processed geometry exceeds any budget cannot be
+    loaded (a clear error is raised). Slots are bound to a single link declared at build.
+
+    The two ways to size the pool are mutually exclusive:
+
+    - Pass ``objects`` (a list of ``gs.morphs``): the per-slot budgets and ``n_slots`` are derived
+      automatically by processing each object once at build. Each declared object's processed geometry is
+      cached and reused verbatim by ``set_active_object``, so it always fits its slot even when processing is
+      nondeterministic (e.g. convex decomposition). This is the recommended path.
+    - Or set the per-slot budgets (``max_*_per_slot``) and ``n_slots`` explicitly, for a pool whose catalog is
+      not known up front.
+
+    Parameters
+    ----------
+    objects : list of gs.morphs.Morph | None
+        Catalog of objects the pool will hold (``gs.morphs.Mesh`` / ``gs.morphs.Primitive`` / a single-body
+        ``gs.morphs.USD``). When given, every
+        per-slot budget is derived as the per-dimension maximum over these objects and ``n_slots`` defaults to
+        ``len(objects)``; the explicit ``max_*_per_slot`` fields are ignored. ``set_active_object`` may still be
+        called with any of these objects (fast, cache-backed) or with a new object that fits the derived
+        budgets. Defaults to None.
+    n_slots : int
+        Number of resident geometry slots. ``0`` disables the pool entirely (the solver compiles identical,
+        pool-free kernels), unless ``objects`` is given, in which case it defaults to ``len(objects)``.
+        Defaults to 0.
+    max_geoms_per_slot : int
+        Maximum number of collision sub-geoms per slot. Convex decomposition of a single mesh can yield several
+        convex pieces, each a geom; this budgets the largest object the pool accepts. Ignored when ``objects``
+        is given. Defaults to 1.
+    max_verts_per_slot : int
+        Maximum number of collision vertices per slot (across all its sub-geoms). Ignored when ``objects`` is
+        given. Defaults to 0.
+    max_faces_per_slot : int
+        Maximum number of collision faces per slot. Ignored when ``objects`` is given. Defaults to 0.
+    max_edges_per_slot : int
+        Maximum number of collision edges per slot. Ignored when ``objects`` is given. Defaults to 0.
+    max_cells_per_slot : int
+        Maximum number of SDF grid cells per slot, needed only when pooling nonconvex meshes (which use the
+        SDF narrowphase path). ``0`` means the pool accepts only primitives and convex geometry. Ignored when
+        ``objects`` is given. Defaults to 0.
+    max_vgeoms_per_slot : int
+        Maximum number of visual geoms per slot, enabling visual pooling (each slot renders its uploaded
+        object's visual mesh per environment). ``0`` disables visual pooling: a pooled object collides with
+        its real geometry but renders as the entity's base morph. Ignored when ``objects`` is given. Defaults
+        to 0.
+    """
+
+    objects: list | None = Field(default=None, exclude=True, repr=False)
+    n_slots: NonNegativeInt = 0
+    max_geoms_per_slot: PositiveInt = 1
+    max_verts_per_slot: NonNegativeInt = 0
+    max_faces_per_slot: NonNegativeInt = 0
+    max_edges_per_slot: NonNegativeInt = 0
+    max_cells_per_slot: NonNegativeInt = 0
+    max_vgeoms_per_slot: NonNegativeInt = 0
+
+
 class RigidOptions(Options):
     """
     Options configuring the RigidSolver.
@@ -518,6 +583,11 @@ class RigidOptions(Options):
     batch_links_info: StrictBool = False
     batch_joints_info: StrictBool = False
     batch_dofs_info: StrictBool = False
+
+    # Enable per-environment runtime geometry scale (entity.set_scale). Off by default so scenes that do
+    # not use it compile identical, scale-free kernels. Requires batch_links_info for the per-env inertial
+    # write; it is auto-enabled when this is set.
+    enable_geom_scaling: StrictBool = False
 
     # constraint solver
     constraint_solver: gs.constraint_solver = gs.constraint_solver.Newton

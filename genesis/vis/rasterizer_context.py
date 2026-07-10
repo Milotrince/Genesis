@@ -440,8 +440,11 @@ class RasterizerContext:
                     # A heterogeneous variant is present in only a subset of environments. Render its full per-env pose
                     # set with a per-env visibility mask, so the per-env draw places the variant in its own environment
                     # instead of collapsing the subset of poses onto the wrong environments.
+                    # Build a per-env visibility mask whenever the geom carries an active-env mask (a subset now,
+                    # or all envs but maskable later, e.g. a geometry-pool entity's base vgeoms hidden per env
+                    # once a pooled object is shown), so the node can be culled per env; else a shared instance.
                     active_envs = None
-                    if len(geom_envs_idx) < len(self.rendered_envs_idx):
+                    if geom.active_envs_mask is not None or len(geom_envs_idx) < len(self.rendered_envs_idx):
                         geom_T = geoms_T[geom.idx][self.rendered_envs_idx]
                         active_envs = np.isin(self.rendered_envs_idx, geom_envs_idx)
                     else:
@@ -556,6 +559,31 @@ class RasterizerContext:
                     geoms_T = solver._geoms_render_T
 
                 for geom in geoms:
+                    # Geometry-pool visual slots start as empty placeholders (no node at build). When
+                    # set_active_object swaps in a new object mesh, (re)create the node with that mesh, mirroring
+                    # the custom-vvert pop/re-add. Gated on visual mode so collision geoms are never inspected.
+                    if entity.surface.vis_mode == "visual" and geom._is_pool_slot and geom._pool_render_dirty:
+                        geom._pool_render_dirty = False
+                        old_node = self.rigid_nodes.pop(geom.uid, None)
+                        if old_node is not None:
+                            self.remove_node_seg(old_node)
+                            self.remove_node(old_node)
+                        geom_envs_idx = self._get_geom_active_envs_idx(geom, self.rendered_envs_idx)
+                        if len(geom_envs_idx) > 0:
+                            mesh_node = pyrender.Mesh.from_trimesh(
+                                mesh=geom.get_trimesh(),
+                                poses=geoms_T[geom.idx][self.rendered_envs_idx],
+                                smooth=geom.surface.smooth,
+                                double_sided=geom.surface.double_sided,
+                                active_envs=np.isin(self.rendered_envs_idx, geom_envs_idx),
+                            )
+                            self.add_rigid_node(geom, mesh_node)
+                        # A pool node is popped and re-added (not just re-posed), so the live viewer must rebuild
+                        # its node/buffer list to pick up the new mesh - the offscreen camera rebuilds every frame
+                        # and so never needed this, but the interactive viewer only refreshes when flagged.
+                        self._scene._meshes_updated = True
+                        continue
+
                     # Skip geoms that weren't added - in heterogeneous simulation, some geoms
                     # may not be rendered in any of the requested environments
                     if geom.uid not in self.rigid_nodes:
@@ -563,11 +591,28 @@ class RasterizerContext:
 
                     # For heterogeneous simulation, filter envs based on geom's assigned environments
                     geom_envs_idx = self._get_geom_active_envs_idx(geom, self.rendered_envs_idx)
+
+                    node = self.rigid_nodes[geom.uid]
+                    primitive = node.mesh.primitives[0]
+
+                    # A runtime rebind (set_active_variant) changes which envs a variant is active in. The jit
+                    # per-env visibility mask (env_active) is rebuilt from primitive.active_envs only when the
+                    # scene is flagged meshes-updated, so refresh the mask whenever it actually changes and flag
+                    # the rebuild. np.isin yields all-False when the variant left every rendered env (drawn
+                    # nowhere). Only env-masked variants carry a mask; env-shared instances (active_envs None,
+                    # e.g. shared planes) are untouched.
+                    if primitive.active_envs is not None:
+                        new_active_envs = np.isin(self.rendered_envs_idx, geom_envs_idx)
+                        if not np.array_equal(new_active_envs, primitive.active_envs):
+                            primitive.active_envs = new_active_envs
+                            self._scene._meshes_updated = True
+
                     if len(geom_envs_idx) == 0:
                         continue
 
-                    # Mirror on_rigid: full per-env poses for env-masked variants, compacted otherwise.
-                    if len(geom_envs_idx) < len(self.rendered_envs_idx):
+                    # Env-masked variants carry full per-env poses (the mask selects the drawn envs), so a
+                    # variant can occupy any env after a rebind; env-shared instances use compacted poses.
+                    if primitive.active_envs is not None:
                         geom_T = geoms_T[geom.idx][self.rendered_envs_idx]
                     else:
                         geom_T = geoms_T[geom.idx][geom_envs_idx]
@@ -583,9 +628,8 @@ class RasterizerContext:
                         ):
                             geom_T = geom_T[:1]
 
-                    node = self.rigid_nodes[geom.uid]
                     node.mesh._bounds = None
-                    node.mesh.primitives[0].poses = geom_T
+                    primitive.poses = geom_T
                     self.jit.update_buffer(node, "model", geom_T.transpose((0, 2, 1)))
                     if isinstance(entity._morph, gs.morphs.Plane):
                         self.set_reflection_mat(geom_T)

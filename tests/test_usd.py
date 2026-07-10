@@ -1032,6 +1032,135 @@ def test_collision_only_fixed_override(collision_only_rigid_usd, fixed, expected
 
 
 @pytest.fixture(scope="session")
+def het_free_body_usd(asset_tmp_path):
+    """A single free rigid cube: a single free base body, so a non-articulated (basic) entity."""
+    usd_file = str(asset_tmp_path / "het_free_body.usda")
+    stage = Usd.Stage.CreateNew(usd_file)
+    UsdGeom.SetStageUpAxis(stage, "Z")
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    root = stage.DefinePrim("/root", "Xform")
+    stage.SetDefaultPrim(root)
+    cube = UsdGeom.Cube.Define(stage, "/root/body")
+    cube.GetSizeAttr().Set(0.4)
+    UsdPhysics.RigidBodyAPI.Apply(cube.GetPrim())
+    UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+    UsdPhysics.MassAPI.Apply(cube.GetPrim())
+    UsdPhysics.MassAPI(cube.GetPrim()).GetMassAttr().Set(1.0)
+    stage.Save()
+    return usd_file
+
+
+@pytest.fixture(scope="session")
+def het_articulated_usd(asset_tmp_path):
+    """A free base cube plus a revolute child: two links, an articulated entity (is_robot True)."""
+    usd_file = str(asset_tmp_path / "het_articulated.usda")
+    stage = Usd.Stage.CreateNew(usd_file)
+    UsdGeom.SetStageUpAxis(stage, "Z")
+    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+    root = stage.DefinePrim("/root", "Xform")
+    stage.SetDefaultPrim(root)
+
+    base = UsdGeom.Cube.Define(stage, "/root/base")
+    base.GetSizeAttr().Set(0.4)
+    UsdPhysics.RigidBodyAPI.Apply(base.GetPrim())
+    UsdPhysics.CollisionAPI.Apply(base.GetPrim())
+    UsdPhysics.MassAPI.Apply(base.GetPrim())
+    UsdPhysics.MassAPI(base.GetPrim()).GetMassAttr().Set(1.0)
+
+    child = UsdGeom.Cube.Define(stage, "/root/child")
+    child.AddTranslateOp().Set(Gf.Vec3d(0.5, 0.0, 0.0))
+    child.GetSizeAttr().Set(0.4)
+    UsdPhysics.RigidBodyAPI.Apply(child.GetPrim()).GetKinematicEnabledAttr().Set(False)
+    UsdPhysics.CollisionAPI.Apply(child.GetPrim())
+    UsdPhysics.MassAPI.Apply(child.GetPrim())
+    UsdPhysics.MassAPI(child.GetPrim()).GetMassAttr().Set(0.5)
+
+    rev = UsdPhysics.RevoluteJoint.Define(stage, "/root/child_joint")
+    rev.CreateBody0Rel().SetTargets([base.GetPrim().GetPath()])
+    rev.CreateBody1Rel().SetTargets([child.GetPrim().GetPath()])
+    rev.CreateAxisAttr().Set("Z")
+    rev.CreateLowerLimitAttr().Set(-1.5)
+    rev.CreateUpperLimitAttr().Set(1.5)
+    rev.CreateLocalPos0Attr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+    rev.CreateLocalPos1Attr().Set(Gf.Vec3f(-0.5, 0.0, 0.0))
+    stage.Save()
+    return usd_file
+
+
+@pytest.mark.required
+def test_heterogeneous_usd_variants(het_free_body_usd, het_articulated_usd):
+    """USD variants in a single add_entity: all-basic (single free base), all-articulated, and a mixed fleet
+    reconciled by ragged topology (the basic variant pads the articulated skeleton's extra link slot inert)."""
+
+    def usd(path):
+        return gs.morphs.USD(file=path, convexify=False, decimate=False, align=False, pos=(0.0, 0.0, 1.5))
+
+    # All-basic: each env is a single free body -> one link, six DOFs, no ragged topology.
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    basic = scene.add_entity(morph=(usd(het_free_body_usd), usd(het_free_body_usd)))
+    scene.build(n_envs=4)
+    assert basic.n_links == 1 and basic.n_dofs == 6
+    assert not scene.rigid_solver._enable_ragged_topology
+    for _ in range(20):
+        scene.step()
+    assert not np.isnan(tensor_to_array(basic.get_dofs_position())).any()
+
+    # All-articulated: free base + revolute child -> two links, seven DOFs.
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    artic = scene.add_entity(morph=(usd(het_articulated_usd), usd(het_articulated_usd)))
+    scene.build(n_envs=4)
+    assert artic.n_links == 2 and artic.n_dofs == 7
+    for _ in range(20):
+        scene.step()
+    assert not np.isnan(tensor_to_array(artic.get_dofs_position())).any()
+
+    # Mixed: articulated (superset, two links) first, basic (one link) second -> ragged topology; the basic
+    # envs leave the revolute link slot inert. Runtime set_active_variant swaps between the two per env.
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    mixed = scene.add_entity(morph=(usd(het_articulated_usd), usd(het_free_body_usd)))
+    scene.build(n_envs=4)
+    assert mixed.n_links == 2 and mixed.n_dofs == 7
+    assert scene.rigid_solver._enable_ragged_topology
+    for _ in range(20):
+        scene.step()
+    mixed.set_active_variant(np.array([0, 1, 0, 1]), envs_idx=list(range(4)))
+    for _ in range(20):
+        scene.step()
+    assert not np.isnan(tensor_to_array(mixed.get_dofs_position())).any()
+
+
+@pytest.mark.required
+def test_geom_pool_usd_object(het_free_body_usd, het_articulated_usd):
+    """A single-body USD can live in the geometry pool alongside primitives and be bound per environment; an
+    articulated USD (a joint tree, no single geom group to pool) is rejected."""
+
+    def usd(path):
+        return gs.morphs.USD(file=path, convexify=False, decimate=False, align=False, pos=(0.0, 0.0, 0.5))
+
+    objects = [usd(het_free_body_usd), gs.morphs.Sphere(radius=0.1, pos=(0.0, 0.0, 0.5))]
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    obj = scene.add_entity(gs.morphs.Box(size=(0.15, 0.15, 0.15), pos=(0.0, 0.0, 0.5)), geom_pool=objects)
+    scene.build(n_envs=4)
+
+    obj.set_active_object(objects[0], envs_idx=[0, 2])  # the USD body
+    obj.set_active_object(objects[1], envs_idx=[1, 3])  # the sphere
+    for _ in range(30):
+        scene.step()
+    assert not np.isnan(tensor_to_array(obj.get_pos())).any()
+
+    # An articulated USD has no single swappable geom group, so pooling it must raise.
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    with pytest.raises(gs.GenesisException):
+        scene.add_entity(gs.morphs.Box(size=(0.15, 0.15, 0.15)), geom_pool=[usd(het_articulated_usd)])
+        scene.build(n_envs=2)
+
+
+@pytest.fixture(scope="session")
 def visual_collision_usd(asset_tmp_path):
     """Create a USD file mimicking Pan011 structure: separate Visual/Collision groups + invisible Sites.
 

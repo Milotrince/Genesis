@@ -317,6 +317,7 @@ class Scene(RBC):
         visualize_contact: bool = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
+        geom_pool: "gs.options.GeomPoolOptions | list | None" = ...,
     ) -> "RigidEntity": ...
 
     @overload
@@ -328,6 +329,7 @@ class Scene(RBC):
         visualize_contact: bool = ...,
         vis_mode: str | None = ...,
         name: str | None = ...,
+        geom_pool: "gs.options.GeomPoolOptions | list | None" = ...,
     ) -> EntityT: ...
 
     @gs.assert_unbuilt
@@ -339,6 +341,7 @@ class Scene(RBC):
         visualize_contact: bool = False,
         vis_mode: str | None = None,
         name: str | None = None,
+        geom_pool: "gs.options.GeomPoolOptions | list | None" = None,
     ) -> "Entity":
         """
         Add an entity to the scene.
@@ -346,9 +349,13 @@ class Scene(RBC):
         Parameters
         ----------
         morph : gs.morphs.Morph | list[gs.morphs.Morph]
-            The morph of the entity. If a list of morphs is provided, the entity will be heterogeneous
-            (rigid only, single-link entities only). Each parallel environment will simulate a different
-            geometry variant from the list.
+            The morph of the entity. If a list of morphs is provided, the entity is heterogeneous (rigid
+            only): each parallel environment simulates a different variant from the list. Variants may differ
+            in geometry and, for articulated (URDF/MJCF) variants, in kinematic topology - different joint
+            types, DOF counts, or even link counts (e.g. a fleet of different robots). The first morph defines
+            the skeleton: its links/joints are the per-slot maximum, so it must have at least as many links and
+            as wide a joint at each slot as every other variant; narrower variants leave their unused link/DOF
+            slots inert. Variants map by slot position (`qpos[slot i]` may mean a different joint per env).
         material : gs.materials.Material | None, optional
             The material of the entity. If None, use ``gs.materials.Rigid()``.
         surface : gs.surfaces.Surface | None, optional
@@ -362,6 +369,13 @@ class Scene(RBC):
         name : str | None, optional
             User-specified name for the entity. If not provided, an auto-generated name will be assigned
             based on the morph type and entity UID (e.g., "box_a1b2c3d4"). Must be unique within the scene.
+        geom_pool : gs.options.GeomPoolOptions | list[gs.morphs.Morph] | None, optional
+            Reserve a dynamic GPU geometry pool for this entity (rigid, single non-heterogeneous morph only).
+            The pool's slots are bound at build to the entity's base link; ``entity.set_active_object(...)``
+            loads a processed object into a free slot at runtime and rebinds selected environments to it.
+            A bare list of object morphs is a shorthand for ``GeomPoolOptions(objects=...)``, which auto-sizes
+            the pool (per-slot budgets and slot count derived from the catalog). None disables pooling.
+            Defaults to None.
 
         Returns
         -------
@@ -385,12 +399,19 @@ class Scene(RBC):
                     "Heterogeneous morphs (iterable of morphs) are only supported for Rigid and Kinematic materials."
                 )
             if not all(
-                isinstance(m, (gs.morphs.Primitive, gs.morphs.Mesh, gs.morphs.URDF, gs.morphs.MJCF)) for m in morph
+                isinstance(m, (gs.morphs.Primitive, gs.morphs.Mesh, gs.morphs.URDF, gs.morphs.MJCF, gs.morphs.USD))
+                for m in morph
             ):
-                gs.raise_exception("Heterogeneous morphs only support Primitive, Mesh, URDF and MJCF types.")
-            if len(set(isinstance(m, (gs.morphs.URDF, gs.morphs.MJCF)) for m in morph)) > 1:
+                gs.raise_exception("Heterogeneous morphs only support Primitive, Mesh, URDF, MJCF and USD types.")
+            # Scene-based morphs (URDF/MJCF/USD) parse into a link/joint tree and may mix freely: variants with
+            # different link/joint/DOF counts are reconciled by ragged topology (a narrower variant pads its
+            # trailing slots inert), and a USD that is a single free/fixed base body just parses as a one-link
+            # tree. Basic geom-only morphs (Primitive/Mesh) instead swap geometry on one body. The two groups use
+            # different machinery and cannot be mixed in a single entity.
+            is_scene_based = [isinstance(m, (gs.morphs.URDF, gs.morphs.MJCF, gs.morphs.USD)) for m in morph]
+            if len(set(is_scene_based)) > 1:
                 gs.raise_exception(
-                    "Heterogeneous morphs must be consistent: either all articulated robots (ie URDF, MJCF) or all "
+                    "Heterogeneous morphs must be consistent: either all scene-based (URDF, MJCF, USD) or all "
                     "basic objects (ie Primitive, Mesh)."
                 )
         else:
@@ -496,7 +517,13 @@ class Scene(RBC):
                 if morph_variant.decimate is None:
                     morph_variant.decimate = morph_variant.convexify
 
-        entity = self._sim._add_entity(morph, material, surface, visualize_contact, name)
+        if geom_pool is not None:
+            if not isinstance(material, gs.materials.Rigid):
+                gs.raise_exception("`geom_pool` is only supported for Rigid entities.")
+            if is_heterogeneous:
+                gs.raise_exception("`geom_pool` is not supported together with heterogeneous morphs.")
+
+        entity = self._sim._add_entity(morph, material, surface, visualize_contact, name, geom_pool=geom_pool)
 
         return entity
 

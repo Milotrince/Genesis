@@ -129,7 +129,14 @@ class Raycaster:
         distance = float(distances[winner])
         position = qd_to_numpy(self.result.hit_point, row_mask=winner, keepdim=False, transpose=True)
         normal = qd_to_numpy(self.result.normal, row_mask=winner, keepdim=False, transpose=True)
-        geom = self.solver.geoms[geom_idx] if 0 <= geom_idx < len(self.solver.geoms) else None
+        if 0 <= geom_idx < len(self.solver.geoms):
+            geom = self.solver.geoms[geom_idx]
+        elif self.solver._geom_pool is not None:
+            # Reserved-block (pool slot) geoms are absent from the logical geom list; resolve the hit to the
+            # owning entity's base link (the slot is bound to it) so a pooled object can be picked/grabbed.
+            geom = self.solver._geom_pool.base_geom_for_idx(geom_idx)
+        else:
+            geom = None
 
         self.last_hit_env_idx = winner if self.scene.n_envs > 0 else None
         return RayHit(distance, position, normal, geom)

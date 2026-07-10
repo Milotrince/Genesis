@@ -360,22 +360,27 @@ def kernel_init_link_fields(
 @qd.kernel(fastcache=True)
 def kernel_update_heterogeneous_links_vgeom(
     i_l: qd.i32,
+    envs_idx: qd.types.ndarray(),
     links_vgeom_start: qd.types.ndarray(),
     links_vgeom_end: qd.types.ndarray(),
     # Quadrants variables
     links_info: array_class.LinksInfo,
 ):
-    """Update per-environment links vgeom for heterogeneous entities."""
-    _B = links_vgeom_start.shape[0]
+    """Bind per-environment link vgeom ranges for a heterogeneous variant.
 
-    for i_b in range(_B):
-        links_info.vgeom_start[i_l, i_b] = links_vgeom_start[i_b]
-        links_info.vgeom_end[i_l, i_b] = links_vgeom_end[i_b]
+    'envs_idx' selects the environments to (re)bind; the value arrays are indexed positionally by the
+    selection, so the same kernel serves both build-time dispatch (all envs) and runtime rebind (subset).
+    """
+    for i_b_ in range(envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        links_info.vgeom_start[i_l, i_b] = links_vgeom_start[i_b_]
+        links_info.vgeom_end[i_l, i_b] = links_vgeom_end[i_b_]
 
 
 @qd.kernel(fastcache=True)
 def kernel_update_heterogeneous_link_info(
     i_l: qd.i32,
+    envs_idx: qd.types.ndarray(),
     links_geom_start: qd.types.ndarray(),
     links_geom_end: qd.types.ndarray(),
     links_vgeom_start: qd.types.ndarray(),
@@ -387,24 +392,131 @@ def kernel_update_heterogeneous_link_info(
     # Quadrants variables
     links_info: array_class.LinksInfo,
 ):
-    """Update per-environment link info for heterogeneous entities."""
-    _B = links_geom_start.shape[0]
+    """Bind per-environment link geom/vgeom ranges and inertial for a heterogeneous variant.
 
-    for i_b in range(_B):
-        links_info.geom_start[i_l, i_b] = links_geom_start[i_b]
-        links_info.geom_end[i_l, i_b] = links_geom_end[i_b]
-        links_info.vgeom_start[i_l, i_b] = links_vgeom_start[i_b]
-        links_info.vgeom_end[i_l, i_b] = links_vgeom_end[i_b]
-        links_info.inertial_mass[i_l, i_b] = links_inertial_mass[i_b]
+    'envs_idx' selects the environments to (re)bind; the value arrays are indexed positionally by the
+    selection, so the same kernel serves both build-time dispatch (all envs) and runtime rebind (subset).
+    """
+    for i_b_ in range(envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        links_info.geom_start[i_l, i_b] = links_geom_start[i_b_]
+        links_info.geom_end[i_l, i_b] = links_geom_end[i_b_]
+        links_info.vgeom_start[i_l, i_b] = links_vgeom_start[i_b_]
+        links_info.vgeom_end[i_l, i_b] = links_vgeom_end[i_b_]
+        links_info.inertial_mass[i_l, i_b] = links_inertial_mass[i_b_]
 
         for j in qd.static(range(3)):
-            links_info.inertial_pos[i_l, i_b][j] = links_inertial_pos[i_b, j]
+            links_info.inertial_pos[i_l, i_b][j] = links_inertial_pos[i_b_, j]
 
         for j in qd.static(range(4)):
-            links_info.inertial_quat[i_l, i_b][j] = links_inertial_quat[i_b, j]
+            links_info.inertial_quat[i_l, i_b][j] = links_inertial_quat[i_b_, j]
 
         for j1, j2 in qd.static(qd.ndrange(3, 3)):
-            links_info.inertial_i[i_l, i_b][j1, j2] = links_inertial_i[i_b, j1, j2]
+            links_info.inertial_i[i_l, i_b][j1, j2] = links_inertial_i[i_b_, j1, j2]
+
+
+@qd.kernel(fastcache=True)
+def kernel_update_heterogeneous_topology(
+    envs_idx: qd.types.ndarray(),
+    link_idxs: qd.types.ndarray(),
+    links_n_dofs: qd.types.ndarray(),
+    links_dof_start: qd.types.ndarray(),
+    links_dof_end: qd.types.ndarray(),
+    links_q_start: qd.types.ndarray(),
+    links_q_end: qd.types.ndarray(),
+    links_parent_idx: qd.types.ndarray(),
+    links_root_idx: qd.types.ndarray(),
+    links_pos: qd.types.ndarray(),
+    links_quat: qd.types.ndarray(),
+    joint_idxs: qd.types.ndarray(),
+    joints_type: qd.types.ndarray(),
+    joints_n_dofs: qd.types.ndarray(),
+    joints_dof_start: qd.types.ndarray(),
+    joints_dof_end: qd.types.ndarray(),
+    joints_q_start: qd.types.ndarray(),
+    joints_q_end: qd.types.ndarray(),
+    dof_idxs: qd.types.ndarray(),
+    dofs_armature: qd.types.ndarray(),
+    dofs_motion_ang: qd.types.ndarray(),
+    dofs_motion_vel: qd.types.ndarray(),
+    dofs_stiffness: qd.types.ndarray(),
+    dofs_damping: qd.types.ndarray(),
+    dofs_frictionloss: qd.types.ndarray(),
+    dofs_limit: qd.types.ndarray(),
+    dofs_force_range: qd.types.ndarray(),
+    dofs_act_gain: qd.types.ndarray(),
+    dofs_act_bias: qd.types.ndarray(),
+    # Quadrants variables
+    links_info: array_class.LinksInfo,
+    joints_info: array_class.JointsInfo,
+    dofs_info: array_class.DofsInfo,
+    dofs_state: array_class.DofsState,
+):
+    """Bind per-environment kinematic topology (joint type + DOF/q mapping + motion axes) for ragged variants.
+
+    For the selected environments, rewrites each link's DOF/q range, each joint's type and DOF/q range, and
+    each DOF's motion axes plus armature (1 on an inert padding DOF a narrower variant does not use, so the
+    mass-matrix diagonal stays 1 and the DOF decouples; motion 0 so it contributes no kinematics). Requires
+    batched links/joints/dofs info; value arrays are indexed positionally by the selection, so this serves
+    both build-time dispatch and runtime rebind.
+
+    Also clears each touched DOF's world-frame motion subspace (cdof/cdofd) in dofs_state. Forward kinematics
+    only recomputes these for DOFs whose link still bears DOFs, so a DOF that a runtime swap orphans (its link
+    dropped to zero DOFs in the narrower variant) would otherwise keep the stale motion axes of the wider
+    variant - making the mass matrix pick up phantom inertia on that inert slot and turn indefinite. Zeroing
+    here lets the following forward-kinematics pass refill only the active DOFs, leaving orphaned slots at zero.
+    """
+    for i_b_ in range(envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        for i_l_ in range(link_idxs.shape[0]):
+            i_l = link_idxs[i_l_]
+            links_info.n_dofs[i_l, i_b] = links_n_dofs[i_l_, i_b_]
+            links_info.dof_start[i_l, i_b] = links_dof_start[i_l_, i_b_]
+            links_info.dof_end[i_l, i_b] = links_dof_end[i_l_, i_b_]
+            links_info.q_start[i_l, i_b] = links_q_start[i_l_, i_b_]
+            links_info.q_end[i_l, i_b] = links_q_end[i_l_, i_b_]
+            links_info.parent_idx[i_l, i_b] = links_parent_idx[i_l_, i_b_]
+            links_info.root_idx[i_l, i_b] = links_root_idx[i_l_, i_b_]
+            for j in qd.static(range(3)):
+                links_info.pos[i_l, i_b][j] = links_pos[i_l_, i_b_, j]
+            for j in qd.static(range(4)):
+                links_info.quat[i_l, i_b][j] = links_quat[i_l_, i_b_, j]
+        for i_j_ in range(joint_idxs.shape[0]):
+            i_j = joint_idxs[i_j_]
+            joints_info.type[i_j, i_b] = joints_type[i_j_, i_b_]
+            joints_info.n_dofs[i_j, i_b] = joints_n_dofs[i_j_, i_b_]
+            joints_info.dof_start[i_j, i_b] = joints_dof_start[i_j_, i_b_]
+            joints_info.dof_end[i_j, i_b] = joints_dof_end[i_j_, i_b_]
+            joints_info.q_start[i_j, i_b] = joints_q_start[i_j_, i_b_]
+            joints_info.q_end[i_j, i_b] = joints_q_end[i_j_, i_b_]
+        for i_d_ in range(dof_idxs.shape[0]):
+            i_d = dof_idxs[i_d_]
+            dofs_info.armature[i_d, i_b] = dofs_armature[i_d_, i_b_]
+            dofs_info.stiffness[i_d, i_b] = dofs_stiffness[i_d_, i_b_]
+            dofs_info.damping[i_d, i_b] = dofs_damping[i_d_, i_b_]
+            dofs_info.frictionloss[i_d, i_b] = dofs_frictionloss[i_d_, i_b_]
+            dofs_info.act_gain[i_d, i_b] = dofs_act_gain[i_d_, i_b_]
+            for j in qd.static(range(2)):
+                dofs_info.limit[i_d, i_b][j] = dofs_limit[i_d_, i_b_, j]
+                dofs_info.force_range[i_d, i_b][j] = dofs_force_range[i_d_, i_b_, j]
+            for j in qd.static(range(3)):
+                dofs_info.motion_ang[i_d, i_b][j] = dofs_motion_ang[i_d_, i_b_, j]
+                dofs_info.motion_vel[i_d, i_b][j] = dofs_motion_vel[i_d_, i_b_, j]
+                dofs_info.act_bias[i_d, i_b][j] = dofs_act_bias[i_d_, i_b_, j]
+            # Clear the world-frame motion subspace (cdof/cdofd) and the composite-force product (f_ang/f_vel)
+            # so an orphaned slot does not retain the wider variant's values. Both are rewritten each step only
+            # for DOFs whose link still bears DOFs (forward kinematics for cdof, the CRB mass_mat pass for
+            # f_ang/f_vel), so a DOF a narrower variant orphans would otherwise keep stale values - and the mass
+            # matrix assembles M[i,j] = f[i].cdof[j], so a stale f on an inert slot injects phantom coupling into
+            # the active DOFs and turns M indefinite. Zeroing here leaves orphaned slots at zero permanently.
+            dofs_state.cdof_ang[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.cdof_vel[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.cdofd_ang[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.cdofd_vel[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.cdofvel_ang[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.cdofvel_vel[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.f_ang[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.f_vel[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.kernel(fastcache=True)
@@ -640,6 +752,7 @@ def kernel_init_geom_fields(
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g, i_b in qd.ndrange(n_geoms, _B):
         geoms_state.friction_ratio[i_g, i_b] = 1.0
+        geoms_state.scale[i_g, i_b] = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
 
 
 @qd.kernel(fastcache=True)
@@ -654,9 +767,15 @@ def kernel_init_vgeom_fields(
     vgeoms_color: qd.types.ndarray(),
     # Quadrants variables
     vgeoms_info: array_class.VGeomsInfo,
+    vgeoms_state: array_class.VGeomsState,
     static_rigid_sim_config: qd.template(),
 ):
     n_vgeoms = vgeoms_pos.shape[0]
+    _B = vgeoms_state.pos.shape[1]
+
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_vg, i_b in qd.ndrange(n_vgeoms, _B):
+        vgeoms_state.scale[i_vg, i_b] = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
 
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_vg in range(n_vgeoms):
@@ -911,6 +1030,12 @@ def kernel_update_vgeoms_render_T(
         geom_T = gu.qd_trans_quat_to_T(
             vgeoms_state.pos[i_g, i_b] + rigid_global_info.envs_offset[i_b], vgeoms_state.quat[i_g, i_b], EPS
         )
+        if qd.static(static_rigid_sim_config.enable_geom_scaling):
+            # Bake the scale into the rotation block (R @ diag(scale)) so the mesh renders scaled about its frame.
+            scale = vgeoms_state.scale[i_g, i_b]
+            for i in qd.static(range(3)):
+                for j in qd.static(range(3)):
+                    geom_T[i, j] = geom_T[i, j] * scale[j]
         if (qd.abs(geom_T) < 1e20).all():
             for J in qd.static(qd.grouped(qd.ndrange(4, 4))):
                 vgeoms_render_T[(i_g, i_b, *J)] = qd.cast(geom_T[J], qd.float32)
