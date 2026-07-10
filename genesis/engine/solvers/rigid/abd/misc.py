@@ -433,17 +433,20 @@ def kernel_update_heterogeneous_topology(
     joints_q_end: qd.types.ndarray(),
     dof_idxs: qd.types.ndarray(),
     dofs_armature: qd.types.ndarray(),
+    dofs_motion_ang: qd.types.ndarray(),
+    dofs_motion_vel: qd.types.ndarray(),
     # Quadrants variables
     links_info: array_class.LinksInfo,
     joints_info: array_class.JointsInfo,
     dofs_info: array_class.DofsInfo,
 ):
-    """Bind per-environment kinematic topology (joint type + DOF/q mapping) for ragged heterogeneous variants.
+    """Bind per-environment kinematic topology (joint type + DOF/q mapping + motion axes) for ragged variants.
 
     For the selected environments, rewrites each link's DOF/q range, each joint's type and DOF/q range, and
-    each DOF's armature (1 on an inert padding DOF a narrower variant does not use, so the mass-matrix diagonal
-    stays 1 and the DOF decouples). Requires batched links/joints/dofs info; value arrays are indexed
-    positionally by the selection, so this serves both build-time dispatch and runtime rebind.
+    each DOF's motion axes plus armature (1 on an inert padding DOF a narrower variant does not use, so the
+    mass-matrix diagonal stays 1 and the DOF decouples; motion 0 so it contributes no kinematics). Requires
+    batched links/joints/dofs info; value arrays are indexed positionally by the selection, so this serves
+    both build-time dispatch and runtime rebind.
     """
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
@@ -465,6 +468,9 @@ def kernel_update_heterogeneous_topology(
         for i_d_ in range(dof_idxs.shape[0]):
             i_d = dof_idxs[i_d_]
             dofs_info.armature[i_d, i_b] = dofs_armature[i_d_, i_b_]
+            for j in qd.static(range(3)):
+                dofs_info.motion_ang[i_d, i_b][j] = dofs_motion_ang[i_d_, i_b_, j]
+                dofs_info.motion_vel[i_d, i_b][j] = dofs_motion_vel[i_d_, i_b_, j]
 
 
 @qd.kernel(fastcache=True)

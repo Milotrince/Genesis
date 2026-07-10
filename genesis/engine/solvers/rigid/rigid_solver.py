@@ -1117,6 +1117,9 @@ class RigidSolver(KinematicSolver):
         joints_q_start = np.empty((len(joints), n_sel), dtype=gs.np_int)
         joints_q_end = np.empty((len(joints), n_sel), dtype=gs.np_int)
         dofs_armature = np.empty((len(dof_idxs), n_sel), dtype=gs.np_float)
+        # Inert padding DOFs default to zero motion (they contribute no kinematics); active DOFs are filled in.
+        dofs_motion_ang = np.zeros((len(dof_idxs), n_sel, 3), dtype=gs.np_float)
+        dofs_motion_vel = np.zeros((len(dof_idxs), n_sel, 3), dtype=gs.np_float)
 
         for i_b_, variant in enumerate(variant_idx):
             variant_links_j_infos = entity._variant_links_j_infos[variant]
@@ -1140,10 +1143,22 @@ class RigidSolver(KinematicSolver):
                     joints_q_start[i_j_flat, i_b_] = p_joint.q_start
                     joints_q_end[i_j_flat, i_b_] = p_joint.q_start + v_n_qs
                     v_armature = v_j_info.get("dofs_armature", np.zeros(v_n_dofs, dtype=gs.np_float))
+                    v_motion_ang = v_j_info.get("dofs_motion_ang")
+                    v_motion_vel = v_j_info.get("dofs_motion_vel")
+                    if v_motion_ang is None:
+                        v_motion_ang = np.eye(6, 3, -3) if v_n_dofs == 6 else np.zeros((v_n_dofs, 3))
+                    if v_motion_vel is None:
+                        v_motion_vel = np.eye(6, 3) if v_n_dofs == 6 else np.zeros((v_n_dofs, 3))
                     for i_d_slot in range(p_joint.n_dofs):
                         i_d_local = p_joint.dof_start + i_d_slot - entity.dof_start
-                        # Active DOFs take the variant's armature; trailing padding DOFs are inert (diagonal 1).
-                        dofs_armature[i_d_local, i_b_] = v_armature[i_d_slot] if i_d_slot < v_n_dofs else 1.0
+                        # Active DOFs take the variant's armature + motion; trailing padding DOFs stay inert
+                        # (armature 1 so the mass diagonal is 1; motion 0 left from the zero-init above).
+                        if i_d_slot < v_n_dofs:
+                            dofs_armature[i_d_local, i_b_] = v_armature[i_d_slot]
+                            dofs_motion_ang[i_d_local, i_b_] = v_motion_ang[i_d_slot]
+                            dofs_motion_vel[i_d_local, i_b_] = v_motion_vel[i_d_slot]
+                        else:
+                            dofs_armature[i_d_local, i_b_] = 1.0
                     link_n_dofs += v_n_dofs
                     link_n_qs += v_n_qs
                     i_j_flat += 1
@@ -1170,6 +1185,8 @@ class RigidSolver(KinematicSolver):
             joints_q_end,
             dof_idxs,
             dofs_armature,
+            dofs_motion_ang,
+            dofs_motion_vel,
             self.links_info,
             self.joints_info,
             self.dofs_info,

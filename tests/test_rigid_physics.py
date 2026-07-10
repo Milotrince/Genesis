@@ -7370,6 +7370,47 @@ def test_heterogeneous_physics_parity(show_viewer, tol):
 
 
 @pytest.mark.required
+def test_topology_variant_fk_parity(show_viewer, tol):
+    # A ragged heterogeneous entity whose single joint is a hinge in one variant and a slide in the other
+    # (same slot, different type). Per-environment forward kinematics must match a homogeneous entity of each
+    # variant's joint type, validating the per-env joint type + motion + DOF/q rebind.
+    def pendulum(joint_type):
+        mjcf = ET.Element("mujoco", model=f"pendulum_{joint_type}")
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        body = ET.SubElement(worldbody, "body", name="pend", pos="0 0 0.5")
+        ET.SubElement(body, "joint", name="j", type=joint_type, axis="0 0 1", pos="0 0 0")
+        ET.SubElement(body, "geom", type="capsule", fromto="0 0 0 0.2 0 0", size="0.02", mass="0.1")
+        return ET.tostring(mjcf, encoding="unicode")
+
+    scene = gs.Scene(show_viewer=show_viewer)
+    hinge_ref = scene.add_entity(gs.morphs.MJCF(file=pendulum("hinge")))
+    slide_ref = scene.add_entity(gs.morphs.MJCF(file=pendulum("slide")))
+    ragged = scene.add_entity(
+        morph=(gs.morphs.MJCF(file=pendulum("hinge")), gs.morphs.MJCF(file=pendulum("slide"))),
+    )
+    scene.build(n_envs=2)
+    assert scene.rigid_solver._enable_ragged_topology
+
+    hinge_ref.set_qpos([[0.4], [0.4]])
+    slide_ref.set_qpos([[0.4], [0.4]])
+    ragged.set_qpos([[0.4], [0.4]])
+
+    # set_qpos runs forward kinematics; env 0 takes the hinge variant, env 1 the slide variant (balanced
+    # mapping). The pendulum link's per-env world pose must equal the homogeneous reference of that variant.
+    ragged_link = ragged.links[-1]
+    hinge_link = hinge_ref.links[-1]
+    slide_link = slide_ref.links[-1]
+    assert_allclose(ragged_link.get_pos(envs_idx=[0]), hinge_link.get_pos(envs_idx=[0]), tol=tol)
+    assert_allclose(ragged_link.get_quat(envs_idx=[0]), hinge_link.get_quat(envs_idx=[0]), tol=tol)
+    assert_allclose(ragged_link.get_pos(envs_idx=[1]), slide_link.get_pos(envs_idx=[1]), tol=tol)
+    assert_allclose(ragged_link.get_quat(envs_idx=[1]), slide_link.get_quat(envs_idx=[1]), tol=tol)
+    # The variants genuinely differ: the hinge env rotates the link (non-identity quat) while the slide env
+    # only translates (identity quat), so the two environments' orientations are not equal.
+    with pytest.raises(AssertionError):
+        assert_allclose(ragged_link.get_quat(envs_idx=[0]), ragged_link.get_quat(envs_idx=[1]), tol=tol)
+
+
+@pytest.mark.required
 def test_heterogeneous_invalid_material_raises():
     """Test that heterogeneous morphs with unsupported material raises an exception."""
     scene = gs.Scene(

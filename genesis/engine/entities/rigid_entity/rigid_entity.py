@@ -263,12 +263,14 @@ class KinematicEntity(Entity):
                     cg_infos, vg_infos = self._postprocess_geoms_info(morph, v_g_infos, is_robot)
                     cg_vg_infos.append((cg_infos, vg_infos))
 
-                # Extract variant's init_qpos from parsed joint infos, composing the morph offset into the free joint so
-                # relative getters report the variant's user frame.
+                # Extract the variant's init_qpos in the skeleton's superset q-layout: each joint's qpos sits at
+                # its slot and any trailing padding qs (a narrower variant joint) are zero, so every variant
+                # shares the entity's q-width for per-environment dispatch. Compose the morph offset into a free
+                # root joint so relative getters report the variant's user frame.
                 variant_init_qpos_parts = []
-                for v_l_info, v_j_infos in zip(v_l_infos, v_links_j_infos):
+                for link, v_l_info, v_j_infos in zip(self._links, v_l_infos, v_links_j_infos):
                     is_root = v_l_info["parent_idx"] == -1
-                    for j_info in v_j_infos:
+                    for p_joint, j_info in zip(link.joints, v_j_infos):
                         qpos = j_info["init_qpos"]
                         if is_root and j_info["type"] == gs.JOINT_TYPE.FREE:
                             init_pos, init_quat = gu.transform_pos_quat_by_trans_quat(
@@ -278,6 +280,9 @@ class KinematicEntity(Entity):
                                 qpos[3:7],
                             )
                             qpos = np.concatenate([init_pos, init_quat])
+                        n_pad = p_joint.n_qs - len(qpos)
+                        if n_pad > 0:
+                            qpos = np.concatenate([qpos, np.zeros(n_pad, dtype=gs.np_float)])
                         variant_init_qpos_parts.append(qpos)
                 if variant_init_qpos_parts:
                     self._variant_init_qpos.append(np.concatenate(variant_init_qpos_parts))
