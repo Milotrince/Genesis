@@ -11,14 +11,14 @@ from genesis.utils.misc import qd_to_numpy
 # A pile of stacked boxes plus objects scattered across the plane, with a sphere dropped onto the pile. With adaptive
 # timestep on, each contact island integrates at macro_dt / rate: the resting scattered objects stay at the macro
 # timestep while the falling sphere (and the pile it hits) sub-step. The per-island timesteps are read back through the
-# solver's internal `dofs_rate` field (deliberately jank - nothing is added to the engine to expose them) and plotted
-# over time. Enable the viewer with --vis to drag objects around with the mouse (MouseInteractionPlugin) and watch the
-# timesteps react; press Esc to quit.
+# solver's internal `dofs_rate` field (deliberately jank - nothing is added to the engine to expose them) and streamed
+# to a live matplotlib line plot via the recorder system. Enable the 3D viewer with --vis to drag objects around with
+# the mouse (MouseInteractionPlugin) and watch the timesteps react; press Esc to quit.
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Per-island adaptive timestep demo with timestep plotting.")
-    parser.add_argument("--vis", "-v", action="store_true", help="Show the interactive viewer (mouse-draggable).")
+    parser = argparse.ArgumentParser(description="Per-island adaptive timestep demo with a live timestep plot.")
+    parser.add_argument("--vis", "-v", action="store_true", help="Show the interactive 3D viewer (mouse-draggable).")
     parser.add_argument(
         "--adaptive",
         action=argparse.BooleanOptionalAction,
@@ -87,18 +87,37 @@ def main():
             )
         )
 
-    scene.build(n_envs=1)
+    # Track one representative object per island (the pile's boxes share an island, so one stands in for it). The live
+    # plot has a fixed set of lines, so the number of tracked objects must stay constant over the run.
+    tracked = [("faller", faller), ("pile", pile[0])]
+    tracked += [(f"scattered_{i}", entity) for i, entity in enumerate(scattered)]
+    labels = tuple(name for name, _ in tracked)
 
-    # Track one representative DOF per logical object; the pile's boxes share an island, so one stands in for it.
-    tracked = {"faller": faller.dof_start, "pile": pile[0].dof_start}
-    for i, entity in enumerate(scattered):
-        tracked[f"scattered_{i}"] = entity.dof_start
+    # A mutable holder the run loop refreshes after each step; the recorder samples it inside scene.step(). Seeded with
+    # the macro timestep (dt / substeps) so the plot's line count is fixed from the first sample, before the loop runs.
+    latest_dts = [np.full(len(tracked), 0.01)]
+
+    def plot_data():
+        return latest_dts[0]
+
+    scene.start_recording(
+        plot_data,
+        gs.recorders.MPLLinePlot(
+            title=f"Per-island timestep ({'adaptive' if args.adaptive else 'uniform'})",
+            labels=labels,
+            x_label="step",
+            y_label="island timestep dt (s)",
+            hz=30.0,
+            history_length=2000,
+        ),
+    )
+
+    scene.build(n_envs=1)
 
     solver = scene.sim.rigid_solver
     macro_dt = solver._substep_dt
     island_state = solver.constraint_solver.island_state
-
-    dt_series = {name: [] for name in tracked}
+    tracked_dofs = [entity.dof_start for _, entity in tracked]
 
     is_running = True
 
@@ -118,15 +137,16 @@ def main():
             scene.step()
             step += 1
 
-            # Jank: read the per-DOF rate straight out of the solver's island state. dofs_rate is only allocated when
-            # adaptive timestep is on; without it every island runs at the macro timestep.
+            # Jank: read the per-DOF rate straight out of the solver's island state to recover each island's timestep.
+            # dofs_rate is only allocated when adaptive timestep is on; without it every island runs at the macro dt.
             if args.adaptive:
                 dofs_rate = qd_to_numpy(island_state.dofs_rate, transpose=True)  # [B, n_dofs]
-                for name, dof in tracked.items():
-                    dt_series[name].append(macro_dt / max(int(dofs_rate[0, dof]), 1))
+                latest_dts[0] = np.array(
+                    [macro_dt / max(int(dofs_rate[0, dof]), 1) for dof in tracked_dofs],
+                    dtype=gs.np_float,
+                )
             else:
-                for name in tracked:
-                    dt_series[name].append(macro_dt)
+                latest_dts[0] = np.full(len(tracked_dofs), macro_dt)
 
             if "PYTEST_VERSION" in os.environ:
                 break
@@ -135,34 +155,8 @@ def main():
                 break
     except KeyboardInterrupt:
         gs.logger.info("Simulation interrupted, exiting.")
-
-    if "PYTEST_VERSION" not in os.environ:
-        _plot_timesteps(dt_series, macro_dt, args.adaptive)
-
-
-def _plot_timesteps(dt_series, macro_dt, adaptive):
-    import matplotlib.pyplot as plt
-
-    n = len(next(iter(dt_series.values())))
-    times = np.arange(n) * macro_dt
-
-    fig, ax = plt.subplots(figsize=(11, 5))
-    for name, series in dt_series.items():
-        width = 2.4 if name in ("faller", "pile") else 1.2
-        ax.step(times, series, where="post", label=name, linewidth=width)
-    ax.axhline(macro_dt, color="0.6", linestyle="--", linewidth=1.0, label="macro dt")
-    ax.set_yscale("log")
-    ax.set_xlabel("simulation time (s)")
-    ax.set_ylabel("island timestep dt (s)")
-    ax.set_title(f"Per-island adaptive timestep ({'ON' if adaptive else 'OFF'})")
-    ax.grid(True, which="both", alpha=0.3)
-    ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=9)
-    fig.tight_layout()
-
-    out_path = os.path.abspath("adaptive_timestep_dts.png")
-    fig.savefig(out_path, dpi=120, bbox_inches="tight")
-    gs.logger.info(f"Saved timestep plot to {out_path}")
-    plt.show()
+    finally:
+        scene.stop_recording()
 
 
 if __name__ == "__main__":
