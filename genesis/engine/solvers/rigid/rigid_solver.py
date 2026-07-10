@@ -1077,6 +1077,28 @@ class RigidSolver(KinematicSolver):
         for vgeom in link.vgeoms:
             _update_geom_active_envs(vgeom, vgeom_starts, vgeom_ends, envs_idx, self._B)
 
+    def _reset_entity_geom_scale(self, entity, envs_idx):
+        """Reset an entity's per-environment geom/vgeom scale to unit (native size) for the given envs.
+
+        A variant/object rebind writes the newly bound geometry's *unscaled* baseline inertial, so any
+        per-env scale left over from an earlier `set_scale` would leave the geometry sized inconsistently
+        with that inertial - blowing up invweight and the constraint solve. Clearing the scale keeps the two
+        consistent; a caller that wants to keep a size re-applies `set_scale` after the rebind.
+        """
+        if not self._enable_geom_scaling:
+            return
+        n_sel = len(envs_idx)
+        geoms = entity.geoms
+        if geoms:
+            geoms_idx = np.array([geom.idx for geom in geoms], dtype=gs.np_int)
+            ones = np.ones((n_sel, len(geoms_idx), 3), dtype=gs.np_float)
+            kernel_set_geoms_scale(ones, geoms_idx, envs_idx, self.geoms_state, self._static_rigid_sim_config)
+        vgeoms = entity.vgeoms
+        if vgeoms:
+            vgeoms_idx = np.array([vgeom.idx for vgeom in vgeoms], dtype=gs.np_int)
+            ones = np.ones((n_sel, len(vgeoms_idx), 3), dtype=gs.np_float)
+            kernel_set_vgeoms_scale(ones, vgeoms_idx, envs_idx, self.vgeoms_state, self._static_rigid_sim_config)
+
     def _dispatch_heterogeneous_topology(self):
         """Bind per-env kinematic topology (joint type + DOF/q mapping) for ragged heterogeneous entities.
 
@@ -1252,6 +1274,7 @@ class RigidSolver(KinematicSolver):
             self.links_info,
             self.joints_info,
             self.dofs_info,
+            self.dofs_state,
         )
 
     def _init_vert_fields(self):
@@ -2857,8 +2880,10 @@ class RigidSolver(KinematicSolver):
 
         Rewrites the per-environment geom/vgeom ranges and inertial for every heterogeneous link of
         'entity', then refreshes the inertia-derived quantities (invweight/meaninertia), contact caches
-        and geom poses for the selected environments. The joint configuration is preserved. All variants
-        must already be resident (declared at build via 'morph=[...]'); this only rebinds the active one.
+        and geom poses for the selected environments. The joint configuration is preserved; any per-environment
+        geom scale from an earlier set_scale is reset (the swapped variant starts at native size - re-apply
+        set_scale to keep a size). All variants must already be resident (declared at build via 'morph=[...]');
+        this only rebinds the active one.
         'variant_idx' is a single index applied to all selected environments, or one index per selected
         environment (variant 0 is the primary morph, 1..N the additional variants).
         """
@@ -2880,6 +2905,12 @@ class RigidSolver(KinematicSolver):
         # environment's joint type + DOF/q mapping + link parent/pose to its new variant.
         if entity._has_ragged_topology:
             self._bind_entity_topology(entity, variant_idx, envs_idx_np)
+
+        # The rebind wrote each variant's unscaled baseline inertial, so clear any per-env geom scale left
+        # over from an earlier set_scale - otherwise the geometry stays scaled while its inertial does not,
+        # and the mismatch blows up invweight and the constraint solve. The swapped variant starts at native
+        # size; re-apply set_scale afterwards to keep a size.
+        self._reset_entity_geom_scale(entity, envs_idx_np)
 
         # The inertial changed, so the neutral-rest invweight/meaninertia must be recomputed. That routine
         # momentarily drives the selected environments to qpos0, so the current joint configuration is saved
@@ -2956,6 +2987,10 @@ class RigidSolver(KinematicSolver):
         # then refresh inertia-derived quantities and reset caches exactly like set_active_variant.
         self._pool_bind_slot(entity, segment, slot, envs_idx_np)
         self._pool_bind_visual(entity, segment, slot, envs_idx_np)
+
+        # As in set_active_variant: the bound slot carries its own unscaled baseline inertial, so clear any
+        # leftover per-env geom scale to keep geometry and inertial consistent (re-apply set_scale to resize).
+        self._reset_entity_geom_scale(entity, envs_idx_np)
 
         if self._n_dofs > 0:
             restore_envs = envs_idx if self.n_envs > 0 else None

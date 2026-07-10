@@ -450,6 +450,7 @@ def kernel_update_heterogeneous_topology(
     links_info: array_class.LinksInfo,
     joints_info: array_class.JointsInfo,
     dofs_info: array_class.DofsInfo,
+    dofs_state: array_class.DofsState,
 ):
     """Bind per-environment kinematic topology (joint type + DOF/q mapping + motion axes) for ragged variants.
 
@@ -458,6 +459,12 @@ def kernel_update_heterogeneous_topology(
     mass-matrix diagonal stays 1 and the DOF decouples; motion 0 so it contributes no kinematics). Requires
     batched links/joints/dofs info; value arrays are indexed positionally by the selection, so this serves
     both build-time dispatch and runtime rebind.
+
+    Also clears each touched DOF's world-frame motion subspace (cdof/cdofd) in dofs_state. Forward kinematics
+    only recomputes these for DOFs whose link still bears DOFs, so a DOF that a runtime swap orphans (its link
+    dropped to zero DOFs in the narrower variant) would otherwise keep the stale motion axes of the wider
+    variant - making the mass matrix pick up phantom inertia on that inert slot and turn indefinite. Zeroing
+    here lets the following forward-kinematics pass refill only the active DOFs, leaving orphaned slots at zero.
     """
     for i_b_ in range(envs_idx.shape[0]):
         i_b = envs_idx[i_b_]
@@ -496,6 +503,20 @@ def kernel_update_heterogeneous_topology(
                 dofs_info.motion_ang[i_d, i_b][j] = dofs_motion_ang[i_d_, i_b_, j]
                 dofs_info.motion_vel[i_d, i_b][j] = dofs_motion_vel[i_d_, i_b_, j]
                 dofs_info.act_bias[i_d, i_b][j] = dofs_act_bias[i_d_, i_b_, j]
+            # Clear the world-frame motion subspace (cdof/cdofd) and the composite-force product (f_ang/f_vel)
+            # so an orphaned slot does not retain the wider variant's values. Both are rewritten each step only
+            # for DOFs whose link still bears DOFs (forward kinematics for cdof, the CRB mass_mat pass for
+            # f_ang/f_vel), so a DOF a narrower variant orphans would otherwise keep stale values - and the mass
+            # matrix assembles M[i,j] = f[i].cdof[j], so a stale f on an inert slot injects phantom coupling into
+            # the active DOFs and turns M indefinite. Zeroing here leaves orphaned slots at zero permanently.
+            dofs_state.cdof_ang[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.cdof_vel[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.cdofd_ang[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.cdofd_vel[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.cdofvel_ang[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.cdofvel_vel[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.f_ang[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
+            dofs_state.f_vel[i_d, i_b] = qd.Vector.zero(gs.qd_float, 3)
 
 
 @qd.kernel(fastcache=True)

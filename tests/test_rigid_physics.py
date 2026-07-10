@@ -7528,6 +7528,65 @@ def test_topology_variant_ragged_links(show_viewer, tol):
 
 
 @pytest.mark.required
+def test_topology_variant_swap_orphans_many_dofs(show_viewer):
+    # Regression: swapping an environment that was running the widest variant (all DOFs active, so their
+    # world-frame motion axes and composite-force products were populated by stepping) down to a much narrower
+    # variant orphans most of its DOF slots. Forward kinematics and the CRB mass pass only rewrite a DOF whose
+    # link still bears DOFs, so an orphaned slot would keep the wide variant's stale cdof/f_ang/f_vel; because
+    # the mass matrix assembles M[i, j] = f[i].cdof[j], that stale state injects phantom active<->inert coupling
+    # and turns M indefinite - the constraint solve then diverges to NaN a few steps later. set_active_variant
+    # must clear that per-slot state so the narrow variant's mass matrix stays positive-definite.
+    def arm(n_links):
+        mjcf = ET.Element("mujoco", model=f"arm_{n_links}")
+        ET.SubElement(mjcf, "option", gravity="0 0 -9.81")
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        parent = worldbody
+        for i in range(n_links):
+            body = ET.SubElement(parent, "body", name=f"l{i}", pos="0 0 0" if i == 0 else "0.2 0 0")
+            ET.SubElement(body, "joint", name=f"j{i}", type="hinge", axis="0 1 0")
+            ET.SubElement(body, "geom", type="capsule", fromto="0 0 0 0.2 0 0", size="0.02", mass="0.2")
+            parent = body
+        return ET.tostring(mjcf, encoding="unicode")
+
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
+        show_viewer=show_viewer,
+    )
+    # First morph is the widest (5-link) superset; the 1-link variant leaves four inert DOF slots.
+    ragged = scene.add_entity(morph=(gs.morphs.MJCF(file=arm(5)), gs.morphs.MJCF(file=arm(1))))
+    scene.build(n_envs=4)
+    assert ragged.n_dofs == 5
+
+    # Step so every environment's DOFs (all wide at build) accumulate non-zero motion/force state.
+    for _ in range(30):
+        scene.step()
+    assert not torch.isnan(ragged.get_dofs_position()).any()
+
+    # Now collapse every environment to the 1-link variant: four DOF slots per env become orphaned.
+    ragged.set_active_variant(np.ones(4, dtype=int), envs_idx=list(range(4)))
+    orphaned_after_swap = ragged.get_dofs_position()[:, 1:].clone()  # inert: frozen at their current value
+    for _ in range(60):
+        scene.step()
+    dofs_pos = ragged.get_dofs_position()
+    assert not torch.isnan(dofs_pos).any()
+    assert not torch.isnan(ragged.get_vel()).any()
+    # Only the first joint is live; the four orphaned slots per env stay decoupled (frozen, no leakage).
+    assert_allclose(dofs_pos[:, 1:], orphaned_after_swap, tol=1e-9)
+    assert (dofs_pos[:, 0].abs() > 0.01).all()  # the live first joint still swings under gravity
+
+    # Swapping also resets any per-env geom scale to native size, so a scale set before the swap must not leave
+    # the geometry sized inconsistently with the freshly bound (unscaled) inertial - which would likewise blow up.
+    ragged.set_scale(np.repeat(np.array([0.6, 1.4, 0.8, 1.2])[:, None], 3, axis=1))
+    for _ in range(10):
+        scene.step()
+    ragged.set_active_variant(np.array([0, 1, 0, 1]), envs_idx=list(range(4)))
+    assert_allclose(ragged.get_scale(), 1.0, tol=1e-9)  # native size after the swap
+    for _ in range(40):
+        scene.step()
+    assert not torch.isnan(ragged.get_dofs_position()).any()
+
+
+@pytest.mark.required
 def test_heterogeneous_invalid_material_raises():
     """Test that heterogeneous morphs with unsupported material raises an exception."""
     scene = gs.Scene(
