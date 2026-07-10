@@ -76,6 +76,12 @@ def V_SCALAR_FROM(dtype, value):
     return data
 
 
+def V_FROM(dtype, shape, value):
+    data = V(dtype=dtype, shape=shape)
+    data.fill(value)
+    return data
+
+
 # =========================================== ErrorCode ===========================================
 
 
@@ -123,7 +129,12 @@ class RigidGlobalInfo:
     mass_parent_mask: qd.Tensor
     gravity: qd.Tensor
     # Runtime constants
-    substep_dt: qd.Tensor
+    substep_dt: qd.Tensor  # per-env [_B]: the macro integration timestep, indexed [i_b]
+    # Per-DOF effective timestep [n_dofs, _B]: the dt actually used to integrate DOF i_d this (sub)step. Equals the
+    # macro substep_dt for every DOF under uniform stepping; with per-island adaptive rates a DOF whose island runs at
+    # macro_dt / r carries that smaller dt here. All integration and implicit-damping kernels read dofs_dt[i_d, i_b];
+    # the three non-DOF consumers (coupler impulse, drone vgeom, equality timeconst) keep reading the macro substep_dt.
+    dofs_dt: qd.Tensor
     iterations: qd.Tensor
     tolerance: qd.Tensor
     ls_iterations: qd.Tensor
@@ -199,7 +210,8 @@ def get_rigid_global_info(solver, kinematic_only):
             dofs_mass_block_start=V(dtype=gs.qd_int, shape=()),
             dofs_mass_block_end=V(dtype=gs.qd_int, shape=()),
             mass_parent_mask=V(dtype=gs.qd_float, shape=()),
-            substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=0.0),
+            substep_dt=V_FROM(dtype=gs.qd_float, shape=(_B,), value=0.0),
+            dofs_dt=V_FROM(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), value=0.0),
             iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=0),
             tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=0.0),
             ls_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=0),
@@ -236,7 +248,8 @@ def get_rigid_global_info(solver, kinematic_only):
         dofs_mass_block_start=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         dofs_mass_block_end=V(dtype=gs.qd_int, shape=(solver.n_dofs_,)),
         mass_parent_mask=V(dtype=gs.qd_float, shape=(solver.n_dofs_, solver.n_dofs_)),
-        substep_dt=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._substep_dt),
+        substep_dt=V_FROM(dtype=gs.qd_float, shape=(_B,), value=solver._substep_dt),
+        dofs_dt=V_FROM(dtype=gs.qd_float, shape=(solver.n_dofs_, _B), value=solver._substep_dt),
         iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=solver._options.iterations),
         tolerance=V_SCALAR_FROM(dtype=gs.qd_float, value=solver._options.tolerance),
         ls_iterations=V_SCALAR_FROM(dtype=gs.qd_int, value=solver._options.ls_iterations),
@@ -658,6 +671,24 @@ class IslandState:
     # envelope iterate each constraint's own support (jac_dofs_idx) instead of scanning the whole island.
     dof_local_pos: qd.Tensor
     dofs_island_idx: qd.Tensor
+    # Per-island integer rate r (island integrates at macro_dt / r), computed by the rate assignment for reporting and
+    # the sched_len reduction. Consumers key off dofs_rate instead (below), which survives re-partitioning. Only
+    # allocated under use_adaptive_timestep (scalar () otherwise); defaults to 1 (uniform stepping). Indexed [i_island].
+    island_rate: qd.Tensor
+    # Per-DOF rate, written by the rate assignment from each DOF's island rate at the macro boundary. Keyed to the DOF
+    # index (fixed across the step, unlike island labels), so it stays correct when islands merge/split mid-step: a
+    # merged island then simply holds mixed-rate DOFs - the fast body keeps sub-stepping, the frozen body stays frozen,
+    # and the island is solved whenever any of its DOFs is active. Indexed [i_d, i_b]; allocated only under adaptive.
+    dofs_rate: qd.Tensor
+    # Per-DOF dwell counter for rate hysteresis (DOF-keyed like dofs_rate). Counts consecutive macro steps the DOF's
+    # demanded rate has been below its current rate; the rate is only stepped down once it reaches
+    # adaptive_timestep_downgrade_steps, while an increase applies immediately. Prevents rate thrashing near a
+    # power-of-two boundary. Only allocated under use_adaptive_timestep.
+    dofs_high_rate_steps: qd.Tensor
+    # Max island rate across all islands and envs this macro step, atomic-max'd by the rate assignment (reset to 1
+    # before each assign). The substep loop reads it once to run exactly that many micro-ticks instead of the static
+    # max-rate cap, so a scene where nothing needs sub-stepping costs a single pass. Shape (1,) under adaptive.
+    island_rate_max: qd.Tensor
     # Per-island skyline envelope: dof_env_start_local[dof_slices.start[i] + ld] is the smallest island-local column
     # that can be structurally nonzero in local row ld of island i's Hessian block (from constraint supports and mass
     # coupling). The per-island assembly, Cholesky factor and triangular solve visit only [env_start, ld], so a large
@@ -735,6 +766,12 @@ def get_island_state(solver, collider):
         dof_id=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         dof_local_pos=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         dofs_island_idx=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
+        island_rate=V_FROM(dtype=gs.qd_int, shape=maybe_shape((n_links, _B), solver._use_adaptive_timestep), value=1),
+        dofs_rate=V_FROM(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), solver._use_adaptive_timestep), value=1),
+        dofs_high_rate_steps=V_FROM(
+            dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), solver._use_adaptive_timestep), value=0
+        ),
+        island_rate_max=V_FROM(dtype=gs.qd_int, shape=maybe_shape((1,), solver._use_adaptive_timestep), value=1),
         dof_env_start_local=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         dof_env_col_end=V(dtype=gs.qd_int, shape=maybe_shape((n_dofs, _B), is_active)),
         contact_slices=get_slices(solver, is_active),
@@ -1549,6 +1586,11 @@ class DofsInfo:
     act_bias: qd.Tensor
     force_range: qd.Tensor
     dof_length: qd.Tensor
+    # Per-DOF adaptive-timestep travel-fraction CFL constant: dof_length / (cfl * L_body), where L_body is the thinnest
+    # local AABB extent of the DOF's link. The rate criterion uses macro_dt * |vel| * dof_cfl_inv_travel as the number
+    # of sub-steps needed to keep the body-surface displacement under cfl * L_body. Zero for DOFs whose link has no
+    # geometry (they never force geometric sub-stepping). Only populated under use_adaptive_timestep with auto criterion.
+    dof_cfl_inv_travel: qd.Tensor
 
 
 def get_dofs_info(solver):
@@ -1568,6 +1610,7 @@ def get_dofs_info(solver):
         act_bias=V(dtype=gs.qd_vec3, shape=shape),
         force_range=V(dtype=gs.qd_vec2, shape=shape),
         dof_length=V(dtype=gs.qd_float, shape=shape),
+        dof_cfl_inv_travel=V(dtype=gs.qd_float, shape=shape),
     )
 
 
@@ -2272,6 +2315,13 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     requires_grad: bool
     prefer_decomposed_solver: int = -1  # -1 = None (auto), 0 = False, 1 = True
     use_contact_island: bool = False  # per-island Newton solve (gated; the legacy island solver is retired)
+    # Per-island adaptive timestep: each island integrates at macro_dt / rate. Gated to require use_contact_island.
+    use_adaptive_timestep: bool = False
+    adaptive_timestep_max_rate: int = 1  # upper bound on an island's rate; also caps the micro-step schedule length
+    # Manual rate criterion: DOF speed above which an island sub-steps. 0.0 is the sentinel for "auto" (derive the rate
+    # from geometry via the per-DOF dof_cfl_inv_travel travel-fraction CFL instead).
+    adaptive_timestep_ref_speed: float = 0.0
+    adaptive_timestep_downgrade_steps: int = 10  # consecutive low-demand steps before a DOF's rate is lowered one level
     # Consecutive sub-tolerance steps a body's max DOF velocity must hold before it is ready to hibernate. Guards
     # against a body that is only momentarily slow (e.g. at the apex of a toss) sleeping prematurely.
     hibernation_min_steps: int = 10

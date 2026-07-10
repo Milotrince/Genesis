@@ -262,6 +262,27 @@ class RigidSolver(KinematicSolver):
                 "`use_hibernation=True` requires `use_contact_island=True`, as hibernation builds on islands."
             )
 
+        # Per-island adaptive timesteps build on the island partition (a rate is per island), so they require islands.
+        self._use_adaptive_timestep = options.use_adaptive_timestep
+        self._adaptive_timestep_max_rate = options.adaptive_timestep_max_rate
+        self._adaptive_timestep_cfl = options.adaptive_timestep_cfl
+        self._adaptive_timestep_ref_speed = options.adaptive_timestep_ref_speed
+        self._adaptive_timestep_downgrade_steps = options.adaptive_timestep_downgrade_steps
+        if self._use_adaptive_timestep:
+            if not self._use_contact_island:
+                gs.raise_exception(
+                    "`use_adaptive_timestep=True` requires `use_contact_island=True`, as per-island rates build on "
+                    "islands."
+                )
+            max_rate = self._adaptive_timestep_max_rate
+            if max_rate & (max_rate - 1) != 0:
+                gs.raise_exception(
+                    f"`adaptive_timestep_max_rate` must be a power of two (got {max_rate}) so every power-of-two island "
+                    "rate divides it evenly."
+                )
+            if self._adaptive_timestep_ref_speed is not None and self._adaptive_timestep_ref_speed <= 0.0:
+                gs.raise_exception("`adaptive_timestep_ref_speed` must be positive when set (or None for auto).")
+
         # Resolve the hibernation velocity tolerance. MuJoCo compatibility uses MuJoCo's own default (1e-4); otherwise
         # use a coarser floor that a body reliably settles below across float precisions and dense contact piles, where
         # the contact solve leaves a larger residual resting-velocity jitter.
@@ -430,6 +451,10 @@ class RigidSolver(KinematicSolver):
         # Re-sync it to the final island decision so the two never disagree.
         self._use_hibernation = self._use_hibernation and self._use_contact_island
 
+        # Adaptive per-island timesteps likewise build on the partition; re-sync to the final island decision so a
+        # single-tree or differentiable scene silently falls back to uniform stepping instead of erroring.
+        self._use_adaptive_timestep = self._use_adaptive_timestep and self._use_contact_island
+
         # A heterogeneous entity has a different body size (hence rotational dof_length) per variant, so its dof_length
         # is genuinely per-env and dofs_info must be batched to hold it. dof_length is read only by the hibernation
         # rest test, so this is needed exactly when both features are active. We must update options because
@@ -516,6 +541,11 @@ class RigidSolver(KinematicSolver):
             enable_joint_limit=self._enable_joint_limit,
             box_box_detection=self._box_box_detection,
             use_contact_island=self._use_contact_island,
+            use_adaptive_timestep=self._use_adaptive_timestep,
+            adaptive_timestep_max_rate=self._adaptive_timestep_max_rate if self._use_adaptive_timestep else 1,
+            # 0.0 is the "auto" sentinel (derive the rate from geometry via dof_cfl_inv_travel).
+            adaptive_timestep_ref_speed=(self._adaptive_timestep_ref_speed or 0.0),
+            adaptive_timestep_downgrade_steps=self._adaptive_timestep_downgrade_steps,
             # The per-island solve engages wherever islands are on by default (CPU, where it composes with the sparse
             # skyline). The GPU block below narrows it to exclude the whole-env-fits-shared no-hibernation case, which
             # factors faster through the whole-env path (its block-diagonal Cholesky is the exact per-island result).
@@ -1017,10 +1047,10 @@ class RigidSolver(KinematicSolver):
 
     def _init_dof_length(self):
         # Characteristic length of each dof (1 for translation, the body radius for rotation), used to weight dof
-        # velocities in the hibernation rest test. Computed here, after geom dispatch, because a heterogeneous entity's
-        # per-variant geoms (and hence body radius) are only assigned to environments at that point. Only needed when
-        # hibernation is on, which already implies use_contact_island and a non-differentiable solve.
-        if not self._use_hibernation:
+        # velocities in the hibernation rest test and the adaptive-timestep rate criterion. Computed here, after geom
+        # dispatch, because a heterogeneous entity's per-variant geoms (and hence body radius) are only assigned to
+        # environments at that point. Both consumers imply use_contact_island and a non-differentiable solve.
+        if not (self._use_hibernation or self._use_adaptive_timestep):
             return
 
         joints = self.joints
@@ -1034,6 +1064,34 @@ class RigidSolver(KinematicSolver):
             dof_length = np.broadcast_to(dof_length[:, None], (len(dof_length), self._B))
         self.dofs_info.dof_length.from_numpy(dof_length)
 
+        # The geometry CFL only feeds the automatic criterion; a manual ref_speed override does not need it.
+        if self._use_adaptive_timestep and self._adaptive_timestep_ref_speed is None:
+            self._init_adaptive_timestep_cfl(dof_length)
+
+    def _init_adaptive_timestep_cfl(self, dof_length):
+        # Precompute the per-DOF travel-fraction CFL constant dof_length / (cfl * L_body), where L_body is the thinnest
+        # local AABB extent of the DOF's link. The rate kernel then needs only macro_dt * |vel| * dof_cfl_inv_travel,
+        # with no geometry access in the hot loop. DOFs whose link carries no geometry get 0 (no geometric sub-step).
+        cfl = self._adaptive_timestep_cfl
+        # geoms_init_AABB is the env-independent local AABB (n_geoms, 8 corners); its thinnest extent is the length
+        # scale a fast body should not overshoot in one micro-step.
+        aabb = qd_to_numpy(self.geoms_init_AABB)  # (n_geoms, 8, 3)
+        geoms_min_extent = (aabb.max(axis=1) - aabb.min(axis=1)).min(axis=1) if self.n_geoms > 0 else np.empty(0)
+
+        inv_travel = np.zeros_like(dof_length)
+        dof_length_row = dof_length if dof_length.ndim == 1 else dof_length[:, 0]
+        for link in self.links:
+            if link.n_dofs == 0 or link.n_geoms == 0:
+                continue
+            l_body = min(geoms_min_extent[geom.idx] for geom in link.geoms)
+            if l_body <= 0.0:
+                continue
+            for i_d in range(link.dof_start, link.dof_start + link.n_dofs):
+                inv_travel[i_d] = dof_length_row[i_d] / (cfl * l_body)
+        if self._options.batch_dofs_info and inv_travel.ndim == 1:
+            inv_travel = np.broadcast_to(inv_travel[:, None], (len(inv_travel), self._B))
+        self.dofs_info.dof_cfl_inv_travel.from_numpy(inv_travel)
+
     def _init_geom_fields(self):
         self.geoms_info: array_class.GeomsInfo = self.data_manager.geoms_info
         self.geoms_state: array_class.GeomsState = self.data_manager.geoms_state
@@ -1043,7 +1101,14 @@ class RigidSolver(KinematicSolver):
         if self.n_geoms > 0:
             geoms = self.geoms
             geoms_sol_params = np.array([geom.sol_params for geom in geoms], dtype=gs.np_float)
-            _sanitize_sol_params(geoms_sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
+            # Under adaptive timestep, let an explicitly stiff contact time constant survive down to 2*macro_dt/max_rate
+            # (the finest island dt) instead of being softened to 2*macro_dt: the rate criterion then sub-steps its
+            # island enough (rate ~ 2*macro_dt/timeconst) to keep it stable at that finer dt. Unspecified time constants
+            # still resolve to the soft default (2*macro_dt -> rate 1), so default scenes are unaffected.
+            geom_min_timeconst = self._sol_min_timeconst
+            if self._use_adaptive_timestep:
+                geom_min_timeconst = self._sol_min_timeconst / self._adaptive_timestep_max_rate
+            _sanitize_sol_params(geoms_sol_params, geom_min_timeconst, self._sol_default_timeconst)
 
             # Accurately compute the center of mass of each geometry if possible.
             # Note that the mean vertex position is a bad approximation, which is impeding the ability of MPR to
@@ -1205,33 +1270,86 @@ class RigidSolver(KinematicSolver):
                 static_rigid_sim_config=self._static_rigid_sim_config,
             )
 
-        kernel_step_1(
-            self.links_state,
-            self.links_info,
-            self.joints_state,
-            self.joints_info,
-            self.dofs_state,
-            self.dofs_info,
-            self.geoms_state,
-            self.geoms_info,
-            self.entities_state,
-            self.entities_info,
-            self._rigid_global_info,
-            self._static_rigid_sim_config,
-            self.constraint_solver.island_state,
-            self._is_forward_pos_updated,
-            self._is_forward_vel_updated,
-            self._is_backward,
-        )
-
         if isinstance(self.sim.coupler, SAPCoupler):
+            kernel_step_1(
+                self.links_state,
+                self.links_info,
+                self.joints_state,
+                self.joints_info,
+                self.dofs_state,
+                self.dofs_info,
+                self.geoms_state,
+                self.geoms_info,
+                self.entities_state,
+                self.entities_info,
+                self._rigid_global_info,
+                self._static_rigid_sim_config,
+                self.constraint_solver.island_state,
+                self._is_forward_pos_updated,
+                self._is_forward_vel_updated,
+                self._is_backward,
+            )
             update_qvel(
                 self.dofs_state,
                 self._rigid_global_info,
                 self._static_rigid_sim_config,
                 self._is_backward,
             )
-        else:
+            return
+
+        # Multi-rate schedule: one macro step is `sched_len` micro-ticks, where sched_len is the fastest island's rate
+        # assigned this step (<= adaptive_timestep_max_rate). Islands re-detect and re-solve every tick, but an island
+        # of rate r only integrates on ticks that are multiples of sched_len / r (its dt is macro_dt / r); the rest of
+        # the time kernel_update_dofs_dt sets its DOFs' dt to 0 so func_integrate holds them. sched_len is read after
+        # the tick-0 rate assignment, so a scene where nothing needs sub-stepping runs a single pass, bit-identical to
+        # uniform stepping (adaptive off runs one pass with no scatter).
+        max_ticks = self._adaptive_timestep_max_rate if self._use_adaptive_timestep else 1
+        sched_len = 1
+        island_state = self.constraint_solver.island_state
+        for tick in range(max_ticks):
+            if self._use_adaptive_timestep:
+                # Assign per-island rates once, at the macro boundary, from the pre-integration velocities of the
+                # previous step's partition (dofs_rate is DOF-keyed, so it stays valid across the rebuild below).
+                # sched_len (the fastest rate) then bounds the loop. The dt scatter runs BEFORE kernel_step_1 so the
+                # implicit-damping mass factor and func_integrate both read this tick's dofs_dt; the per-island solve
+                # then skips any island all of whose DOFs are held this tick (dofs_dt == 0), read off the freshly
+                # rebuilt partition inside func_island_solve_skip.
+                if tick == 0:
+                    island_state.island_rate_max.fill(1)
+                    kernel_assign_island_rates(
+                        self.dofs_state,
+                        self.dofs_info,
+                        self.collider._collider_state,
+                        island_state,
+                        self._rigid_global_info,
+                        self._static_rigid_sim_config,
+                    )
+                    sched_len = int(qd_to_numpy(island_state.island_rate_max)[0])
+                kernel_update_dofs_dt(
+                    tick,
+                    sched_len,
+                    island_state,
+                    self._rigid_global_info,
+                    self._static_rigid_sim_config,
+                )
+            kernel_step_1(
+                self.links_state,
+                self.links_info,
+                self.joints_state,
+                self.joints_info,
+                self.dofs_state,
+                self.dofs_info,
+                self.geoms_state,
+                self.geoms_info,
+                self.entities_state,
+                self.entities_info,
+                self._rigid_global_info,
+                self._static_rigid_sim_config,
+                self.constraint_solver.island_state,
+                self._is_forward_pos_updated,
+                self._is_forward_vel_updated,
+                self._is_backward,
+            )
             self._func_constraint_force()
             kernel_step_2(
                 self.dofs_state,
@@ -1249,6 +1367,7 @@ class RigidSolver(KinematicSolver):
                 self._static_rigid_sim_config,
                 self.constraint_solver.island_state,
                 self._is_backward,
+                int(tick + 1 >= sched_len),
                 self._errno,
             )
             self._is_forward_pos_updated = not self._enable_mujoco_compatibility
@@ -1261,6 +1380,9 @@ class RigidSolver(KinematicSolver):
                     self._rigid_adjoint_cache,
                     self._static_rigid_sim_config,
                 )
+            # All islands have advanced by a full macro step once the fastest island has taken sched_len micro-steps.
+            if self._use_adaptive_timestep and tick + 1 >= sched_len:
+                break
 
     def get_error_envs_mask(self):
         return qd_to_torch(self._errno) > 0
@@ -1747,6 +1869,7 @@ class RigidSolver(KinematicSolver):
                 static_rigid_sim_config=self._static_rigid_sim_config,
                 island_state=self.constraint_solver.island_state,
                 is_backward=self._is_backward,
+                is_last_tick=1,
                 errno=self._errno,
             )
         elif isinstance(self.sim.coupler, IPCCoupler):
@@ -3414,6 +3537,120 @@ def kernel_step_1(
 
 
 @qd.kernel(fastcache=True)
+def kernel_assign_island_rates(
+    dofs_state: array_class.DofsState,
+    dofs_info: array_class.DofsInfo,
+    collider_state: array_class.ColliderState,
+    island_state: array_class.IslandState,
+    rigid_global_info: array_class.RigidGlobalInfo,
+    static_rigid_sim_config: qd.template(),
+):
+    """Assign each island a power-of-two rate from its dynamics (a per-body CFL plus a contact-stiffness CFL).
+
+    Per DOF the automatic (default) criterion uses macro_dt * |vel| * dof_cfl_inv_travel (body-surface travel vs the
+    body's thinnest size); a manual adaptive_timestep_ref_speed instead compares |vel| to that fixed speed. Per island
+    contact, a time constant stiffer than the macro step can stably resolve (timeconst < 2 * macro_dt) demands
+    2 * macro_dt / timeconst sub-steps so that 2 * island_dt stays below timeconst. The island rate is
+    clamp(next_pow2(max over its DOFs and contacts), 1, R_max): a settled island stays at rate 1, a fast/small/stiff
+    one sub-steps. Assigned at the macro boundary from the previous step's velocities and contacts (a one-step lag).
+    """
+    R_max = qd.static(static_rigid_sim_config.adaptive_timestep_max_rate)
+    v_ref = qd.static(static_rigid_sim_config.adaptive_timestep_ref_speed)  # 0.0 = auto (geometry CFL)
+    n_links = island_state.island_rate.shape[0]
+    _B = island_state.island_rate.shape[1]
+    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_island, i_b in qd.ndrange(n_links, _B):
+        if i_island < island_state.n_islands[i_b]:
+            macro_dt = rigid_global_info.substep_dt[i_b]
+            demand = 0.0  # target sub-step count over the island's DOFs
+            i_start = island_state.dof_slices.start[i_island, i_b]
+            for i_local in range(island_state.dof_slices.n[i_island, i_b]):
+                i_d = island_state.dof_id[i_start + i_local, i_b]
+                v = qd.abs(dofs_state.vel[i_d, i_b])
+                d = 0.0
+                if qd.static(v_ref > 0.0):
+                    d = v / v_ref
+                else:
+                    I_d = [i_d, i_b] if qd.static(static_rigid_sim_config.batch_dofs_info) else i_d
+                    d = v * macro_dt * dofs_info.dof_cfl_inv_travel[I_d]
+                if d > demand:
+                    demand = d
+            # Contact-stiffness CFL: a contact whose (possibly explicitly stiff) time constant is below 2 * macro_dt
+            # needs 2 * macro_dt / timeconst sub-steps to stay stable. Uses the previous step's island contacts (a
+            # one-step lag, like the partition). contact_id holds the contact_data index directly.
+            i_c_start = island_state.contact_slices.start[i_island, i_b]
+            for i_local in range(island_state.contact_slices.n[i_island, i_b]):
+                i_col = island_state.contact_id[i_c_start + i_local, i_b]
+                timeconst = collider_state.contact_data.sol_params[i_col, i_b][0]
+                if timeconst > 0.0:
+                    stiff_demand = 2.0 * macro_dt / timeconst
+                    if stiff_demand > demand:
+                        demand = stiff_demand
+            demanded = 1
+            while demanded < R_max and demanded < demand:
+                demanded = demanded * 2
+            # Apply per-DOF hysteresis and push the rate down to each DOF. dofs_rate/dofs_high_rate_steps are keyed to
+            # the (fixed) DOF index, so they survive a mid-macro-step re-partition: a rate rises to the island's demand
+            # immediately but is only halved once demand has stayed below it for adaptive_timestep_downgrade_steps
+            # consecutive steps, preventing thrashing near a power-of-two boundary.
+            n_down = qd.static(static_rigid_sim_config.adaptive_timestep_downgrade_steps)
+            island_rate = 1
+            for i_local in range(island_state.dof_slices.n[i_island, i_b]):
+                i_d = island_state.dof_id[i_start + i_local, i_b]
+                prev = island_state.dofs_rate[i_d, i_b]
+                if prev < 1:
+                    prev = 1
+                new_rate = prev
+                steps = island_state.dofs_high_rate_steps[i_d, i_b]
+                if demanded >= prev:
+                    new_rate = demanded
+                    steps = 0
+                else:
+                    steps = steps + 1
+                    if steps >= n_down:
+                        new_rate = prev // 2
+                        steps = 0
+                island_state.dofs_rate[i_d, i_b] = new_rate
+                island_state.dofs_high_rate_steps[i_d, i_b] = steps
+                if new_rate > island_rate:
+                    island_rate = new_rate
+            island_state.island_rate[i_island, i_b] = island_rate
+            qd.atomic_max(island_state.island_rate_max[0], island_rate)
+
+
+@qd.kernel(fastcache=True)
+def kernel_update_dofs_dt(
+    tick: qd.i32,
+    sched_len: qd.i32,
+    island_state: array_class.IslandState,
+    rigid_global_info: array_class.RigidGlobalInfo,
+    static_rigid_sim_config: qd.template(),
+):
+    """Set the per-DOF effective timestep for micro-step `tick` of a `sched_len`-tick multi-rate schedule.
+
+    sched_len is the fastest island's rate this macro step (so the loop runs exactly sched_len ticks). An island of
+    rate r integrates at macro_dt / r and is active only on ticks that are multiples of sched_len / r (r divides
+    sched_len, both powers of two). On its active ticks a DOF gets dofs_dt = macro_dt / r; otherwise dofs_dt = 0,
+    which makes func_integrate a no-op (vel += acc*0, pos += vel*0) so the island holds until its next active tick.
+    """
+    n_dofs = rigid_global_info.dofs_dt.shape[0]
+    _B = rigid_global_info.dofs_dt.shape[1]
+    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_d, i_b in qd.ndrange(n_dofs, _B):
+        rate = island_state.dofs_rate[i_d, i_b]
+        # Clamp to [1, sched_len] so sched_len // rate stays >= 1 (assignment already quantizes to a power-of-two
+        # divisor <= sched_len; this only guards against a stray out-of-range value crashing the schedule).
+        if rate < 1:
+            rate = 1
+        elif rate > sched_len:
+            rate = sched_len
+        scale = 0.0
+        if tick % (sched_len // rate) == 0:
+            scale = 1.0 / rate
+        rigid_global_info.dofs_dt[i_d, i_b] = rigid_global_info.substep_dt[i_b] * scale
+
+
+@qd.kernel(fastcache=True)
 def kernel_step_2(
     dofs_state: array_class.DofsState,
     dofs_info: array_class.DofsInfo,
@@ -3430,6 +3667,7 @@ def kernel_step_2(
     static_rigid_sim_config: qd.template(),
     island_state: array_class.IslandState,
     is_backward: qd.template(),
+    is_last_tick: qd.i32,
     errno: qd.Tensor,
 ):
     # Position, Velocity and Acceleration data must be consistent when computing links acceleration, otherwise it
@@ -3467,30 +3705,36 @@ def kernel_step_2(
         is_backward=is_backward,
     )
 
+    # The sleep decision (velocity counter + hibernation) is a per-macro-step event: under adaptive timestep it must
+    # run only on the last micro-tick, otherwise its consecutive-below-threshold counter would advance up to sched_len
+    # times per macro step and hibernation_min_steps would silently change meaning. is_last_tick is 1 on the final
+    # micro-tick (always 1 without adaptive). The awake-geom AABB refresh is handled by the broad phase, not here, so
+    # skipping this on intermediate ticks does not affect collision detection.
     if qd.static(static_rigid_sim_config.use_hibernation):
-        func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_buffer(
-            dofs_state=dofs_state,
-            dofs_info=dofs_info,
-            entities_state=entities_state,
-            entities_info=entities_info,
-            links_info=links_info,
-            links_state=links_state,
-            geoms_state=geoms_state,
-            collider_state=collider_state,
-            unused__rigid_global_info=rigid_global_info,
-            rigid_global_info=rigid_global_info,
-            static_rigid_sim_config=static_rigid_sim_config,
-            island_state=island_state,
-            errno=errno,
-        )
-        func_aggregate_awake_entities(
-            entities_state=entities_state,
-            entities_info=entities_info,
-            links_info=links_info,
-            links_state=links_state,
-            rigid_global_info=rigid_global_info,
-            static_rigid_sim_config=static_rigid_sim_config,
-        )
+        if is_last_tick == 1:
+            func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_buffer(
+                dofs_state=dofs_state,
+                dofs_info=dofs_info,
+                entities_state=entities_state,
+                entities_info=entities_info,
+                links_info=links_info,
+                links_state=links_state,
+                geoms_state=geoms_state,
+                collider_state=collider_state,
+                unused__rigid_global_info=rigid_global_info,
+                rigid_global_info=rigid_global_info,
+                static_rigid_sim_config=static_rigid_sim_config,
+                island_state=island_state,
+                errno=errno,
+            )
+            func_aggregate_awake_entities(
+                entities_state=entities_state,
+                entities_info=entities_info,
+                links_info=links_info,
+                links_state=links_state,
+                rigid_global_info=rigid_global_info,
+                static_rigid_sim_config=static_rigid_sim_config,
+            )
 
     if qd.static(not is_backward):
         func_copy_next_to_curr(

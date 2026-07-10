@@ -8317,3 +8317,252 @@ def test_energy_analytical_and_conservation(show_viewer, tol, integrator):
     # Damped sphere_b: energy strictly decreased
     te_b_final = ke_b[-1] + pe_b[-1]
     assert te_b_final < te_initial
+
+
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_adaptive_timestep_per_island_rates(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            substeps=1,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            use_adaptive_timestep=True,
+            adaptive_timestep_max_rate=4,
+            adaptive_timestep_ref_speed=2.0,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    fast = scene.add_entity(
+        gs.morphs.Sphere(
+            radius=0.1,
+            pos=(0.0, 0.0, 1.5),
+        ),
+    )
+    rest = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(5.0, 0.0, 0.1),
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    # A falling sphere exceeds ref_speed, so its island must sub-step; the box sits at its rest height in a separate
+    # island that must stay at rate 1 and never drift (its rate-1 island integrates once per macro step, frozen on the
+    # other micro-ticks).
+    island_state = scene.sim.rigid_solver.constraint_solver.island_state
+    max_rate_seen = 0
+    for _ in range(80):
+        scene.step()
+        max_rate_seen = max(max_rate_seen, int(qd_to_numpy(island_state.island_rate).max()))
+
+    # The fast island exceeded ref_speed, so adaptive sub-stepping actually engaged.
+    assert max_rate_seen > 1
+    # The resting box did not move: the freeze holds a slow island exactly in place.
+    assert_allclose(np.atleast_1d(rest.get_pos()[..., 2]), 0.1, tol=1e-3)
+    # The sphere settled onto the plane without tunneling and came to rest.
+    fast_z = np.atleast_1d(fast.get_pos()[..., 2])
+    assert (fast_z > 0.05).all()
+    fast_vel = np.atleast_2d(tensor_to_array(fast.get_dofs_velocity())[..., :3])
+    assert (np.linalg.norm(fast_vel, axis=-1) < 0.5).all()
+
+
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_adaptive_timestep_cross_rate_contact(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            substeps=1,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            use_adaptive_timestep=True,
+            adaptive_timestep_max_rate=4,
+            adaptive_timestep_ref_speed=1.0,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    ball = scene.add_entity(
+        gs.morphs.Sphere(
+            radius=0.1,
+            pos=(-1.0, 0.0, 0.1),
+        ),
+    )
+    box = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(1.0, 0.0, 0.1),
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    # Fire the ball into the resting box: the ball is a fast (sub-stepping) island and the box a frozen rate-1 island,
+    # so they belong to different rate classes and merge on contact mid-macro-step. Robust handling (per-DOF rates)
+    # must resolve that contact - pushing the box - rather than tunneling through it or freezing the ball by a stale
+    # island-index rate mapping.
+    ball.set_dofs_velocity([5.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    box_x0 = np.atleast_1d(box.get_pos()[..., 0])
+
+    max_speed = 0.0
+    for _ in range(120):
+        scene.step()
+        for entity in (ball, box):
+            vel = np.atleast_2d(tensor_to_array(entity.get_dofs_velocity()))[..., :3]
+            max_speed = max(max_speed, float(np.linalg.norm(vel, axis=-1).max()))
+
+    # No blow-up: the contact stays stable (bounded speeds, finite positions).
+    ball_x = np.atleast_1d(ball.get_pos()[..., 0])
+    box_x = np.atleast_1d(box.get_pos()[..., 0])
+    assert max_speed < 50.0
+    assert np.isfinite(ball_x).all() and np.isfinite(box_x).all()
+    # The box was pushed forward: the cross-rate contact was actually solved, not skipped/tunneled.
+    assert (box_x > box_x0 + 0.02).all()
+    # The ball did not tunnel far past the box.
+    assert (ball_x < box_x + 0.3).all()
+
+
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_adaptive_timestep_auto_criterion(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            substeps=1,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            use_adaptive_timestep=True,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    fast = scene.add_entity(
+        gs.morphs.Sphere(
+            radius=0.05,
+            pos=(0.0, 0.0, 0.5),
+        ),
+    )
+    rest = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.3, 0.3, 0.3),
+            pos=(3.0, 0.0, 0.15),
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    # No ref_speed is set: the rate must be derived automatically from the geometry CFL. A small sphere launched fast
+    # (it would overshoot its own size in one macro step) must sub-step, while the resting box stays at rate 1.
+    fast.set_dofs_velocity([25.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    island_state = scene.sim.rigid_solver.constraint_solver.island_state
+    max_rate_seen = 0
+    for _ in range(30):
+        scene.step()
+        max_rate_seen = max(max_rate_seen, int(qd_to_numpy(island_state.island_rate_max).max()))
+
+    assert max_rate_seen > 1
+    rest_dof = rest.dof_start
+    rest_rate = qd_to_numpy(island_state.dofs_rate, transpose=True)[..., rest_dof]
+    assert (rest_rate == 1).all()
+
+
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_adaptive_timestep_with_hibernation(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            substeps=1,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            use_adaptive_timestep=True,
+            use_hibernation=True,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    resting = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(0.0, 0.0, 0.1),
+        ),
+    )
+    fast = scene.add_entity(
+        gs.morphs.Sphere(
+            radius=0.05,
+            pos=(3.0, 0.0, 0.5),
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    # The two island-based features compose: the resting box must still hibernate (its sleep counter is not inflated by
+    # the fast sphere's sub-stepping) while the sphere, kept fast, forces its own island to sub-step.
+    solver = scene.sim.rigid_solver
+    island_state = solver.constraint_solver.island_state
+    resting_z0 = np.atleast_1d(resting.get_pos()[..., 2])
+    max_rate_seen = 0
+    for _ in range(60):
+        fast.set_dofs_velocity([30.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        scene.step()
+        max_rate_seen = max(max_rate_seen, int(qd_to_numpy(island_state.island_rate_max).max()))
+
+    assert max_rate_seen > 1
+    resting_hibernated = qd_to_numpy(solver.links_state.is_hibernated, transpose=True)[..., resting.link_start]
+    assert resting_hibernated.all()
+    # A hibernated body is frozen exactly in place.
+    assert_allclose(np.atleast_1d(resting.get_pos()[..., 2]), resting_z0, tol=1e-3)
+
+
+@pytest.mark.parametrize("n_envs", [0, 2])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_adaptive_timestep_stiff_contact(n_envs, show_viewer):
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            substeps=1,
+        ),
+        rigid_options=gs.options.RigidOptions(
+            use_adaptive_timestep=True,
+        ),
+        show_viewer=show_viewer,
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    stiff = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(0.0, 0.0, 0.1),
+        ),
+    )
+    default = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(2.0, 0.0, 0.1),
+        ),
+    )
+    # A contact time constant stiffer than the macro step can resolve (< 2*dt = 0.02) must make the box's island
+    # sub-step even at rest; the default box stays at rate 1. Set before build so it survives the (adaptive) geom
+    # time-constant floor of 2*macro_dt/max_rate.
+    stiff.geoms[0].set_sol_params([0.005, 1.0, 0.9, 0.95, 0.001, 0.5, 2.0])
+    scene.build(n_envs=n_envs)
+
+    island_state = scene.sim.rigid_solver.constraint_solver.island_state
+    stiff_z0 = np.atleast_1d(stiff.get_pos()[..., 2])
+    for _ in range(30):
+        scene.step()
+
+    rates = qd_to_numpy(island_state.dofs_rate, transpose=True)
+    assert (rates[..., stiff.dof_start] > 1).all()
+    assert (rates[..., default.dof_start] == 1).all()
+    # The stiff contact stays stable (the box does not sink or blow up).
+    assert_allclose(np.atleast_1d(stiff.get_pos()[..., 2]), stiff_z0, tol=5e-2)

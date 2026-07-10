@@ -476,6 +476,28 @@ class RigidOptions(Options):
         Whether to partition the constraint solve into independent per-island blocks. It has no effect on a scene that
         is a single dense-coupled tree (one island) or is differentiable, where the dense whole-scene solve is used
         regardless. Defaults to True.
+    use_adaptive_timestep : bool, optional
+        Whether to let each contact island advance at its own integer sub-multiple of the macro timestep, so a fast or
+        stiff island (e.g. a robot in contact) sub-steps while a settled island (e.g. a resting pile) takes one big
+        step. Requires ``use_contact_island`` and is disabled under ``requires_grad``. Defaults to False.
+    adaptive_timestep_max_rate : int, optional
+        Upper bound on an island's rate ``r`` (its dt is ``macro_dt / r``) when ``use_adaptive_timestep`` is enabled.
+        Caps the worst-case number of micro-steps per macro step. Must be a power of two so every assigned rate (also a
+        power of two) evenly divides it. Defaults to 8.
+    adaptive_timestep_cfl : float, optional
+        Travel-fraction CFL target for the automatic rate criterion: an island sub-steps so its fastest body surface
+        point moves at most ``adaptive_timestep_cfl`` times the body's thinnest size per micro-step. Smaller is more
+        conservative (finer sub-stepping). Only used when ``use_adaptive_timestep`` is enabled and
+        ``adaptive_timestep_ref_speed`` is None. Defaults to 0.5.
+    adaptive_timestep_ref_speed : float | None, optional
+        Optional manual override of the rate criterion. If set, an island whose maximum DOF speed is ``v`` is assigned
+        rate ``clamp(next_pow2(ceil(v / ref_speed)), 1, max_rate)``. If None (default), the rate is derived
+        automatically from geometry (the travel-fraction CFL above) so no per-scene tuning is needed. Must be positive
+        when set.
+    adaptive_timestep_downgrade_steps : int, optional
+        Rate hysteresis: a DOF's rate rises immediately when demanded but is only lowered after its demand stays below
+        the current rate for this many consecutive macro steps, preventing thrashing near a power-of-two boundary. Only
+        used when ``use_adaptive_timestep`` is enabled. Defaults to 10.
     use_hibernation : bool, optional
         Whether to put bodies that have come to rest to sleep, so the solver skips them until they are disturbed. It
         quietly has no effect on a body that is differentiable, prunable, or under no-slip friction. Defaults to False.
@@ -531,6 +553,11 @@ class RigidOptions(Options):
     sparse_solve: StrictBool | None = None
     constraint_timeconst: PositiveFloat = 0.01
     use_contact_island: StrictBool = True
+    use_adaptive_timestep: StrictBool = False
+    adaptive_timestep_max_rate: PositiveInt = 8
+    adaptive_timestep_cfl: PositiveFloat = 0.5
+    adaptive_timestep_ref_speed: PositiveFloat | None = None
+    adaptive_timestep_downgrade_steps: PositiveInt = 10
     box_box_detection: StrictBool = False
 
     # hibernation threshold

@@ -1168,9 +1168,7 @@ def kernel_update_drone_propeller_vgeoms(
 
     for i_pp, i_b in qd.ndrange(n_propellers, _B):
         i_vg = propellers_vgeom_idxs[i_pp]
-        rad = (
-            propellers_revs[i_pp, i_b] * propellers_spin[i_pp] * rigid_global_info.substep_dt[None] * qd.math.pi / 30.0
-        )
+        rad = propellers_revs[i_pp, i_b] * propellers_spin[i_pp] * rigid_global_info.substep_dt[i_b] * qd.math.pi / 30.0
         vgeoms_state.quat[i_vg, i_b] = gu.qd_transform_quat_by_quat(
             gu.qd_rotvec_to_quat(qd.Vector([0.0, 0.0, rad], dt=gs.qd_float), EPS),
             vgeoms_state.quat[i_vg, i_b],
