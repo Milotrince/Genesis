@@ -7411,6 +7411,39 @@ def test_topology_variant_fk_parity(show_viewer, tol):
 
 
 @pytest.mark.required
+def test_topology_variant_inert_dof(show_viewer, tol):
+    # A ragged entity whose single joint is a ball (3 DOFs) in one variant and a hinge (1 DOF) in the other, so
+    # the hinge env leaves 2 inert padding DOFs. Under gravity those padding DOFs must stay frozen (decoupled
+    # via armature=1, no leakage into the active DOF), and the hinge's active DOF about the shared y-axis must
+    # evolve identically to the ball env's y DOF.
+    def pendulum(joint_type):
+        mjcf = ET.Element("mujoco", model=f"pendulum_{joint_type}")
+        ET.SubElement(mjcf, "option", gravity="0 0 -9.81")
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        body = ET.SubElement(worldbody, "body", name="pend", pos="0 0 0.5")
+        ET.SubElement(body, "joint", name="j", type=joint_type, axis="0 1 0", pos="0 0 0")
+        ET.SubElement(body, "geom", type="capsule", fromto="0 0 0 0.2 0 0", size="0.02", mass="0.1")
+        return ET.tostring(mjcf, encoding="unicode")
+
+    scene = gs.Scene(show_viewer=show_viewer)
+    ragged = scene.add_entity(
+        morph=(gs.morphs.MJCF(file=pendulum("ball")), gs.morphs.MJCF(file=pendulum("hinge"))),
+    )
+    scene.build(n_envs=2)
+    assert scene.rigid_solver._enable_ragged_topology
+    assert ragged.n_dofs == 3  # superset width = the ball variant
+
+    for _ in range(30):
+        scene.step()
+    dofs_pos = ragged.get_dofs_position()
+    assert not torch.isnan(dofs_pos).any()
+    # env 0 takes the ball variant, env 1 the hinge variant (balanced mapping).
+    assert_allclose(dofs_pos[1, 1:], 0.0, tol=tol)  # the hinge env's 2 padding DOFs are inert
+    assert_allclose(dofs_pos[1, 0], dofs_pos[0, 1], tol=tol)  # hinge (y) matches the ball's y DOF
+    assert (dofs_pos[0, 1].abs() > 0.01).all()  # the shared DOF genuinely swung under gravity
+
+
+@pytest.mark.required
 def test_heterogeneous_invalid_material_raises():
     """Test that heterogeneous morphs with unsupported material raises an exception."""
     scene = gs.Scene(

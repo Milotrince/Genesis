@@ -246,11 +246,6 @@ class KinematicEntity(Entity):
                             )
                         if p_joint.type != v_j_info["type"] or p_joint.n_dofs != v_j_info["n_dofs"]:
                             self._has_ragged_topology = True
-                        if p_joint.n_dofs != v_j_info["n_dofs"]:
-                            gs.raise_exception(
-                                f"DoF count mismatch for joint '{p_joint.name}': primary has {p_joint.n_dofs}, "
-                                f"variant has {v_j_info['n_dofs']}."
-                            )
 
                 # Post-process each link's geoms. The COM/principal-axis anchoring of the floating base is deferred to
                 # '_align_free_roots' after build (where the finalized per-variant composite inertia is known); here
