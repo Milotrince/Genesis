@@ -279,7 +279,9 @@ def main():
 
     if args.articulated:
         scene = gs.Scene(
-            rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
+            # Disable self-collision: random joint poses would otherwise drive an arm into self-penetration
+            # (the neutral-config self-collision filter does not cover arbitrary poses) and blow up.
+            rigid_options=gs.options.RigidOptions(enable_geom_scaling=True, enable_self_collision=False),
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(3.0, -3.0, 2.0),
                 camera_lookat=(0.0, 0.0, 0.4),
