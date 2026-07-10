@@ -8,10 +8,10 @@ Two ways a single `add_entity` can give each parallel environment a different bo
   geometry pool (`add_entity(geom_pool=...)` + `entity.set_active_object(...)`), resized per environment with
   per-env geom scaling (`entity.set_scale(...)`). A large catalog of shapes shares a small reserved slot
   budget.
-- `--articulated`: each environment simulates an articulated robot with a different kinematic topology from a
-  single `add_entity(morph=[variant, ...])` - here a Franka arm with a gripper in some environments and
-  without in others (the gripper's finger links/DOFs are inert where absent). This is the backbone for
-  cross-embodiment RL and morphology domain randomization.
+- `--articulated`: each environment simulates a different articulated robot - a Franka with and without its
+  gripper, a KUKA iiwa, and a simple 2-link arm - all from a single `add_entity(morph=[variant, ...])`. The
+  variants differ in kinematic topology (link/joint/DOF counts); a smaller robot leaves its extra link/DOF
+  slots inert. This is the backbone for cross-embodiment RL and morphology domain randomization.
 
 Usage:
     python heterogeneous_interactive.py                 # geometry pool, 9 environments, GPU
@@ -180,12 +180,16 @@ def run_pool(scene, args, n_envs):
 def run_articulated(scene, args, n_envs):
     """Ragged-topology demo: each environment is a Franka arm with or without its gripper."""
     scene.add_entity(gs.morphs.Plane())
-    # The first morph defines the skeleton and must be the largest: the arm-with-gripper is a superset of the
-    # arm-without (its finger links/DOFs are the trailing slots the gripper-less variant leaves inert).
+    # A mix of genuinely different robots per environment - a Franka with and without its gripper, a KUKA iiwa,
+    # and a simple 2-link arm. The first morph defines the skeleton and must be the largest (most links, widest
+    # joint per slot): the Franka-with-gripper is a superset of the others, whose missing links/DOFs are the
+    # trailing slots they leave inert.
     robot = scene.add_entity(
         morph=(
             gs.morphs.URDF(file="urdf/panda_bullet/panda.urdf", fixed=True),
             gs.morphs.URDF(file="urdf/panda_bullet/panda_nohand.urdf", fixed=True),
+            gs.morphs.URDF(file="urdf/kuka_iiwa/model.urdf", fixed=True),
+            gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf", fixed=True),
         ),
     )
 
@@ -198,7 +202,8 @@ def run_articulated(scene, args, n_envs):
 
     scene.build(n_envs=n_envs, env_spacing=(1.2, 1.2))
     gs.logger.info(
-        f"Ragged robot: {robot.n_links} links, {robot.n_dofs} DOFs (gripper-less envs leave the fingers inert)."
+        f"Ragged robot fleet: superset {robot.n_links} links / {robot.n_dofs} DOFs; smaller variants leave "
+        f"their extra slots inert."
     )
 
     # Hold each arm at a joint-position target against gravity; R re-samples the target within the joint limits.
@@ -257,6 +262,7 @@ def main():
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(3.0, -3.0, 2.0),
                 camera_lookat=(0.0, 0.0, 0.4),
+                enable_default_keybinds=False,
             ),
             show_viewer=True,
         )
@@ -267,6 +273,7 @@ def main():
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(4.0, -4.0, 3.0),
                 camera_lookat=(0.0, 0.0, 0.2),
+                enable_default_keybinds=False,
             ),
             show_viewer=True,
         )
