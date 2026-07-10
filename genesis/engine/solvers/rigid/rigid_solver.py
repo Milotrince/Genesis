@@ -1117,9 +1117,19 @@ class RigidSolver(KinematicSolver):
         joints_q_start = np.empty((len(joints), n_sel), dtype=gs.np_int)
         joints_q_end = np.empty((len(joints), n_sel), dtype=gs.np_int)
         dofs_armature = np.empty((len(dof_idxs), n_sel), dtype=gs.np_float)
-        # Inert padding DOFs default to zero motion (they contribute no kinematics); active DOFs are filled in.
+        # Inert padding DOFs default to the free-unlimited baseline (zero motion/stiffness/damping/actuation and
+        # open limits, so they add no kinematics, force or constraint rows); active DOFs are filled in below.
         dofs_motion_ang = np.zeros((len(dof_idxs), n_sel, 3), dtype=gs.np_float)
         dofs_motion_vel = np.zeros((len(dof_idxs), n_sel, 3), dtype=gs.np_float)
+        dofs_stiffness = np.zeros((len(dof_idxs), n_sel), dtype=gs.np_float)
+        dofs_damping = np.zeros((len(dof_idxs), n_sel), dtype=gs.np_float)
+        dofs_frictionloss = np.zeros((len(dof_idxs), n_sel), dtype=gs.np_float)
+        dofs_act_gain = np.zeros((len(dof_idxs), n_sel), dtype=gs.np_float)
+        dofs_act_bias = np.zeros((len(dof_idxs), n_sel, 3), dtype=gs.np_float)
+        dofs_limit = np.empty((len(dof_idxs), n_sel, 2), dtype=gs.np_float)
+        dofs_limit[..., 0], dofs_limit[..., 1] = -np.inf, np.inf
+        dofs_force_range = np.empty((len(dof_idxs), n_sel, 2), dtype=gs.np_float)
+        dofs_force_range[..., 0], dofs_force_range[..., 1] = -np.inf, np.inf
 
         for i_b_, variant in enumerate(variant_idx):
             variant_links_j_infos = entity._variant_links_j_infos[variant]
@@ -1143,6 +1153,13 @@ class RigidSolver(KinematicSolver):
                     joints_q_start[i_j_flat, i_b_] = p_joint.q_start
                     joints_q_end[i_j_flat, i_b_] = p_joint.q_start + v_n_qs
                     v_armature = v_j_info.get("dofs_armature", np.zeros(v_n_dofs, dtype=gs.np_float))
+                    v_stiffness = v_j_info.get("dofs_stiffness", np.zeros(v_n_dofs, dtype=gs.np_float))
+                    v_damping = v_j_info.get("dofs_damping", np.zeros(v_n_dofs, dtype=gs.np_float))
+                    v_frictionloss = v_j_info.get("dofs_frictionloss", np.zeros(v_n_dofs, dtype=gs.np_float))
+                    v_act_gain = v_j_info.get("dofs_act_gain", np.zeros(v_n_dofs, dtype=gs.np_float))
+                    v_act_bias = v_j_info.get("dofs_act_bias", np.zeros((v_n_dofs, 3), dtype=gs.np_float))
+                    v_limit = v_j_info.get("dofs_limit", np.tile([-np.inf, np.inf], (v_n_dofs, 1)))
+                    v_force_range = v_j_info.get("dofs_force_range", np.tile([-np.inf, np.inf], (v_n_dofs, 1)))
                     v_motion_ang = v_j_info.get("dofs_motion_ang")
                     v_motion_vel = v_j_info.get("dofs_motion_vel")
                     if v_motion_ang is None:
@@ -1151,12 +1168,19 @@ class RigidSolver(KinematicSolver):
                         v_motion_vel = np.eye(6, 3) if v_n_dofs == 6 else np.zeros((v_n_dofs, 3))
                     for i_d_slot in range(p_joint.n_dofs):
                         i_d_local = p_joint.dof_start + i_d_slot - entity.dof_start
-                        # Active DOFs take the variant's armature + motion; trailing padding DOFs stay inert
-                        # (armature 1 so the mass diagonal is 1; motion 0 left from the zero-init above).
+                        # Active DOFs take the variant's full property set; trailing padding DOFs keep the inert
+                        # defaults from the array init above, except armature which must be 1 (mass diagonal 1).
                         if i_d_slot < v_n_dofs:
                             dofs_armature[i_d_local, i_b_] = v_armature[i_d_slot]
                             dofs_motion_ang[i_d_local, i_b_] = v_motion_ang[i_d_slot]
                             dofs_motion_vel[i_d_local, i_b_] = v_motion_vel[i_d_slot]
+                            dofs_stiffness[i_d_local, i_b_] = v_stiffness[i_d_slot]
+                            dofs_damping[i_d_local, i_b_] = v_damping[i_d_slot]
+                            dofs_frictionloss[i_d_local, i_b_] = v_frictionloss[i_d_slot]
+                            dofs_act_gain[i_d_local, i_b_] = v_act_gain[i_d_slot]
+                            dofs_act_bias[i_d_local, i_b_] = v_act_bias[i_d_slot]
+                            dofs_limit[i_d_local, i_b_] = v_limit[i_d_slot]
+                            dofs_force_range[i_d_local, i_b_] = v_force_range[i_d_slot]
                         else:
                             dofs_armature[i_d_local, i_b_] = 1.0
                     link_n_dofs += v_n_dofs
@@ -1187,6 +1211,13 @@ class RigidSolver(KinematicSolver):
             dofs_armature,
             dofs_motion_ang,
             dofs_motion_vel,
+            dofs_stiffness,
+            dofs_damping,
+            dofs_frictionloss,
+            dofs_limit,
+            dofs_force_range,
+            dofs_act_gain,
+            dofs_act_bias,
             self.links_info,
             self.joints_info,
             self.dofs_info,

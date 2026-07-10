@@ -435,6 +435,13 @@ def kernel_update_heterogeneous_topology(
     dofs_armature: qd.types.ndarray(),
     dofs_motion_ang: qd.types.ndarray(),
     dofs_motion_vel: qd.types.ndarray(),
+    dofs_stiffness: qd.types.ndarray(),
+    dofs_damping: qd.types.ndarray(),
+    dofs_frictionloss: qd.types.ndarray(),
+    dofs_limit: qd.types.ndarray(),
+    dofs_force_range: qd.types.ndarray(),
+    dofs_act_gain: qd.types.ndarray(),
+    dofs_act_bias: qd.types.ndarray(),
     # Quadrants variables
     links_info: array_class.LinksInfo,
     joints_info: array_class.JointsInfo,
@@ -468,9 +475,17 @@ def kernel_update_heterogeneous_topology(
         for i_d_ in range(dof_idxs.shape[0]):
             i_d = dof_idxs[i_d_]
             dofs_info.armature[i_d, i_b] = dofs_armature[i_d_, i_b_]
+            dofs_info.stiffness[i_d, i_b] = dofs_stiffness[i_d_, i_b_]
+            dofs_info.damping[i_d, i_b] = dofs_damping[i_d_, i_b_]
+            dofs_info.frictionloss[i_d, i_b] = dofs_frictionloss[i_d_, i_b_]
+            dofs_info.act_gain[i_d, i_b] = dofs_act_gain[i_d_, i_b_]
+            for j in qd.static(range(2)):
+                dofs_info.limit[i_d, i_b][j] = dofs_limit[i_d_, i_b_, j]
+                dofs_info.force_range[i_d, i_b][j] = dofs_force_range[i_d_, i_b_, j]
             for j in qd.static(range(3)):
                 dofs_info.motion_ang[i_d, i_b][j] = dofs_motion_ang[i_d_, i_b_, j]
                 dofs_info.motion_vel[i_d, i_b][j] = dofs_motion_vel[i_d_, i_b_, j]
+                dofs_info.act_bias[i_d, i_b][j] = dofs_act_bias[i_d_, i_b_, j]
 
 
 @qd.kernel(fastcache=True)
