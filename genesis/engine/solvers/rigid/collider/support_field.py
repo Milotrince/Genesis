@@ -299,22 +299,26 @@ def _func_support_cylinder(
     """
     Support function for cylinder geometry.
 
-    Like the capsule, but with flat caps: the support point is on the rim of the cap selected by the sign of d along
-    the axis, displaced radially by the radius along d projected onto the cap plane (a sphere/hemisphere cap would
-    instead displace along d itself). When d is axial the radial part vanishes and the support is the cap centre.
-    'scale' applies a per-env geom scale (radial 'scale[0]'==scale[1]' enforced at set_scale; axis Z uses scale[2]).
+    Flat caps, so the support point is on the rim of the cap selected by the sign of d along the local axis,
+    displaced to the cross-section boundary along d. A per-env scale turns the circular cross-section into an
+    ellipse with local semi-axes (radius * scale[0], radius * scale[1]); the axis half-length scales by
+    scale[2]. Worked in the geom's local frame so the ellipse axes stay aligned to it: the support of the
+    ellipse (x/a)^2 + (y/b)^2 <= 1 in local radial direction (dx, dy) is (a^2 dx, b^2 dy) / sqrt((a dx)^2 +
+    (b dy)^2), which reduces to the circular rim radius * dir when a == b (isotropic radial scale).
     """
-    radius = geoms_info.data[i_g][0] * scale[0]
+    a = geoms_info.data[i_g][0] * scale[0]
+    b = geoms_info.data[i_g][0] * scale[1]
     halflength = 0.5 * geoms_info.data[i_g][1] * scale[2]
-    axis = gu.qd_transform_by_quat(qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float), quat)
-    endpoint_side = -1.0 if d.dot(axis) < 0.0 else 1.0
-    res = pos + halflength * endpoint_side * axis
+    d_local = gu.qd_inv_transform_by_quat(d, quat)
+    rx = gs.qd_float(0.0)
+    ry = gs.qd_float(0.0)
     if not shrink:
-        d_radial = d - d.dot(axis) * axis
-        d_radial_norm = d_radial.norm()
-        if d_radial_norm > 1e-9:
-            res = res + (radius / d_radial_norm) * d_radial
-    return res
+        denom = qd.sqrt((a * d_local[0]) * (a * d_local[0]) + (b * d_local[1]) * (b * d_local[1]))
+        if denom > 1e-9:
+            rx = a * a * d_local[0] / denom
+            ry = b * b * d_local[1] / denom
+    rz = halflength if d_local[2] >= 0.0 else -halflength
+    return pos + gu.qd_transform_by_quat(qd.Vector([rx, ry, rz], dt=gs.qd_float), quat)
 
 
 @qd.func

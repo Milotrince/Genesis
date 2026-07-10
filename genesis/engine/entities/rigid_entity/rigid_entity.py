@@ -2152,7 +2152,8 @@ class KinematicEntity(Entity):
         `scale` is a scalar (isotropic), a length-3 vector `(sx, sy, sz)`, or a per-environment
         `(n_envs, 3)` array. Requires the scene built with `RigidOptions(enable_geom_scaling=True)`. Scales
         the entity's collision geometry, AABBs and inertial about each geom's frame origin; the joint
-        configuration is preserved. Radial primitives (capsule, cylinder) require an isotropic radial scale.
+        configuration is preserved. Anisotropic scale is supported for sphere (-> ellipsoid), cylinder
+        (-> elliptic cylinder), box and mesh; only a capsule requires an isotropic radial scale (sx == sy).
         """
         if not self._solver.is_built:
             gs.raise_exception("set_scale can only be called after the scene is built.")

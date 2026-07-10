@@ -62,10 +62,67 @@ def test_geom_scale(tol):
     assert_allclose(z[[0, 1]], 0.15, tol=6e-3)
     assert_allclose(z[[2, 3]], 0.05, tol=6e-3)
 
-    # A non-uniform radial scale of a radial primitive is not representable and must raise; uniform is fine.
-    with pytest.raises(gs.GenesisException):
-        cylinder.set_scale((2.0, 1.0, 1.0))
+    # A cylinder scales anisotropically (elliptic cross-section, see test_geom_scale_anisotropic); a uniform
+    # radial + axial scale is likewise fine. Neither raises.
+    cylinder.set_scale((2.0, 1.0, 3.0))
     cylinder.set_scale((2.0, 2.0, 3.0))
+
+
+def test_geom_scale_anisotropic(tol):
+    """Anisotropic scale turns a sphere into an ellipsoid and a cylinder into an elliptic cylinder, both
+    colliding correctly (support-based narrowphase). A capsule alone still requires an isotropic radial scale
+    (its hemispherical caps have no analytic elliptic contact)."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_geom_scaling=True,
+            gravity=(0.0, 0.0, -10.0),
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    sphere = scene.add_entity(
+        gs.morphs.Sphere(
+            radius=0.1,
+            pos=(0.0, 0.0, 0.5),
+        ),
+    )
+    # Lying on its side (local axis Z -> world Y), so the vertical radial semi-axis is radius * scale[1].
+    cylinder = scene.add_entity(
+        gs.morphs.Cylinder(
+            radius=0.1,
+            height=0.4,
+            pos=(1.0, 0.0, 0.5),
+            euler=(90.0, 0.0, 0.0),
+        ),
+    )
+    scene.build(n_envs=2)
+    scene.step()
+
+    # env 0 stays unit; env 1 stretches the vertical semi-axis of each shape to 0.2.
+    sphere.set_scale(np.array([[1.0, 1.0, 1.0], [1.0, 1.0, 2.0]]))
+    cylinder.set_scale(np.array([[1.0, 1.0, 1.0], [1.0, 2.0, 1.0]]))
+    for _ in range(500):
+        scene.step()
+
+    sz = sphere.get_pos()[..., 2]
+    cz = cylinder.get_pos()[..., 2]
+    assert torch.isfinite(sz).all() and torch.isfinite(cz).all()
+    assert_allclose(sz[0], 0.1, tol=5e-3)  # unit sphere rests on its radius
+    assert_allclose(sz[1], 0.2, tol=5e-3)  # z-stretched ellipsoid rests on its 2x semi-axis
+    assert_allclose(cz[0], 0.1, tol=5e-3)  # unit cylinder on its side rests on its radius
+    assert_allclose(cz[1], 0.2, tol=5e-3)  # elliptic cylinder rests on its 2x vertical semi-axis
+
+    # A capsule's caps have no analytic elliptic contact, so a non-uniform radial scale must still raise.
+    mjcf = ET.Element("mujoco", model="capsule")
+    body = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", name="c", pos="0 0 0.5")
+    ET.SubElement(body, "joint", name="f", type="free")
+    ET.SubElement(body, "geom", type="capsule", fromto="0 0 0 0 0 0.2", size="0.05", mass="0.1")
+    cap_scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
+    capsule = cap_scene.add_entity(morph=gs.morphs.MJCF(file=ET.tostring(mjcf, encoding="unicode")))
+    cap_scene.build(n_envs=2)
+    with pytest.raises(gs.GenesisException):
+        capsule.set_scale((2.0, 1.0, 1.0))
+    capsule.set_scale((2.0, 2.0, 3.0))  # isotropic radial is fine
 
 
 def test_geom_scale_multi_link_tree(tol):

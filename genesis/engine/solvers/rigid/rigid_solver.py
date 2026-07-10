@@ -2549,8 +2549,9 @@ class RigidSolver(KinematicSolver):
 
         Scales the entity's collision geometry, AABBs and per-link inertial for the selected environments.
         'scale' is a scalar (isotropic), a length-3 vector, or a per-environment (n_envs, 3) array. Requires
-        the scene built with 'enable_geom_scaling=True'. Radial primitives (capsule/cylinder) require an
-        isotropic radial scale (sx == sy). The joint configuration is preserved.
+        the scene built with 'enable_geom_scaling=True'. Anisotropic scale is fully supported for sphere (an
+        ellipsoid), cylinder (an elliptic cylinder), box and mesh; only a capsule requires an isotropic radial
+        scale (sx == sy). The joint configuration is preserved.
         """
         if not self._enable_geom_scaling:
             gs.raise_exception("set_scale requires the scene built with RigidOptions(enable_geom_scaling=True).")
@@ -2576,8 +2577,12 @@ class RigidSolver(KinematicSolver):
                 gs.raise_exception(
                     "set_scale is not supported for fixed-vertex geoms; build the entity with batch_fixed_verts=True."
                 )
-            if geom.type in (gs.GEOM_TYPE.CAPSULE, gs.GEOM_TYPE.CYLINDER) and not np.allclose(scale[:, 0], scale[:, 1]):
-                gs.raise_exception(f"Radial primitive {geom.type} requires an isotropic radial scale (sx == sy).")
+            if geom.type == gs.GEOM_TYPE.CAPSULE and not np.allclose(scale[:, 0], scale[:, 1]):
+                gs.raise_exception(
+                    "Capsule requires an isotropic radial scale (sx == sy): its hemispherical caps have no "
+                    "analytic elliptic contact (capsule-capsule is analytic, not support-based). Sphere, "
+                    "cylinder and box support anisotropic scale."
+                )
 
         envs_idx_np = tensor_to_array(envs_idx)
 
