@@ -349,9 +349,13 @@ class Scene(RBC):
         Parameters
         ----------
         morph : gs.morphs.Morph | list[gs.morphs.Morph]
-            The morph of the entity. If a list of morphs is provided, the entity will be heterogeneous
-            (rigid only, single-link entities only). Each parallel environment will simulate a different
-            geometry variant from the list.
+            The morph of the entity. If a list of morphs is provided, the entity is heterogeneous (rigid
+            only): each parallel environment simulates a different variant from the list. Variants may differ
+            in geometry and, for articulated (URDF/MJCF) variants, in kinematic topology - different joint
+            types, DOF counts, or even link counts (e.g. a fleet of different robots). The first morph defines
+            the skeleton: its links/joints are the per-slot maximum, so it must have at least as many links and
+            as wide a joint at each slot as every other variant; narrower variants leave their unused link/DOF
+            slots inert. Variants map by slot position (`qpos[slot i]` may mean a different joint per env).
         material : gs.materials.Material | None, optional
             The material of the entity. If None, use ``gs.materials.Rigid()``.
         surface : gs.surfaces.Surface | None, optional
