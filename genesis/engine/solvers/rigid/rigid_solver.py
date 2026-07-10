@@ -1340,6 +1340,7 @@ class RigidSolver(KinematicSolver):
                 self._static_rigid_sim_config,
                 self.constraint_solver.island_state,
                 self._is_backward,
+                int(tick + 1 >= sched_len),
                 self._errno,
             )
             self._is_forward_pos_updated = not self._enable_mujoco_compatibility
@@ -1841,6 +1842,7 @@ class RigidSolver(KinematicSolver):
                 static_rigid_sim_config=self._static_rigid_sim_config,
                 island_state=self.constraint_solver.island_state,
                 is_backward=self._is_backward,
+                is_last_tick=1,
                 errno=self._errno,
             )
         elif isinstance(self.sim.coupler, IPCCoupler):
@@ -3625,6 +3627,7 @@ def kernel_step_2(
     static_rigid_sim_config: qd.template(),
     island_state: array_class.IslandState,
     is_backward: qd.template(),
+    is_last_tick: qd.i32,
     errno: qd.Tensor,
 ):
     # Position, Velocity and Acceleration data must be consistent when computing links acceleration, otherwise it
@@ -3662,30 +3665,36 @@ def kernel_step_2(
         is_backward=is_backward,
     )
 
+    # The sleep decision (velocity counter + hibernation) is a per-macro-step event: under adaptive timestep it must
+    # run only on the last micro-tick, otherwise its consecutive-below-threshold counter would advance up to sched_len
+    # times per macro step and hibernation_min_steps would silently change meaning. is_last_tick is 1 on the final
+    # micro-tick (always 1 without adaptive). The awake-geom AABB refresh is handled by the broad phase, not here, so
+    # skipping this on intermediate ticks does not affect collision detection.
     if qd.static(static_rigid_sim_config.use_hibernation):
-        func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_buffer(
-            dofs_state=dofs_state,
-            dofs_info=dofs_info,
-            entities_state=entities_state,
-            entities_info=entities_info,
-            links_info=links_info,
-            links_state=links_state,
-            geoms_state=geoms_state,
-            collider_state=collider_state,
-            unused__rigid_global_info=rigid_global_info,
-            rigid_global_info=rigid_global_info,
-            static_rigid_sim_config=static_rigid_sim_config,
-            island_state=island_state,
-            errno=errno,
-        )
-        func_aggregate_awake_entities(
-            entities_state=entities_state,
-            entities_info=entities_info,
-            links_info=links_info,
-            links_state=links_state,
-            rigid_global_info=rigid_global_info,
-            static_rigid_sim_config=static_rigid_sim_config,
-        )
+        if is_last_tick == 1:
+            func_hibernate__for_all_awake_islands_either_hiberanate_or_update_aabb_sort_buffer(
+                dofs_state=dofs_state,
+                dofs_info=dofs_info,
+                entities_state=entities_state,
+                entities_info=entities_info,
+                links_info=links_info,
+                links_state=links_state,
+                geoms_state=geoms_state,
+                collider_state=collider_state,
+                unused__rigid_global_info=rigid_global_info,
+                rigid_global_info=rigid_global_info,
+                static_rigid_sim_config=static_rigid_sim_config,
+                island_state=island_state,
+                errno=errno,
+            )
+            func_aggregate_awake_entities(
+                entities_state=entities_state,
+                entities_info=entities_info,
+                links_info=links_info,
+                links_state=links_state,
+                rigid_global_info=rigid_global_info,
+                static_rigid_sim_config=static_rigid_sim_config,
+            )
 
     if qd.static(not is_backward):
         func_copy_next_to_curr(
