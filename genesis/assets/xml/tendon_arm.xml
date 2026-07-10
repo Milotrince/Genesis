@@ -1,0 +1,50 @@
+<mujoco model="tendon_arm">
+  <!--
+    Self-authored tendon showcase for Genesis. A 2-link arm actuated by a single SPATIAL tendon that is routed from a
+    fixed anchor site, wraps around a fixed cylinder "pulley", and attaches to the forearm tip. A position actuator
+    drives the tendon length, flexing the arm. A second FIXED tendon couples the two joints so they move together
+    (like a mechanically linked finger). Exercises: spatial tendon + geom wrapping + actuator transmission + a fixed
+    tendon coupling, all in one simple model.
+  -->
+  <compiler angle="radian"/>
+  <option timestep="0.005" gravity="0 0 -9.81"/>
+
+  <worldbody>
+    <site name="anchor" pos="-0.15 0 1.2" size="0.02" rgba="1 0 0 1"/>
+    <geom name="pulley" type="cylinder" pos="0 0 1.0" size="0.06 0.05" euler="1.5708 0 0" rgba="0.6 0.6 0.2 1"
+          contype="0" conaffinity="0"/>
+    <!-- Sidesite pins the wrap to the top (+z) side of the pulley (MuJoCo's stateless side selection), so the tendon
+         does not flip to the shortest-path side as the arm swings. -->
+    <site name="pulley_top" pos="0 0 1.15" size="0.015" rgba="1 1 0 1"/>
+
+    <body name="upper" pos="0 0 1.0">
+      <joint name="shoulder" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
+      <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03" mass="0.4" rgba="0.2 0.4 0.8 1"/>
+      <site name="mid" pos="0.3 0 0.04" size="0.02" rgba="0 1 0 1"/>
+      <body name="fore" pos="0.3 0 0">
+        <joint name="elbow" type="hinge" axis="0 1 0" range="-2.0 2.0"/>
+        <geom type="capsule" fromto="0 0 0 0.3 0 0" size="0.03" mass="0.3" rgba="0.2 0.7 0.5 1"/>
+        <site name="tip" pos="0.3 0 0.04" size="0.02" rgba="0 0 1 1"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <tendon>
+    <!-- Spatial actuation tendon: anchor -> wrap over the cylinder pulley (pinned to the top via sidesite) -> tip. -->
+    <spatial name="flexor" width="0.005" rgba="0.9 0.2 0.2 1">
+      <site site="anchor"/>
+      <geom geom="pulley" sidesite="pulley_top"/>
+      <site site="mid"/>
+      <site site="tip"/>
+    </spatial>
+    <!-- Fixed coupling tendon so the two joints share load (illustrative). -->
+    <fixed name="couple" stiffness="5" damping="0.5">
+      <joint joint="shoulder" coef="1"/>
+      <joint joint="elbow" coef="-1"/>
+    </fixed>
+  </tendon>
+
+  <actuator>
+    <position name="flex" tendon="flexor" kp="40"/>
+  </actuator>
+</mujoco>

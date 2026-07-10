@@ -489,6 +489,8 @@ from .constants import (
     JOINT_TYPE,
     GEOM_TYPE,
     EQUALITY_TYPE,
+    TENDON_TYPE,
+    WRAP_TYPE,
     CTRL_MODE,
     PARA_LEVEL,
     ACTIVE,

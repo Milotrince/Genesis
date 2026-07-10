@@ -678,5 +678,7 @@ def parse_usd_rigid_entity(morph: gs.morphs.USD, surface: gs.surfaces.Surface):
     l_infos, links_j_infos = _parse_links(context, links, link_joints, morph)
     l_infos, links_j_infos, links_g_infos, _ = urdf_utils.order_links_depth_first(l_infos, links_j_infos, links_g_infos)
     eqs_info = []  # USD doesn't support equality constraints
+    tendons_info = []  # USD doesn't support tendons
+    sites_info = []  # USD doesn't support sites
 
-    return l_infos, links_j_infos, links_g_infos, eqs_info
+    return l_infos, links_j_infos, links_g_infos, eqs_info, tendons_info, sites_info

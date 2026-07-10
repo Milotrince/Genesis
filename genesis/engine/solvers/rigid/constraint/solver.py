@@ -117,6 +117,8 @@ class ConstraintSolver:
             + sum(joint.type in (gs.JOINT_TYPE.REVOLUTE, gs.JOINT_TYPE.PRISMATIC) for joint in self._solver.joints)
             + self._solver.n_dofs
             + self._solver.n_candidate_equalities_ * 6
+            # One limit row + one frictionloss row per fixed tendon.
+            + self._solver.n_tendons * 2
         )
         self.len_constraints_ = max(1, self.len_constraints)
 
@@ -277,6 +279,8 @@ class ConstraintSolver:
             self._solver.dofs_info,
             self._solver.joints_info,
             self._solver.equalities_info,
+            self._solver.tendons_info,
+            self._solver.tendons_state,
             self.constraint_state,
             self._collider._collider_state,
             self._solver._rigid_global_info,
@@ -291,6 +295,8 @@ class ConstraintSolver:
             self._solver.dofs_info,
             self._solver.joints_info,
             self._solver.equalities_info,
+            self._solver.tendons_info,
+            self._solver.tendons_state,
             self.constraint_state,
             self._collider._collider_state,
             self.island_state,
@@ -1163,6 +1169,82 @@ def func_equality_joint(
     _sort_relevant_dofs_descending(constraint_state, n_con, con_n_dofs, i_b, static_rigid_sim_config)
 
 
+@qd.func
+def func_equality_tendon(
+    i_b,
+    i_e,
+    tendons_info: array_class.TendonsInfo,
+    tendons_state: array_class.TendonsState,
+    dofs_info: array_class.DofsInfo,
+    equalities_info: array_class.EqualitiesInfo,
+    constraint_state: array_class.ConstraintState,
+    rigid_global_info: array_class.RigidGlobalInfo,
+    static_rigid_sim_config: qd.template(),
+):
+    # Quartic coupling of two tendon lengths (relative to their reference lengths), mirroring func_equality_joint but
+    # with the per-step tendon moment rows as the Jacobian:  length1 - length1_0 = sum_k a_k * (length2 - length2_0)^k.
+    EPS = rigid_global_info.EPS[None]
+    n_dofs = constraint_state.jac.shape[1]
+    sol_params = equalities_info.sol_params[i_e, i_b]
+    i_t1 = equalities_info.eq_obj1id[i_e, i_b]
+    i_t2 = equalities_info.eq_obj2id[i_e, i_b]
+
+    n_con = qd.atomic_add(constraint_state.n_constraints[i_b], 1)
+    qd.atomic_add(constraint_state.n_constraints_equality[i_b], 1)
+
+    if qd.static(static_rigid_sim_config.sparse_solve):
+        for i_d_ in range(constraint_state.jac_n_dofs[n_con, i_b]):
+            i_d = constraint_state.jac_dofs_idx[n_con, i_d_, i_b]
+            constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
+    else:
+        for i_d in range(n_dofs):
+            constraint_state.jac[n_con, i_d, i_b] = gs.qd_float(0.0)
+
+    pos = tendons_state.length[i_t1, i_b] - tendons_info.length0[i_t1]
+    diff = tendons_state.length[i_t2, i_b] - tendons_info.length0[i_t2]
+    deriv = gs.qd_float(0.0)
+    for i_5 in range(5):
+        diff_power = diff**i_5
+        pos = pos - diff_power * equalities_info.eq_data[i_e, i_b][i_5]
+        if i_5 < 4:
+            deriv = deriv + equalities_info.eq_data[i_e, i_b][i_5 + 1] * diff_power * (i_5 + 1)
+
+    # Assemble the Jacobian row = moment(t1) - deriv * moment(t2) over the union of the two tendons' relevant DOFs.
+    con_n_dofs = 0
+    invweight = gs.qd_float(0.0)
+    for k in range(tendons_info.n_members[i_t1]):
+        i_d = tendons_info.dof_idx[i_t1, k]
+        constraint_state.jac[n_con, i_d, i_b] = tendons_state.moment[i_t1, i_d, i_b]
+        constraint_state.jac_dofs_idx[n_con, con_n_dofs, i_b] = i_d
+        con_n_dofs += 1
+        I_d = [i_d, i_b] if qd.static(static_rigid_sim_config.batch_dofs_info) else i_d
+        invweight = invweight + dofs_info.invweight[I_d]
+    for k in range(tendons_info.n_members[i_t2]):
+        i_d = tendons_info.dof_idx[i_t2, k]
+        add_val = -deriv * tendons_state.moment[i_t2, i_d, i_b]
+        found = False
+        for kk in range(con_n_dofs):
+            if constraint_state.jac_dofs_idx[n_con, kk, i_b] == i_d:
+                found = True
+        if found:
+            constraint_state.jac[n_con, i_d, i_b] = constraint_state.jac[n_con, i_d, i_b] + add_val
+        else:
+            constraint_state.jac[n_con, i_d, i_b] = add_val
+            constraint_state.jac_dofs_idx[n_con, con_n_dofs, i_b] = i_d
+            con_n_dofs += 1
+            I_d = [i_d, i_b] if qd.static(static_rigid_sim_config.batch_dofs_info) else i_d
+            invweight = invweight + dofs_info.invweight[I_d]
+    constraint_state.jac_n_dofs[n_con, i_b] = con_n_dofs
+
+    jac_qvel = tendons_state.velocity[i_t1, i_b] - deriv * tendons_state.velocity[i_t2, i_b]
+    imp, aref = gu.imp_aref(sol_params, -qd.abs(pos), jac_qvel, pos)
+    diag = qd.max(invweight * (1.0 - imp) / imp, EPS)
+    constraint_state.diag[n_con, i_b] = diag
+    constraint_state.aref[n_con, i_b] = aref
+    constraint_state.efc_D[n_con, i_b] = 1.0 / diag
+    _sort_relevant_dofs_descending(constraint_state, n_con, con_n_dofs, i_b, static_rigid_sim_config)
+
+
 @qd.kernel(fastcache=True)
 def add_equality_constraints(
     links_info: array_class.LinksInfo,
@@ -1171,6 +1253,8 @@ def add_equality_constraints(
     dofs_info: array_class.DofsInfo,
     joints_info: array_class.JointsInfo,
     equalities_info: array_class.EqualitiesInfo,
+    tendons_info: array_class.TendonsInfo,
+    tendons_state: array_class.TendonsState,
     constraint_state: array_class.ConstraintState,
     collider_state: array_class.ColliderState,
     rigid_global_info: array_class.RigidGlobalInfo,
@@ -1215,6 +1299,18 @@ def add_equality_constraints(
                     i_e,
                     joints_info=joints_info,
                     dofs_state=dofs_state,
+                    dofs_info=dofs_info,
+                    equalities_info=equalities_info,
+                    constraint_state=constraint_state,
+                    rigid_global_info=rigid_global_info,
+                    static_rigid_sim_config=static_rigid_sim_config,
+                )
+            elif equalities_info.eq_type[i_e, i_b] == gs.EQUALITY_TYPE.TENDON:
+                func_equality_tendon(
+                    i_b,
+                    i_e,
+                    tendons_info=tendons_info,
+                    tendons_state=tendons_state,
                     dofs_info=dofs_info,
                     equalities_info=equalities_info,
                     constraint_state=constraint_state,
@@ -1342,6 +1438,8 @@ def add_inequality_constraints(
     dofs_info: array_class.DofsInfo,
     joints_info: array_class.JointsInfo,
     equalities_info: array_class.EqualitiesInfo,
+    tendons_info: array_class.TendonsInfo,
+    tendons_state: array_class.TendonsState,
     constraint_state: array_class.ConstraintState,
     collider_state: array_class.ColliderState,
     island_state: array_class.IslandState,
@@ -1390,6 +1488,8 @@ def add_inequality_constraints(
         joints_info=joints_info,
         dofs_info=dofs_info,
         dofs_state=dofs_state,
+        tendons_info=tendons_info,
+        tendons_state=tendons_state,
         rigid_global_info=rigid_global_info,
         constraint_state=constraint_state,
         static_rigid_sim_config=static_rigid_sim_config,
@@ -1414,6 +1514,15 @@ def add_inequality_constraints(
             constraint_state=constraint_state,
             static_rigid_sim_config=static_rigid_sim_config,
         )
+    add_tendon_limit_constraints(
+        dofs_info=dofs_info,
+        dofs_state=dofs_state,
+        tendons_info=tendons_info,
+        tendons_state=tendons_state,
+        rigid_global_info=rigid_global_info,
+        constraint_state=constraint_state,
+        static_rigid_sim_config=static_rigid_sim_config,
+    )
 
 
 @qd.func
@@ -1683,6 +1792,8 @@ def add_frictionloss_constraints(
     joints_info: array_class.JointsInfo,
     dofs_info: array_class.DofsInfo,
     dofs_state: array_class.DofsState,
+    tendons_info: array_class.TendonsInfo,
+    tendons_state: array_class.TendonsState,
     rigid_global_info: array_class.RigidGlobalInfo,
     constraint_state: array_class.ConstraintState,
     static_rigid_sim_config: qd.template(),
@@ -1733,6 +1844,102 @@ def add_frictionloss_constraints(
 
                         constraint_state.jac_dofs_idx[i_con, 0, i_b] = i_d
                         constraint_state.jac_n_dofs[i_con, i_b] = 1
+
+        # Fixed-tendon frictionloss rows (multi-DOF Jacobian = coef). Kept in the same contiguous frictionloss block as
+        # the per-DOF rows above so `n_constraints_equality + n_constraints_frictionloss` still bounds the block.
+        for i_t in range(qd.static(static_rigid_sim_config.n_tendons)):
+            if tendons_info.frictionloss[i_t] > EPS:
+                n_mem = tendons_info.n_members[i_t]
+                jac_qvel = tendons_state.velocity[i_t, i_b]
+                invweight = gs.qd_float(0.0)
+                for k in range(n_mem):
+                    i_d = tendons_info.dof_idx[i_t, k]
+                    I_d = [i_d, i_b] if qd.static(static_rigid_sim_config.batch_dofs_info) else i_d
+                    invweight = invweight + dofs_info.invweight[I_d]
+                imp, aref = gu.imp_aref(tendons_info.sol_params[i_t], 0.0, jac_qvel, 0.0)
+                diag = qd.max(invweight * (1.0 - imp) / imp, EPS)
+
+                i_con = qd.atomic_add(constraint_state.n_constraints[i_b], 1)
+                qd.atomic_add(constraint_state.n_constraints_frictionloss[i_b], 1)
+
+                constraint_state.diag[i_con, i_b] = diag
+                constraint_state.aref[i_con, i_b] = aref
+                constraint_state.efc_D[i_con, i_b] = 1.0 / diag
+                constraint_state.efc_frictionloss[i_con, i_b] = tendons_info.frictionloss[i_t]
+                for i_d2 in range(n_dofs):
+                    constraint_state.jac[i_con, i_d2, i_b] = gs.qd_float(0.0)
+                con_n_dofs = 0
+                for k in range(n_mem):
+                    i_d = tendons_info.dof_idx[i_t, k]
+                    constraint_state.jac[i_con, i_d, i_b] = tendons_state.moment[i_t, i_d, i_b]
+                    constraint_state.jac_dofs_idx[i_con, con_n_dofs, i_b] = i_d
+                    con_n_dofs += 1
+                constraint_state.jac_n_dofs[i_con, i_b] = con_n_dofs
+                _sort_relevant_dofs_descending(constraint_state, i_con, con_n_dofs, i_b, static_rigid_sim_config)
+
+
+@qd.func
+def add_tendon_limit_constraints(
+    dofs_info: array_class.DofsInfo,
+    dofs_state: array_class.DofsState,
+    tendons_info: array_class.TendonsInfo,
+    tendons_state: array_class.TendonsState,
+    rigid_global_info: array_class.RigidGlobalInfo,
+    constraint_state: array_class.ConstraintState,
+    static_rigid_sim_config: qd.template(),
+):
+    EPS = rigid_global_info.EPS[None]
+
+    _B = constraint_state.jac.shape[2]
+    n_dofs = dofs_state.ctrl_mode.shape[0]
+
+    qd.loop_config(
+        name="add_tendon_limit_constraints",
+        serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL),
+    )
+    for i_b in range(_B):
+        for i_t in range(qd.static(static_rigid_sim_config.n_tendons)):
+            if tendons_info.limited[i_t]:
+                length = tendons_state.length[i_t, i_b]
+                pos_delta_min = length - tendons_info.limit[i_t][0]
+                pos_delta_max = tendons_info.limit[i_t][1] - length
+                pos_delta = qd.min(pos_delta_min, pos_delta_max)
+
+                if pos_delta < 0:
+                    sign = (pos_delta_min < pos_delta_max) * 2 - 1
+                    jac_qvel = sign * tendons_state.velocity[i_t, i_b]
+
+                    n_mem = tendons_info.n_members[i_t]
+                    invweight = gs.qd_float(0.0)
+                    for k in range(n_mem):
+                        i_d = tendons_info.dof_idx[i_t, k]
+                        I_d = [i_d, i_b] if qd.static(static_rigid_sim_config.batch_dofs_info) else i_d
+                        invweight = invweight + dofs_info.invweight[I_d]
+
+                    imp, aref = gu.imp_aref(tendons_info.sol_params_limit[i_t], pos_delta, jac_qvel, pos_delta)
+                    diag = qd.max(invweight * (1.0 - imp) / imp, EPS)
+
+                    n_con = qd.atomic_add(constraint_state.n_constraints[i_b], 1)
+                    constraint_state.diag[n_con, i_b] = diag
+                    constraint_state.aref[n_con, i_b] = aref
+                    constraint_state.efc_D[n_con, i_b] = 1.0 / diag
+
+                    if qd.static(static_rigid_sim_config.sparse_solve):
+                        for i_d2_ in range(constraint_state.jac_n_dofs[n_con, i_b]):
+                            i_d2 = constraint_state.jac_dofs_idx[n_con, i_d2_, i_b]
+                            constraint_state.jac[n_con, i_d2, i_b] = gs.qd_float(0.0)
+                    else:
+                        for i_d2 in range(n_dofs):
+                            constraint_state.jac[n_con, i_d2, i_b] = gs.qd_float(0.0)
+
+                    con_n_dofs = 0
+                    for k in range(n_mem):
+                        i_d = tendons_info.dof_idx[i_t, k]
+                        constraint_state.jac[n_con, i_d, i_b] = sign * tendons_state.moment[i_t, i_d, i_b]
+                        constraint_state.jac_dofs_idx[n_con, con_n_dofs, i_b] = i_d
+                        con_n_dofs += 1
+                    constraint_state.jac_n_dofs[n_con, i_b] = con_n_dofs
+                    _sort_relevant_dofs_descending(constraint_state, n_con, con_n_dofs, i_b, static_rigid_sim_config)
 
 
 # ====================================== Runtime User-Specified Weld Constraints ======================================

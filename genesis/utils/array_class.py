@@ -721,10 +721,14 @@ def get_island_state(solver, collider):
     )
     max_candidate_contacts = max(collider._collider_info.max_candidate_contacts[None], 1)
     # Safe upper bound on active constraints, mirroring ConstraintSolver.len_constraints: 4 per contact +
-    # joint-limit/frictionloss (<= n_dofs each) + equality rows (<= 6 each). The equality term must use the
-    # candidate count (model equalities plus the dynamic-weld budget), not just the model equalities, otherwise
-    # constraint_id is undersized once dynamic welds are added and the per-island grouping writes out of bounds.
-    n_constraints_max = max(max_candidate_contacts * 4 + 2 * n_dofs + max(solver.n_candidate_equalities_, 1) * 6, 1)
+    # joint-limit/frictionloss (<= n_dofs each) + equality rows (<= 6 each) + tendon limit/frictionloss rows
+    # (<= n_tendons each). The equality term must use the candidate count (model equalities plus the dynamic-weld
+    # budget), not just the model equalities, otherwise constraint_id is undersized once dynamic welds are added and
+    # the per-island grouping writes out of bounds.
+    n_constraints_max = max(
+        max_candidate_contacts * 4 + 2 * n_dofs + max(solver.n_candidate_equalities_, 1) * 6 + 2 * solver.n_tendons_,
+        1,
+    )
     return IslandState(
         links_parent_idx=V(dtype=gs.qd_int, shape=maybe_shape((n_links, _B), is_active)),
         links_island_idx=V(dtype=gs.qd_int, shape=maybe_shape((n_links, _B), is_active)),
@@ -2170,6 +2174,145 @@ def get_equalities_info(solver):
     )
 
 
+# =========================================== SitesInfo ===========================================
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class SitesInfo:
+    # Persistent site table (a site is a frame rigidly attached to a link). Used by spatial tendons; world positions are
+    # recomputed each step from the owning link's transform.
+    link_idx: qd.Tensor  # (n_sites_,) owning link
+    pos: qd.Tensor  # (n_sites_,) vec3 local position in link frame
+    quat: qd.Tensor  # (n_sites_,) vec4 local orientation in link frame
+
+
+def get_sites_info(solver):
+    shape = (max(solver.n_sites_, 1),)
+    return SitesInfo(
+        link_idx=V(dtype=gs.qd_int, shape=shape),
+        pos=V(dtype=gs.qd_vec3, shape=shape),
+        quat=V(dtype=gs.qd_vec4, shape=shape),
+    )
+
+
+# =========================================== TendonsInfo ===========================================
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class TendonsInfo:
+    # Static per-tendon parameters. A tendon exposes a scalar length whose moment arm w.r.t. each DOF is recomputed
+    # each step into TendonsState.moment. For a FIXED tendon the length is L = sum_i coef_i * qpos_i and the moment is
+    # the constant coef; for a SPATIAL tendon the length is the geometric path length and the moment is computed from
+    # point Jacobians. Both share the `dof_idx` "relevant DOF" list (members for fixed; union of path-body parent
+    # chains for spatial) so all downstream (passive/actuator/constraints) is agnostic to the kind.
+    kind: qd.Tensor  # (n_tendons_,) gs.TENDON_TYPE
+    n_members: qd.Tensor  # (n_tendons_,) number of relevant DOFs
+    dof_idx: qd.Tensor  # (n_tendons_, max_members) global DOF index of each relevant DOF
+    coef: qd.Tensor  # (n_tendons_, max_members) fixed-tendon coefficient (unused for spatial)
+    q_idx: qd.Tensor  # (n_tendons_, max_members) global qpos index (fixed only)
+    # Spatial wrap path (ordered list of SITE / PULLEY / SPHERE / CYLINDER elements)
+    n_wraps: qd.Tensor  # (n_tendons_,)
+    wrap_type: qd.Tensor  # (n_tendons_, max_wraps) gs.WRAP_TYPE
+    wrap_objid: qd.Tensor  # (n_tendons_, max_wraps) global site idx for SITE elements; else -1
+    wrap_prm: qd.Tensor  # (n_tendons_, max_wraps) pulley divisor (PULLEY elements); else 0
+    wrap_sideid: qd.Tensor  # (n_tendons_, max_wraps) sidesite global site idx for SPHERE/CYLINDER; else -1
+    # Wrap geom (SPHERE/CYLINDER elements): stored as a frame on a link so the world pose is recomputed each step,
+    # independent of whether the geom collides (wrap geoms are usually non-colliding, i.e. visual-only in Genesis).
+    wrap_geom_link: qd.Tensor  # (n_tendons_, max_wraps) owning link; else -1
+    wrap_geom_pos: qd.Tensor  # (n_tendons_, max_wraps) vec3 local position of the geom in its link frame
+    wrap_geom_quat: qd.Tensor  # (n_tendons_, max_wraps) vec4 local orientation of the geom in its link frame
+    wrap_geom_radius: qd.Tensor  # (n_tendons_, max_wraps) wrap radius
+    # Passive dynamics
+    stiffness: qd.Tensor  # (n_tendons_,)
+    damping: qd.Tensor
+    springlength: qd.Tensor  # (n_tendons_,) vec2 deadband [lo, hi]; force is zero inside [lo, hi]
+    frictionloss: qd.Tensor
+    # Length limits
+    limited: qd.Tensor  # (n_tendons_,) int flag
+    limit: qd.Tensor  # (n_tendons_,) vec2 [lo, hi]
+    sol_params: qd.Tensor  # (n_tendons_,) vec7 solref/solimp for frictionloss
+    sol_params_limit: qd.Tensor  # (n_tendons_,) vec7 solref/solimp for limits
+    # Actuator transmission (affine: force = act_gain * ctrl + bias0 + bias1 * L + bias2 * V)
+    act_gain: qd.Tensor  # (n_tendons_,)
+    act_bias: qd.Tensor  # (n_tendons_,) vec3
+    force_range: qd.Tensor  # (n_tendons_,) vec2
+    length0: qd.Tensor  # (n_tendons_,) reference length at qpos0 (used by tendon equality constraints)
+
+
+def get_tendons_info(solver):
+    n_tendons = max(solver.n_tendons_, 1)
+    max_members = max(solver.tendon_max_members_, 1)
+    max_wraps = max(solver.tendon_max_wraps_, 1)
+    shape = (n_tendons,)
+    shape_members = (n_tendons, max_members)
+    shape_wraps = (n_tendons, max_wraps)
+
+    return TendonsInfo(
+        kind=V(dtype=gs.qd_int, shape=shape),
+        n_members=V(dtype=gs.qd_int, shape=shape),
+        dof_idx=V(dtype=gs.qd_int, shape=shape_members),
+        coef=V(dtype=gs.qd_float, shape=shape_members),
+        q_idx=V(dtype=gs.qd_int, shape=shape_members),
+        n_wraps=V(dtype=gs.qd_int, shape=shape),
+        wrap_type=V(dtype=gs.qd_int, shape=shape_wraps),
+        wrap_objid=V(dtype=gs.qd_int, shape=shape_wraps),
+        wrap_prm=V(dtype=gs.qd_float, shape=shape_wraps),
+        wrap_sideid=V(dtype=gs.qd_int, shape=shape_wraps),
+        wrap_geom_link=V(dtype=gs.qd_int, shape=shape_wraps),
+        wrap_geom_pos=V(dtype=gs.qd_vec3, shape=shape_wraps),
+        wrap_geom_quat=V(dtype=gs.qd_vec4, shape=shape_wraps),
+        wrap_geom_radius=V(dtype=gs.qd_float, shape=shape_wraps),
+        stiffness=V(dtype=gs.qd_float, shape=shape),
+        damping=V(dtype=gs.qd_float, shape=shape),
+        springlength=V(dtype=gs.qd_vec2, shape=shape),
+        frictionloss=V(dtype=gs.qd_float, shape=shape),
+        limited=V(dtype=gs.qd_int, shape=shape),
+        limit=V(dtype=gs.qd_vec2, shape=shape),
+        sol_params=V(dtype=gs.qd_vec7, shape=shape),
+        sol_params_limit=V(dtype=gs.qd_vec7, shape=shape),
+        act_gain=V(dtype=gs.qd_float, shape=shape),
+        act_bias=V(dtype=gs.qd_vec3, shape=shape),
+        force_range=V(dtype=gs.qd_vec2, shape=shape),
+        length0=V(dtype=gs.qd_float, shape=shape),
+    )
+
+
+# =========================================== TendonsState ===========================================
+
+
+@dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
+class TendonsState:
+    length: qd.Tensor  # (n_tendons_, _B)
+    velocity: qd.Tensor
+    moment: qd.Tensor  # (n_tendons_, n_dofs_, _B) per-step moment arm w.r.t. each DOF
+    ctrl_force: qd.Tensor
+    ctrl_pos: qd.Tensor
+    ctrl_vel: qd.Tensor
+    ctrl_mode: qd.Tensor
+    # World-space path points of a spatial tendon (sites + geom-wrap points), for debug visualization.
+    path_pos: qd.Tensor  # (n_tendons_, max_path_points, _B) vec3
+    path_num: qd.Tensor  # (n_tendons_, _B) number of valid path points (0 for fixed tendons)
+
+
+def get_tendons_state(solver):
+    shape = (max(solver.n_tendons_, 1), solver._B)
+    shape_moment = (max(solver.n_tendons_, 1), solver.n_dofs_, solver._B)
+    shape_path = (max(solver.n_tendons_, 1), max(solver.tendon_max_path_points_, 1), solver._B)
+    requires_grad = solver._requires_grad
+
+    return TendonsState(
+        length=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
+        velocity=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
+        moment=V(dtype=gs.qd_float, shape=shape_moment, needs_grad=requires_grad),
+        ctrl_force=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
+        ctrl_pos=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
+        ctrl_vel=V(dtype=gs.qd_float, shape=shape, needs_grad=requires_grad),
+        ctrl_mode=V(dtype=gs.qd_int, shape=shape),
+        path_pos=V(dtype=gs.qd_vec3, shape=shape_path),
+        path_num=V(dtype=gs.qd_int, shape=shape),
+    )
+
+
 # =========================================== EntitiesInfo ===========================================
 
 
@@ -2269,6 +2412,7 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     solver_type: int
     requires_grad: bool
     prefer_decomposed_solver: int = -1  # -1 = None (auto), 0 = False, 1 = True
+    n_tendons: int = 0  # number of fixed tendons; static loop bound for the tendon force/constraint kernels
     use_contact_island: bool = False  # per-island Newton solve (gated; the legacy island solver is retired)
     # Consecutive sub-tolerance steps a body's max DOF velocity must hold before it is ready to hibernate. Guards
     # against a body that is only momentarily slow (e.g. at the apex of a toss) sleeping prematurely.
@@ -2368,6 +2512,9 @@ class DataManager:
             self.fixed_verts_state = get_fixed_verts_state(solver)
 
             self.equalities_info = get_equalities_info(solver)
+            self.sites_info = get_sites_info(solver)
+            self.tendons_info = get_tendons_info(solver)
+            self.tendons_state = get_tendons_state(solver)
 
         if solver._static_rigid_sim_config.requires_grad:
             # Data structures required for backward pass

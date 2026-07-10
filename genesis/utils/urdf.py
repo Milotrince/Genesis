@@ -405,7 +405,10 @@ def parse_urdf(morph, surface):
 
     eqs_info = parse_equalities(robot, morph)
 
-    return l_infos, links_j_infos, links_g_infos, eqs_info
+    tendons_info = []  # URDF does not support tendons
+    sites_info = []  # URDF does not support sites
+
+    return l_infos, links_j_infos, links_g_infos, eqs_info, tendons_info, sites_info
 
 
 def parse_equalities(robot, morph):
