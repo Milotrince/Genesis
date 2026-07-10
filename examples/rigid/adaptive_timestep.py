@@ -6,19 +6,20 @@ import numpy as np
 import genesis as gs
 import genesis.vis.keybindings as kb
 from genesis.utils.misc import qd_to_numpy
+from genesis.recorders.plotters import IS_MATPLOTLIB_AVAILABLE, IS_PYQTGRAPH_AVAILABLE
 
 ##### Per-island adaptive timestep demo #####
-# A pile of stacked boxes plus objects scattered across the plane, with a sphere dropped onto the pile. With adaptive
-# timestep on, each contact island integrates at macro_dt / rate: the resting scattered objects stay at the macro
-# timestep while the falling sphere (and the pile it hits) sub-step. The per-island timesteps are read back through the
-# solver's internal `dofs_rate` field (deliberately jank - nothing is added to the engine to expose them) and streamed
-# to a live matplotlib line plot via the recorder system. Enable the 3D viewer with --vis to drag objects around with
-# the mouse (MouseInteractionPlugin) and watch the timesteps react; press Esc to quit.
+# A pile of stacked boxes plus objects scattered across the plane, with a small sphere dropped onto the pile. With
+# adaptive timestep on, each contact island integrates at macro_dt / rate, chosen automatically from a geometry CFL
+# (no per-scene tuning): the resting scattered objects stay at the macro timestep while the fast-falling sphere (and
+# the pile it hits) sub-step. With --vis the per-island timesteps are read back through the solver's internal
+# `dofs_rate` field (deliberately jank - nothing is added to the engine to expose them) and streamed to a live line
+# plot; drag objects around with the mouse (MouseInteractionPlugin) and watch the timesteps react, Esc to quit.
 
 
 def main():
     parser = argparse.ArgumentParser(description="Per-island adaptive timestep demo with a live timestep plot.")
-    parser.add_argument("--vis", "-v", action="store_true", help="Show the interactive 3D viewer (mouse-draggable).")
+    parser.add_argument("--vis", "-v", action="store_true", help="Show the interactive 3D viewer + live timestep plot.")
     parser.add_argument(
         "--adaptive",
         action=argparse.BooleanOptionalAction,
@@ -36,8 +37,6 @@ def main():
         ),
         rigid_options=gs.options.RigidOptions(
             use_adaptive_timestep=args.adaptive,
-            adaptive_timestep_max_rate=8,
-            adaptive_timestep_ref_speed=0.5,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(6.0, 0.0, 3.0),
@@ -71,11 +70,12 @@ def main():
         scene.add_entity(gs.morphs.Sphere(radius=0.12, pos=(-1.4, -0.7, 0.12))),
     ]
 
-    # A sphere dropped onto the pile: fast while falling and on impact (small dt), settling back to the macro dt.
+    # A small sphere dropped from high up: it falls fast relative to its size, so the geometry CFL sub-steps its island
+    # during the fall and impact, then relaxes it back to the macro timestep once it settles.
     faller = scene.add_entity(
         gs.morphs.Sphere(
-            radius=0.12,
-            pos=(0.06, 0.0, 1.8),
+            radius=0.05,
+            pos=(0.06, 0.0, 2.0),
         ),
     )
 
@@ -100,17 +100,24 @@ def main():
     def plot_data():
         return latest_dts[0]
 
-    scene.start_recording(
-        plot_data,
-        gs.recorders.MPLLinePlot(
+    recording = False
+    if args.vis:
+        plot_kwargs = dict(
             title=f"Per-island timestep ({'adaptive' if args.adaptive else 'uniform'})",
             labels=labels,
             x_label="step",
             y_label="island timestep dt (s)",
             hz=30.0,
             history_length=2000,
-        ),
-    )
+        )
+        if IS_PYQTGRAPH_AVAILABLE:
+            scene.start_recording(plot_data, gs.recorders.PyQtLinePlot(**plot_kwargs))
+            recording = True
+        elif IS_MATPLOTLIB_AVAILABLE:
+            scene.start_recording(plot_data, gs.recorders.MPLLinePlot(**plot_kwargs))
+            recording = True
+        else:
+            print("matplotlib or pyqtgraph not found, skipping the live timestep plot.")
 
     scene.build(n_envs=1)
 
@@ -137,16 +144,17 @@ def main():
             scene.step()
             step += 1
 
-            # Jank: read the per-DOF rate straight out of the solver's island state to recover each island's timestep.
-            # dofs_rate is only allocated when adaptive timestep is on; without it every island runs at the macro dt.
-            if args.adaptive:
-                dofs_rate = qd_to_numpy(island_state.dofs_rate, transpose=True)  # [B, n_dofs]
-                latest_dts[0] = np.array(
-                    [macro_dt / max(int(dofs_rate[0, dof]), 1) for dof in tracked_dofs],
-                    dtype=gs.np_float,
-                )
-            else:
-                latest_dts[0] = np.full(len(tracked_dofs), macro_dt)
+            if recording:
+                # Jank: read the per-DOF rate straight out of the solver's island state to recover each island's dt.
+                # dofs_rate is only allocated when adaptive timestep is on; without it every island runs at the macro dt.
+                if args.adaptive:
+                    dofs_rate = qd_to_numpy(island_state.dofs_rate, transpose=True)  # [B, n_dofs]
+                    latest_dts[0] = np.array(
+                        [macro_dt / max(int(dofs_rate[0, dof]), 1) for dof in tracked_dofs],
+                        dtype=gs.np_float,
+                    )
+                else:
+                    latest_dts[0] = np.full(len(tracked_dofs), macro_dt)
 
             if "PYTEST_VERSION" in os.environ:
                 break
@@ -156,7 +164,8 @@ def main():
     except KeyboardInterrupt:
         gs.logger.info("Simulation interrupted, exiting.")
     finally:
-        scene.stop_recording()
+        if recording:
+            scene.stop_recording()
 
 
 if __name__ == "__main__":

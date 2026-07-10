@@ -207,6 +207,17 @@ class Simulator(RBC):
                     self._rigid_only = False
         self._coupler.build()
 
+        # Adaptive per-island timestep sub-steps the rigid solver internally, but a coupler (SAP/IPC, or any non-rigid
+        # solver via the legacy coupler) exchanges momentum only at the macro timestep, so the sub-steps would be
+        # invisible to the other physics. Fall back to uniform stepping in that case (checked here because _rigid_only
+        # is only final once every solver has been built).
+        if self.rigid_solver._use_adaptive_timestep and not self._rigid_only:
+            gs.logger.warning(
+                "`use_adaptive_timestep` is only supported for rigid-only scenes (a coupler exchanges momentum at the "
+                "macro timestep); falling back to uniform stepping."
+            )
+            self.rigid_solver._use_adaptive_timestep = False
+
         if self.n_envs > 0 and self.sf_solver.is_active:
             gs.raise_exception("Batching is not supported for SF solver as of now.")
 
