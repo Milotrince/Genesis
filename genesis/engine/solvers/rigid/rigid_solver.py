@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Literal
 import quadrants as qd
 import numpy as np
 import torch
+import trimesh
 
 import genesis as gs
 import genesis.utils.array_class as array_class
@@ -23,15 +24,32 @@ from genesis.utils.misc import (
     broadcast_tensor,
     sanitize_indexed_tensor,
     assign_indexed_tensor,
+    tensor_to_array,
     get_gpu_core_count,
     fits_in_gpu_shared_memory,
 )
 from genesis.utils.sdf import SDF
 
 from ..base_solver import Solver, StateChange, mutates
-from ..kinematic_solver import KinematicSolver, _select_links_offset, _offset_world_shift, _fill_base_link_geom_offsets
+from ..kinematic_solver import (
+    KinematicSolver,
+    _select_links_offset,
+    _offset_world_shift,
+    _fill_base_link_geom_offsets,
+    _update_geom_active_envs,
+)
 from .collider import Collider
 from .constraint import ConstraintSolver
+from .geom_pool_kernels import (
+    kernel_entity_aabb_per_env,
+    kernel_init_pool_geom_defaults,
+    kernel_init_pool_vgeoms,
+    kernel_set_pool_scale,
+    kernel_update_pool_geoms,
+    kernel_upload_geom_slot,
+    kernel_upload_sdf_slot,
+    kernel_upload_vert_slot,
+)
 from .abd.misc import (
     func_add_safe_backward,
     func_apply_coupling_force,
@@ -132,6 +150,9 @@ from .abd.accessor import (
     kernel_wake_up_entities_by_qs,
     kernel_wake_up_entities_on_new_contact,
     kernel_set_geoms_friction_ratio,
+    kernel_set_geoms_scale,
+    kernel_set_vgeoms_scale,
+    kernel_set_links_inertial,
     kernel_set_qpos,
     kernel_set_global_sol_params,
     kernel_set_sol_params,
@@ -250,6 +271,11 @@ class RigidSolver(KinematicSolver):
         self._box_box_detection = options.box_box_detection
         self._requires_grad = self._sim.options.requires_grad
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
+        self._enable_geom_scaling = options.enable_geom_scaling  # per-env runtime geom scale (set_scale)
+        # Dynamic geometry residency pool (Phase 3). Declared per-entity via add_entity(geom_pool=...), which
+        # flips _enable_geom_pool; the aggregated static layout is built in build() once real counts are known.
+        self._enable_geom_pool = False
+        self._geom_pool = None
 
         # Contact islands are off by default (opt in explicitly). The gate further below still disables them under
         # requires_grad (the differentiable adjoint reads the dense global Hessian) and for single-island scenes
@@ -285,12 +311,23 @@ class RigidSolver(KinematicSolver):
     def init_ckpt(self):
         pass
 
-    def add_entity(self, idx, material, morph, surface, visualize_contact, name: str | None = None) -> RigidEntity:
+    def add_entity(
+        self, idx, material, morph, surface, visualize_contact, name: str | None = None, *, geom_pool=None
+    ) -> RigidEntity:
         # Handle heterogeneous morphs (list/tuple of morphs)
         morph_heterogeneous = []
         if isinstance(morph, (tuple, list)):
             morph, *morph_heterogeneous = morph
             self._enable_heterogeneous |= bool(morph_heterogeneous)
+
+        # A per-entity geometry pool (Phase 3) reserves runtime-swappable slots bound to this entity's base
+        # link; enabling it forces the same batched-links_info / SAP path heterogeneous variants use. As a
+        # shorthand, a bare list of object morphs is promoted to a GeomPoolOptions that auto-sizes the pool.
+        if isinstance(geom_pool, (list, tuple)):
+            geom_pool = gs.options.GeomPoolOptions(objects=list(geom_pool))
+        pool_enabled = geom_pool is not None and bool(geom_pool.n_slots or geom_pool.objects)
+        if pool_enabled:
+            self._enable_geom_pool = True
 
         if isinstance(morph, gs.morphs.Drone):
             EntityClass = DroneEntity
@@ -325,6 +362,7 @@ class RigidSolver(KinematicSolver):
             custom_vface_start=self.n_custom_vfaces,
             visualize_contact=visualize_contact,
             morph_heterogeneous=morph_heterogeneous,
+            geom_pool=geom_pool if pool_enabled else None,
             name=name,
         )
         assert isinstance(entity, RigidEntity)
@@ -345,13 +383,65 @@ class RigidSolver(KinematicSolver):
         self._geoms = self.geoms
         self._equalities = self.equalities
 
-        self.n_geoms_ = max(1, self.n_geoms)
-        self.n_cells_ = max(1, self.n_cells)
-        self.n_verts_ = max(1, self.n_verts)
-        self.n_faces_ = max(1, self.n_faces)
-        self.n_edges_ = max(1, self.n_edges)
-        self.n_free_verts_ = max(1, self.n_free_verts)
-        self.n_fixed_verts_ = max(1, self.n_fixed_verts)
+        # Reserve a dynamic geometry pool block (Phase 3) appended to the global arrays. The logical _n_*
+        # counts stay at the real entity count (so n_geoms == len(geoms) and Python-side iteration is
+        # unaffected); only the device ALLOCATION sizes (n_*_) grow by the reserved block, giving kernels
+        # (which bound on field .shape[0]) extra rows to hold runtime uploads. Base indices are the first free
+        # row after the real entities. Reserved rows stay zero (inert: a zero quat rotates to a finite point
+        # and contype == conaffinity == 0 yields no collision pairs) until set_active_object fills a slot.
+        pool_geoms = pool_cells = pool_verts = pool_free_verts = pool_faces = pool_edges = 0
+        if self._enable_geom_pool:
+            from .geom_pool import GeometryPool
+
+            # Aggregate every poolable entity's per-entity pool into one contiguous reserved block, starting at
+            # the first free row in each global array. Each segment's slots are bound to that entity's base
+            # link, so a slot's owning link is known at build (collision-pair validity precomputes cleanly).
+            self._geom_pool = GeometryPool(
+                base={
+                    "geom": self._n_geoms,
+                    "vert": self._n_verts,
+                    "face": self._n_faces,
+                    "edge": self._n_edges,
+                    "cell": self._n_cells,
+                    "free_vert": self._n_free_verts,
+                    # Visual pooling reserves vgeom rows appended to the global vgeom array; the vgeom count is
+                    # an entity-sum property readable pre-build. n_vgeoms_ is bumped in KinematicSolver.build.
+                    "vgeom": self.n_vgeoms,
+                }
+            )
+            for entity in self._entities:
+                if entity._geom_pool_options is not None:
+                    options = entity._geom_pool_options
+                    # When a catalog is declared, process each object once now, cache it, and derive the
+                    # per-slot budgets + slot count from the set (see _pool_derive_from_objects).
+                    per_slot, n_slots, declared = (None, None, None)
+                    if options.objects:
+                        per_slot, declared = self._pool_derive_from_objects(entity, options.objects)
+                        n_slots = int(options.n_slots) or len(options.objects)
+                    segment = self._geom_pool.add_segment(
+                        entity_idx=entity._idx_in_solver,
+                        link_idx=entity.base_link.idx,
+                        entity=entity,
+                        options=options,
+                        per_slot=per_slot,
+                        n_slots=n_slots,
+                    )
+                    if declared is not None:
+                        segment.declared = declared
+            pool_geoms = self._geom_pool.n_geoms
+            pool_cells = self._geom_pool.n_cells
+            pool_verts = self._geom_pool.n_verts
+            pool_free_verts = self._geom_pool.n_free_verts
+            pool_faces = self._geom_pool.n_faces
+            pool_edges = self._geom_pool.n_edges
+
+        self.n_geoms_ = max(1, self._n_geoms + pool_geoms)
+        self.n_cells_ = max(1, self._n_cells + pool_cells)
+        self.n_verts_ = max(1, self._n_verts + pool_verts)
+        self.n_faces_ = max(1, self._n_faces + pool_faces)
+        self.n_edges_ = max(1, self._n_edges + pool_edges)
+        self.n_free_verts_ = max(1, self._n_free_verts + pool_free_verts)
+        self.n_fixed_verts_ = max(1, self._n_fixed_verts)
         self.n_candidate_equalities_ = max(1, self.n_equalities + self._options.max_dynamic_constraints)
 
         # Resolve precision-dependent tolerance default
@@ -366,6 +456,14 @@ class RigidSolver(KinematicSolver):
         self._init_geom_fields()
         self._init_equality_fields()
         self._init_dof_length()
+
+        # Seed the reserved pool block to finite defaults (identity quats) so unfilled slots pose to a finite
+        # AABB rather than NaN. The init kernels above only touch the real geoms.
+        if self._enable_geom_pool:
+            kernel_init_pool_geom_defaults(
+                self._n_geoms, self.n_geoms_, self.geoms_info, self.geoms_state, self._static_rigid_sim_config
+            )
+            self._init_pool_vgeoms()
 
         self._init_invweight_and_meaninertia(force_update=False)
         self._func_update_geoms(self._scene._envs_idx, force_update_fixed_geoms=True)
@@ -406,7 +504,9 @@ class RigidSolver(KinematicSolver):
         # in the current batch element. Per-batch lists multiply the memory footprint by the batch size, increasing
         # memory usage, and increasing L1/L2 cache contention. Runtime filtering keeps the single list, but it will
         # no longer be compact, and we will have thread divergence.
-        if gs.backend == gs.cpu or self._use_hibernation or self._enable_heterogeneous:
+        # A dynamic geometry pool binds different slots to different envs at runtime (like heterogeneous
+        # variants), so per-batch geom sets diverge and the single global valid-pair list requires SAP.
+        if gs.backend == gs.cpu or self._use_hibernation or self._enable_heterogeneous or self._enable_geom_pool:
             return gs.broadphase_traversal.SAP
         return gs.broadphase_traversal.ALL_VS_ALL
 
@@ -531,6 +631,7 @@ class RigidSolver(KinematicSolver):
             ),
             enable_cooperative_constraint_kernels=enable_cooperative_constraint_kernels,
             constraint_layout_batch_first=constraint_layout_batch_first,
+            enable_geom_scaling=self._enable_geom_scaling,
         )
 
         # Prefer the monolith solver on CPU (always faster there, perf dispatch is a waste of effort)
@@ -928,61 +1029,42 @@ class RigidSolver(KinematicSolver):
 
         self._rigid_global_info.gravity.from_numpy(self.gravity)
 
-    def _dispatch_heterogeneous_vgeoms(self):
+    def _bind_link_variant(self, link, variant_idx, envs_idx):
+        """Bind a per-environment variant selection for one link.
+
+        Extends the base (vgeom ranges + active-env masks) to also bind collision geom ranges and
+        per-variant inertial (mass/COM/orientation/tensor). Per-variant inertial is pre-computed during
+        link._build() from the variant geoms, using analytic formulas for primitives. Shared by
+        build-time dispatch and runtime rebind; 'variant_idx[i]' is the variant used by 'envs_idx[i]'.
         """
-        Dispatch per-environment geom/vgeom ranges and inertial properties for heterogeneous links.
+        geom_starts = np.array([link._variant_geom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
+        geom_ends = np.array([link._variant_geom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
+        vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
+        vgeom_ends = np.array([link._variant_vgeom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
+        links_inertial_mass = np.array([link._variant_inertial[v][0] for v in variant_idx], dtype=gs.np_float)
+        links_inertial_pos = np.array([link._variant_inertial[v][1] for v in variant_idx], dtype=gs.np_float)
+        links_inertial_quat = np.array([link._variant_inertial[v][2] for v in variant_idx], dtype=gs.np_float)
+        links_inertial_i = np.array([link._variant_inertial[v][3] for v in variant_idx], dtype=gs.np_float)
 
-        Extends the base class (which handles vgeom-only dispatch) to also dispatch collision geom
-        ranges and per-variant inertial properties. Per-variant inertial is pre-computed during
-        link._build() from actual geom objects, using analytic formulas for primitives.
-        """
-        from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
+        # When batch_links_info is True, links_info has shape (n_links, B) so each env holds its variant.
+        kernel_update_heterogeneous_link_info(
+            link.idx,
+            envs_idx,
+            geom_starts,
+            geom_ends,
+            vgeom_starts,
+            vgeom_ends,
+            links_inertial_mass,
+            links_inertial_pos,
+            links_inertial_quat,
+            links_inertial_i,
+            self.links_info,
+        )
 
-        for link in self.links:
-            if link._variant_vgeom_ranges is None:
-                continue
-
-            n_variants = len(link._variant_vgeom_ranges)
-            variant_idx = _balanced_variant_mapping(n_variants, self._B)
-
-            # Build per-env arrays from link's variant data
-            geom_starts = np.array([link._variant_geom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
-            geom_ends = np.array([link._variant_geom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
-            vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
-            vgeom_ends = np.array([link._variant_vgeom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
-
-            # Build per-env inertial arrays from pre-computed per-variant inertial
-            links_inertial_mass = np.array([link._variant_inertial[v][0] for v in variant_idx], dtype=gs.np_float)
-            links_inertial_pos = np.array([link._variant_inertial[v][1] for v in variant_idx], dtype=gs.np_float)
-            links_inertial_quat = np.array([link._variant_inertial[v][2] for v in variant_idx], dtype=gs.np_float)
-            links_inertial_i = np.array([link._variant_inertial[v][3] for v in variant_idx], dtype=gs.np_float)
-
-            # Update links_info with per-environment values
-            # Note: when batch_links_info is True, the shape is (n_links, B)
-            kernel_update_heterogeneous_link_info(
-                link.idx,
-                geom_starts,
-                geom_ends,
-                vgeom_starts,
-                vgeom_ends,
-                links_inertial_mass,
-                links_inertial_pos,
-                links_inertial_quat,
-                links_inertial_i,
-                self.links_info,
-            )
-
-            # Set active_envs on geoms — indicates which environments each geom is active in
-            for geom in link.geoms:
-                active_envs_mask = (geom_starts <= geom.idx) & (geom.idx < geom_ends)
-                geom.active_envs_mask = torch.tensor(active_envs_mask, device=gs.device)
-                (geom.active_envs_idx,) = np.where(active_envs_mask)
-
-            # Set active_envs on vgeoms
-            for vgeom in link.vgeoms:
-                active_envs_mask = (vgeom_starts <= vgeom.idx) & (vgeom.idx < vgeom_ends)
-                vgeom.active_envs_mask = torch.tensor(active_envs_mask, device=gs.device)
-                (vgeom.active_envs_idx,) = np.where(active_envs_mask)
+        for geom in link.geoms:
+            _update_geom_active_envs(geom, geom_starts, geom_ends, envs_idx, self._B)
+        for vgeom in link.vgeoms:
+            _update_geom_active_envs(vgeom, vgeom_starts, vgeom_ends, envs_idx, self._B)
 
     def _init_vert_fields(self):
         self.verts_info = self.data_manager.verts_info
@@ -1224,6 +1306,10 @@ class RigidSolver(KinematicSolver):
             self._is_backward,
         )
 
+        # kernel_step_1 poses only the entity geoms (its FK iterates entity ranges); pose the reserved pool
+        # block from its links and refresh its AABB before collision detection reads them.
+        self._func_update_pool_geoms()
+
         if isinstance(self.sim.coupler, SAPCoupler):
             update_qvel(
                 self.dofs_state,
@@ -1404,6 +1490,96 @@ class RigidSolver(KinematicSolver):
             self._static_rigid_sim_config,
             force_update_fixed_geoms,
         )
+        # The reserved geometry-pool block lies outside every entity's contiguous geom range, so the
+        # entity-based pass above skips it. Pose those geoms from their owning link (set at upload; link 0 and
+        # inert while a slot is empty). Small extra pass, only when a pool is reserved.
+        self._func_update_pool_geoms()
+
+    def get_entity_aabb_per_env(self, entity, envs_idx=None):
+        """Per-env AABB of a geometry-pool entity, reduced over the geoms active in each env.
+
+        The entity's per-env active geoms live in `links_info.geom_start/end` (the bound pool slot for its base
+        link, static ranges for any other link), so aggregate the device `geoms_state.aabb_min/max` over those
+        ranges rather than the entity's contiguous build-time range.
+        """
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        aabb = torch.empty((len(envs_idx), 2, 3), dtype=gs.tc_float, device=gs.device)
+        kernel_entity_aabb_per_env(
+            entity._link_start,
+            entity._link_start + entity.n_links,
+            tensor_to_array(envs_idx),
+            self.links_info,
+            self.geoms_state,
+            aabb,
+            self._static_rigid_sim_config,
+        )
+        return aabb
+
+    def _init_pool_vgeoms(self):
+        """Create placeholder visual geoms for reserved vgeom slots (visual pooling) and seed their device rows.
+
+        A per-slot RigidVisGeom placeholder (host trimesh, swapped on set_active_object) is appended to its
+        entity's vgeom list so the rasterizer renders it; per-env visibility is driven by its active_envs_mask
+        (all-False until a slot is bound to an env). Rigid visual pooling uses the host trimesh + the device
+        vgeom pose, so no device vvert data is needed. No-op when no slot reserves visual geometry.
+        """
+        import genesis.utils.mesh as mu
+        from genesis.engine.entities.rigid_entity.rigid_geom import RigidVisGeom
+
+        if self._geom_pool is None or self._geom_pool.n_vgeoms == 0:
+            return
+
+        placeholder_mesh = gs.Mesh.from_trimesh(
+            mu.create_box(extents=(1e-3, 1e-3, 1e-3)), surface=gs.surfaces.Default()
+        )
+        vgeom_idx_all, link_idx_all = [], []
+        for seg in self._geom_pool.segments:
+            if seg.per_slot["vgeom"] == 0:
+                continue
+            base_link = seg.entity.base_link
+            # Make the entity's base (morph) vgeoms maskable so they can be hidden per env once a pooled object
+            # is shown there. An all-True mask renders everywhere (visible) but via per-env nodes on_rigid can
+            # later cull; without a mask on_rigid would build an env-shared node that cannot be hidden per env.
+            for base_vgeom in seg.entity.vgeoms:
+                if base_vgeom.active_envs_mask is None:
+                    base_vgeom.active_envs_mask = torch.ones(self._B, dtype=torch.bool, device=gs.device)
+                    (base_vgeom.active_envs_idx,) = np.where(tensor_to_array(base_vgeom.active_envs_mask))
+            for slot in range(seg.n_slots):
+                vgeom_range = seg.slots[slot].vgeom
+                # One placeholder per slot (the object's merged visual mesh); extra reserved vgeom rows stay
+                # inert. It renders nowhere until set_active_object sets its mesh + active_envs.
+                placeholder = RigidVisGeom(
+                    base_link, vgeom_range[0], 0, 0, placeholder_mesh, gu.zero_pos(), gu.identity_quat()
+                )
+                placeholder._is_pool_slot = True
+                placeholder.active_envs_mask = torch.zeros(self._B, dtype=torch.bool, device=gs.device)
+                placeholder.active_envs_idx = np.zeros(0, dtype=gs.np_int)
+                seg.vgeom_placeholders[slot] = placeholder
+                seg.entity._vgeoms.append(placeholder)
+                for i in range(vgeom_range[0], vgeom_range[1]):
+                    vgeom_idx_all.append(i)
+                    link_idx_all.append(base_link.idx)
+
+        kernel_init_pool_vgeoms(
+            np.array(vgeom_idx_all, dtype=gs.np_int),
+            np.array(link_idx_all, dtype=gs.np_int),
+            self.vgeoms_info,
+            self.vgeoms_state,
+            self._static_rigid_sim_config,
+        )
+
+    def _func_update_pool_geoms(self):
+        """Pose the reserved geometry-pool block from its links and refresh its AABBs (no-op without a pool)."""
+        if self._enable_geom_pool:
+            kernel_update_pool_geoms(
+                self._n_geoms,
+                self.n_geoms_,
+                self.geoms_state,
+                self.geoms_info,
+                self.geoms_init_AABB,
+                self.links_state,
+                self._static_rigid_sim_config,
+            )
 
     def apply_links_external_force(
         self,
@@ -2505,6 +2681,658 @@ class RigidSolver(KinematicSolver):
             self._is_forward_pos_updated = False
             self._is_forward_vel_updated = False
 
+    @mutates(StateChange.GEOMETRY)
+    def set_active_variant(self, entity, variant_idx, envs_idx=None):
+        """Rebind which heterogeneous geometry variant each selected environment simulates, at runtime.
+
+        Rewrites the per-environment geom/vgeom ranges and inertial for every heterogeneous link of
+        'entity', then refreshes the inertia-derived quantities (invweight/meaninertia), contact caches
+        and geom poses for the selected environments. The joint configuration is preserved. All variants
+        must already be resident (declared at build via 'morph=[...]'); this only rebinds the active one.
+        'variant_idx' is a single index applied to all selected environments, or one index per selected
+        environment (variant 0 is the primary morph, 1..N the additional variants).
+        """
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        n_variants = len(entity._morph_heterogeneous) + 1
+        if isinstance(variant_idx, torch.Tensor):
+            variant_idx = tensor_to_array(variant_idx)
+        variant_idx = np.broadcast_to(np.atleast_1d(variant_idx).astype(gs.np_int), (len(envs_idx),))
+        if ((variant_idx < 0) | (variant_idx >= n_variants)).any():
+            gs.raise_exception(f"variant_idx must be in [0, {n_variants}) for this entity.")
+        envs_idx_np = tensor_to_array(envs_idx)
+
+        for link in entity.links:
+            if link._variant_vgeom_ranges is None:
+                continue
+            self._bind_link_variant(link, variant_idx, envs_idx_np)
+
+        # The inertial changed, so the neutral-rest invweight/meaninertia must be recomputed. That routine
+        # momentarily drives the selected environments to qpos0, so the current joint configuration is saved
+        # and restored; the restoring set_qpos also resets contact caches and re-runs forward kinematics to
+        # refresh geom poses and AABBs for the newly bound geometry.
+        if self._n_dofs > 0:
+            restore_envs = envs_idx if self.n_envs > 0 else None
+            qpos_saved = qd_to_torch(self.qpos, envs_idx, transpose=True, copy=True)
+            if self.n_envs == 0:
+                qpos_saved = qpos_saved[0]
+            self._init_invweight_and_meaninertia(envs_idx=restore_envs)
+            self.set_qpos(qpos_saved, envs_idx=restore_envs)
+        else:
+            if self.collider is not None:
+                self.collider.reset(envs_idx)
+            if self.constraint_solver is not None:
+                self.constraint_solver.reset(envs_idx)
+
+    def set_active_object(self, entity, object_ref, envs_idx=None):
+        """Load a processed object into the entity's geometry pool and bind the selected environments to it.
+
+        The object (a `gs.morphs.Mesh` or `gs.morphs.Primitive`) is processed to collision geometry, uploaded
+        into a free pool slot (reused if the same object is already resident), and the selected environments
+        are rebound to it via the same machinery as `set_active_variant`. The joint configuration is preserved;
+        the object inherits the poolable entity's collision filters (contype/conaffinity) and base link.
+        Requires the entity to have been built with `add_entity(geom_pool=...)`.
+        """
+        if self._geom_pool is None:
+            gs.raise_exception("set_active_object requires an entity built with add_entity(geom_pool=...).")
+        segment = self._geom_pool.segment_for_entity(entity._idx_in_solver)
+        if segment is None:
+            gs.raise_exception(f"Entity '{entity.name}' has no geometry pool.")
+
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        envs_idx_np = tensor_to_array(envs_idx)
+
+        # Release the selected envs from their current slots first, so any slot they fully vacate becomes
+        # evictable and can be reused for this object (its refcount drops to 0 before acquire runs).
+        self._pool_release_envs(segment, envs_idx_np)
+
+        # Resolve (or fill) the slot holding this object. A slot is keyed by the morph object's id; the segment
+        # keeps a reference to each resident morph (resident_morph) so its id stays valid while resident -
+        # otherwise a garbage-collected transient morph's id could be reused by a later one, aliasing slots.
+        # Re-binding the same morph reuses its slot; uploading happens only the first time it is made resident.
+        key = id(object_ref)
+        slot = segment.key_to_slot.get(key)
+        if slot is None:
+            slot = self._pool_acquire_slot(segment)
+            inertial, n_live = self._pool_upload_object(entity, segment, slot, object_ref)
+            segment.resident_key[slot] = key
+            segment.resident_morph[slot] = object_ref
+            segment.inertial[slot] = inertial
+            segment.n_live_geoms[slot] = n_live
+            segment.key_to_slot[key] = slot
+        # Mark most-recently-used (tail of the LRU list) and account the new env bindings.
+        if slot in segment.lru:
+            segment.lru.remove(slot)
+        segment.lru.append(slot)
+        for env in envs_idx_np:
+            segment.env_slot[int(env)] = slot
+            segment.refcount[slot] += 1
+
+        # Bind the selected envs to the slot's geom range + inertial (reuse the heterogeneous rebind kernel),
+        # then refresh inertia-derived quantities and reset caches exactly like set_active_variant.
+        self._pool_bind_slot(entity, segment, slot, envs_idx_np)
+        self._pool_bind_visual(entity, segment, slot, envs_idx_np)
+
+        if self._n_dofs > 0:
+            restore_envs = envs_idx if self.n_envs > 0 else None
+            qpos_saved = qd_to_torch(self.qpos, envs_idx, transpose=True, copy=True)
+            if self.n_envs == 0:
+                qpos_saved = qpos_saved[0]
+            self._init_invweight_and_meaninertia(envs_idx=restore_envs)
+            self.set_qpos(qpos_saved, envs_idx=restore_envs)
+        else:
+            if self.constraint_solver is not None:
+                self.constraint_solver.reset(envs_idx)
+
+        # The bound geom SET changed (not just poses), so the SAP broadphase sort buffer must be rebuilt for
+        # the rebound envs. set_qpos only clears the contact cache (cache_only=True); force first_time=True so
+        # the next broadphase re-reads the new per-env link geom ranges.
+        if self.collider is not None:
+            self.collider.reset(envs_idx, cache_only=False)
+
+        # Pose the just-bound slot geoms and refresh their AABBs so getters/rendering are correct before the
+        # next step (the per-substep pass would otherwise be the first to touch them).
+        self._func_update_pool_geoms()
+
+    def _pool_release_envs(self, segment, envs_idx_np):
+        """Drop the given envs' bindings to their current slots, decrementing per-slot refcounts."""
+        for env in envs_idx_np:
+            prev = segment.env_slot.pop(int(env), None)
+            if prev is not None:
+                segment.refcount[prev] -= 1
+
+    def _pool_acquire_slot(self, segment):
+        """Return a slot for a new object: a free slot, else the LRU evictable slot (refcount 0, unpinned).
+
+        Raises when every slot is currently bound to an environment or pinned.
+        """
+        for slot in range(segment.n_slots):
+            if segment.resident_key[slot] is None:
+                return slot
+        # Full: evict the least-recently-used slot no env is bound to and that is not pinned.
+        for slot in segment.lru:
+            if segment.refcount[slot] == 0 and not segment.pinned[slot]:
+                segment.key_to_slot.pop(segment.resident_key[slot], None)
+                segment.resident_key[slot] = None
+                segment.resident_morph[slot] = None
+                segment.inertial[slot] = None
+                segment.n_live_geoms[slot] = 0
+                return slot
+        gs.raise_exception(
+            f"Geometry pool for this entity is full: all {segment.n_slots} slots are bound to an environment "
+            "or pinned, so none can be evicted. Increase GeomPoolOptions.n_slots, or unbind/unpin some objects."
+        )
+
+    def _pool_process_object(self, entity, object_ref):
+        """Load + postprocess a pool-object morph into (cg_infos, vg_infos); pure preprocessing, no slot writes.
+
+        This is the nondeterministic step (convex decomposition, decimation), so declared objects run it once
+        at build (`_pool_derive_from_objects`) and cache the result in `segment.declared`.
+        """
+        if isinstance(object_ref, gs.morphs.Mesh):
+            g_infos = entity._load_mesh(object_ref, entity._surface, load_geom_only_for_heterogeneous=True)
+        elif isinstance(object_ref, gs.morphs.Primitive):
+            g_infos = entity._load_primitive(object_ref, entity._surface, load_geom_only_for_heterogeneous=True)
+        else:
+            gs.raise_exception("set_active_object only supports gs.morphs.Mesh and gs.morphs.Primitive objects.")
+        return entity._postprocess_geoms_info(object_ref, g_infos, is_robot=False)
+
+    def _pool_make_geom(self, entity, g_info, idx, vert_start, face_start, edge_start, cell_start, verts_state_start):
+        """Build one transient RigidGeom from a processed geom info at the given (slot) array indices.
+
+        It is not appended to any link - it just reuses the full geom preprocessing (vert/face/edge/normal
+        extraction, data padding, center of mass). The size fields (n_verts/faces/edges/cells) are
+        mesh-intrinsic and independent of the passed indices, so measurement can pass zeros.
+        """
+        from genesis.engine.entities.rigid_entity.rigid_geom import RigidGeom
+
+        friction = entity.material.friction
+        return RigidGeom(
+            link=entity.base_link,
+            idx=idx,
+            cell_start=cell_start,
+            vert_start=vert_start,
+            face_start=face_start,
+            edge_start=edge_start,
+            verts_state_start=verts_state_start,
+            mesh=g_info["mesh"],
+            init_pos=g_info.get("pos", gu.zero_pos()),
+            init_quat=g_info.get("quat", gu.identity_quat()),
+            type=g_info["type"],
+            friction=friction if friction is not None else g_info.get("friction", gu.default_friction()),
+            sol_params=g_info["sol_params"],
+            needs_coup=entity.material.needs_coup,
+            contype=entity._morph.contype,
+            conaffinity=entity._morph.conaffinity,
+            data=g_info.get("data"),
+        )
+
+    def _pool_derive_from_objects(self, entity, objects):
+        """Process each declared object once and derive per-slot budgets + the residency cache from the set.
+
+        Returns (per_slot, declared): per_slot is the per-array-key maximum over the catalog (so every declared
+        object fits a slot), and declared maps id(morph) -> (cg_infos, vg_infos) for reuse at upload time.
+        """
+        per_slot = {key: 0 for key in ("geom", "vert", "face", "edge", "cell", "free_vert", "vgeom")}
+        declared = {}
+        for object_ref in objects:
+            cg_infos, vg_infos = self._pool_process_object(entity, object_ref)
+            declared[id(object_ref)] = (cg_infos, vg_infos)
+            per_slot["geom"] = max(per_slot["geom"], len(cg_infos))
+            per_slot["vgeom"] = max(per_slot["vgeom"], len(vg_infos))
+            verts = faces = edges = cells = 0
+            for g_info in cg_infos:
+                geom = self._pool_make_geom(entity, g_info, 0, 0, 0, 0, 0, 0)
+                verts += geom.n_verts
+                faces += geom.n_faces
+                edges += geom.n_edges
+                # Only nonconvex geoms use the SDF narrowphase and thus consume reserved cells.
+                if not geom.is_convex:
+                    cells += geom.n_cells
+            per_slot["vert"] = max(per_slot["vert"], verts)
+            per_slot["face"] = max(per_slot["face"], faces)
+            per_slot["edge"] = max(per_slot["edge"], edges)
+            per_slot["cell"] = max(per_slot["cell"], cells)
+        per_slot["geom"] = max(per_slot["geom"], 1)
+        per_slot["free_vert"] = per_slot["vert"]
+        return per_slot, declared
+
+    def _pool_upload_object(self, entity, segment, slot, object_ref):
+        """Process a morph into collision geoms and upload them into `slot`'s reserved ranges.
+
+        Returns ((mass, com, quat, inertia_tensor), n_live_geoms): the object's aggregate inertial for the link
+        binding, and how many sub-geoms were uploaded (the bound geom range is the live sub-range of the slot).
+        """
+        from genesis.engine.entities.rigid_entity.rigid_link import (
+            GeomInertialInfo,
+            compose_inertial_properties,
+            get_local_inertial_from_geom_info,
+        )
+
+        # A declared object was processed (and its nondeterministic decomposition frozen) at build; reuse that
+        # so its uploaded geometry always matches the derived slot budgets. An undeclared object (a morph not
+        # in GeomPoolOptions.objects) is processed on demand and must fit the budgets.
+        cached = segment.declared.get(id(object_ref))
+        cg_infos, vg_infos = cached if cached is not None else self._pool_process_object(entity, object_ref)
+        if segment.per_slot["vgeom"] > 0:
+            self._pool_set_slot_visual(segment, slot, vg_infos)
+
+        ranges = segment.slots[slot]
+        # Build transient RigidGeoms at the slot's reserved indices. Cursors advance within the slot's reserved
+        # ranges; a geom's vertex-state rows track its vertex rows.
+        geoms, geoms_inertial = [], []
+        vert_cur, face_cur, edge_cur, cell_cur = ranges.vert[0], ranges.face[0], ranges.edge[0], ranges.cell[0]
+        for i, g_info in enumerate(cg_infos):
+            geom = self._pool_make_geom(
+                entity,
+                g_info,
+                idx=ranges.geom[0] + i,
+                vert_start=vert_cur,
+                face_start=face_cur,
+                edge_start=edge_cur,
+                cell_start=cell_cur,
+                verts_state_start=ranges.free_vert[0] + (vert_cur - ranges.vert[0]),
+            )
+            geoms.append(geom)
+            geoms_inertial.append(
+                GeomInertialInfo(
+                    get_local_inertial_from_geom_info(g_info, self._pool_rho(entity)), geom.init_pos, geom.init_quat
+                )
+            )
+            vert_cur += geom.n_verts
+            face_cur += geom.n_faces
+            edge_cur += geom.n_edges
+            # Only nonconvex geoms use the SDF narrowphase, so only they consume reserved cells (convex and
+            # primitives use analytic/MPR support). Advance the cell cursor solely for them.
+            if not geom.is_convex:
+                cell_cur += geom.n_cells
+
+        # Validate the object fits the slot's uniform budgets (a static reservation cannot grow).
+        for name, cur, rng in (
+            ("geom", ranges.geom[0] + len(geoms), ranges.geom),
+            ("vert", vert_cur, ranges.vert),
+            ("face", face_cur, ranges.face),
+            ("edge", edge_cur, ranges.edge),
+            ("cell", cell_cur, ranges.cell),
+        ):
+            used, budget = cur - rng[0], rng[1] - rng[0]
+            if used > budget:
+                gs.raise_exception(
+                    f"Object exceeds the pool slot's {name} budget ({used} > {budget}). Increase the "
+                    f"corresponding GeomPoolOptions per-slot budget."
+                )
+
+        self._pool_write_slot(geoms, ranges)
+
+        mass, com, inertia = compose_inertial_properties(geoms_inertial)
+        inertial = (
+            float(mass),
+            np.asarray(com, dtype=gs.np_float),
+            gu.identity_quat(),
+            np.asarray(inertia, dtype=gs.np_float),
+        )
+        return inertial, len(geoms)
+
+    def _pool_set_slot_visual(self, segment, slot, vg_infos):
+        """Set a slot's placeholder visual mesh from an uploaded object's visual geoms (merged into one mesh).
+
+        The placeholder holds the host trimesh only; rigid rendering + get_vAABB use it plus the per-env device
+        vgeom pose, so no device vvert upload is needed. Flags the placeholder for the rasterizer to re-mesh.
+        """
+        placeholder = segment.vgeom_placeholders[slot]
+        if placeholder is None or not vg_infos:
+            return
+        vmeshes = [vg["vmesh"] for vg in vg_infos]
+        if len(vmeshes) == 1:
+            vmesh = vmeshes[0]
+        else:
+            vmesh = gs.Mesh.from_trimesh(
+                trimesh.util.concatenate([vm.trimesh for vm in vmeshes]), surface=vmeshes[0].surface
+            )
+        placeholder.set_pool_mesh(vmesh)
+
+    def _pool_bind_visual(self, entity, segment, slot, envs_idx_np):
+        """Per-env visual switch: in the given envs, show slot `slot`'s placeholder and hide the entity's base
+        morph visuals plus the other slots' placeholders."""
+        if segment.per_slot["vgeom"] == 0:
+            return
+        envs = torch.as_tensor(envs_idx_np, device=gs.device)
+        placeholder_ids = {id(ph) for ph in segment.vgeom_placeholders if ph is not None}
+        for vgeom in entity.vgeoms:
+            if id(vgeom) in placeholder_ids or vgeom.active_envs_mask is None:
+                continue
+            vgeom.active_envs_mask[envs] = False  # hide the base morph visual where a pooled object is shown
+            (vgeom.active_envs_idx,) = np.where(tensor_to_array(vgeom.active_envs_mask))
+        for other_slot, placeholder in enumerate(segment.vgeom_placeholders):
+            if placeholder is None:
+                continue
+            placeholder.active_envs_mask[envs] = other_slot == slot
+            (placeholder.active_envs_idx,) = np.where(tensor_to_array(placeholder.active_envs_mask))
+
+    def _pool_set_scale(self, entity, segment, scale, envs_idx):
+        """Scale each selected env's ACTIVE pool geometry (bound slot, else the entity's base geoms) in place.
+
+        Writes the per-env geom/vgeom scale fields (collision + visual rescale automatically) and rescales the
+        per-env link inertial from that env's active baseline via the same covariance transform set_scale uses.
+        """
+        base_link = entity.base_link
+        envs_idx_np = tensor_to_array(envs_idx)
+        n_sel = len(envs_idx_np)
+
+        scale = np.asarray(scale, dtype=gs.np_float)
+        if scale.ndim == 0:
+            scale = np.broadcast_to(scale.reshape(1, 1), (n_sel, 3))
+        elif scale.shape == (3,):
+            scale = np.broadcast_to(scale.reshape(1, 3), (n_sel, 3))
+        scale = np.ascontiguousarray(np.broadcast_to(scale, (n_sel, 3)))
+        if (scale <= 0.0).any():
+            gs.raise_exception("scale must be strictly positive.")
+
+        # Per env, resolve its active geom range + placeholder vgeom + inertial baseline, then covariance-scale.
+        geom_lo = np.empty(n_sel, dtype=gs.np_int)
+        geom_hi = np.empty(n_sel, dtype=gs.np_int)
+        vgeom_idx = np.full(n_sel, -1, dtype=gs.np_int)
+        out_mass = np.empty((n_sel, 1), dtype=gs.np_float)
+        out_pos = np.empty((n_sel, 1, 3), dtype=gs.np_float)
+        out_quat = np.zeros((n_sel, 1, 4), dtype=gs.np_float)
+        out_quat[..., 0] = 1.0
+        out_i = np.empty((n_sel, 1, 3, 3), dtype=gs.np_float)
+        eye = np.eye(3, dtype=gs.np_float)
+        for i, env in enumerate(envs_idx_np):
+            slot = segment.env_slot.get(int(env))
+            if slot is not None:
+                ranges = segment.slots[slot]
+                geom_lo[i], geom_hi[i] = ranges.geom[0], ranges.geom[0] + segment.n_live_geoms[slot]
+                placeholder = segment.vgeom_placeholders[slot]
+                vgeom_idx[i] = placeholder.idx if placeholder is not None else -1
+                mass0, com0, quat0, i0 = segment.inertial[slot]
+                rot0 = gu.quat_to_R(np.asarray(quat0, dtype=gs.np_float))
+                i_link = rot0 @ np.asarray(i0, dtype=gs.np_float) @ rot0.T
+                com0 = np.asarray(com0, dtype=gs.np_float)
+            else:
+                geom_lo[i], geom_hi[i] = entity.geom_start, entity.geom_end
+                vgeom_idx[i] = entity.vgeoms[0].idx if len(entity.vgeoms) else -1
+                rot0 = gu.quat_to_R(np.asarray(base_link._inertial_quat, dtype=gs.np_float))
+                i_link = rot0 @ np.asarray(base_link._inertial_i, dtype=gs.np_float) @ rot0.T
+                com0 = np.asarray(base_link._inertial_pos, dtype=gs.np_float)
+                mass0 = float(base_link._inertial_mass)
+            s = scale[i]
+            det = float(s[0] * s[1] * s[2])
+            s_mat = np.diag(s)
+            c0 = 0.5 * np.trace(i_link) * eye - i_link
+            cov = det * (s_mat @ c0 @ s_mat)
+            out_i[i, 0] = np.trace(cov) * eye - cov
+            out_pos[i, 0] = s * com0
+            out_mass[i, 0] = mass0 * det
+
+        kernel_set_pool_scale(
+            envs_idx_np,
+            geom_lo,
+            geom_hi,
+            vgeom_idx,
+            scale,
+            self.geoms_state,
+            self.vgeoms_state,
+            self._static_rigid_sim_config,
+        )
+        kernel_set_links_inertial(
+            out_mass,
+            out_pos,
+            out_quat,
+            out_i,
+            np.array([base_link.idx], dtype=gs.np_int),
+            envs_idx_np,
+            self.links_info,
+            self._static_rigid_sim_config,
+        )
+
+        # Refresh neutral-rest invweight/meaninertia (preserving joint config); the per-substep pool-FK pass
+        # rescales the slot AABBs from the new geoms_state.scale.
+        if self._n_dofs > 0:
+            restore_envs = envs_idx if self.n_envs > 0 else None
+            qpos_saved = qd_to_torch(self.qpos, envs_idx, transpose=True, copy=True)
+            if self.n_envs == 0:
+                qpos_saved = qpos_saved[0]
+            self._init_invweight_and_meaninertia(envs_idx=restore_envs)
+            self.set_qpos(qpos_saved, envs_idx=restore_envs)
+        self._func_update_pool_geoms()
+
+    def _pool_rho(self, entity):
+        """Material density for a pooled object, resolved exactly as RigidLink._build does for a variant."""
+        from genesis.engine.entities.rigid_entity.rigid_link import RHO_MUJOCO, RHO_OBJECT
+
+        rho = entity.material.rho
+        if rho is None:
+            # Pooled objects are always non-robot (Mesh/Primitive), so the non-mujoco default is RHO_OBJECT.
+            rho = RHO_MUJOCO if self._enable_mujoco_compatibility else RHO_OBJECT
+        return rho
+
+    def _pool_write_slot(self, geoms, ranges):
+        """Assemble host payloads from transient geoms and upload them into the slot's reserved device rows."""
+        n_geoms = len(geoms)
+        # Per-vertex payloads (concatenated across the object's sub-geoms), with absolute global indices.
+        verts = np.concatenate([g.init_verts for g in geoms], dtype=gs.np_float)
+        normals = np.concatenate([g.init_normals for g in geoms], dtype=gs.np_float)
+        init_center = np.concatenate([g.init_center_pos for g in geoms], dtype=gs.np_float)
+        verts_geom_idx = np.concatenate([np.full(g.n_verts, g.idx, dtype=gs.np_int) for g in geoms])
+        n_verts_total = len(verts)
+        verts_state_idx = np.arange(ranges.free_vert[0], ranges.free_vert[0] + n_verts_total, dtype=gs.np_int)
+        verts_is_fixed = np.zeros(n_verts_total, dtype=gs.np_bool)
+        faces = np.concatenate([g.init_faces + g.vert_start for g in geoms], dtype=gs.np_int)
+        faces_geom_idx = np.concatenate([np.full(g.n_faces, g.idx, dtype=gs.np_int) for g in geoms])
+        edges = np.concatenate([g.init_edges + g.vert_start for g in geoms], dtype=gs.np_int)
+
+        kernel_upload_vert_slot(
+            ranges.vert[0],
+            ranges.face[0],
+            ranges.edge[0],
+            verts,
+            normals,
+            init_center,
+            verts_geom_idx,
+            verts_state_idx,
+            verts_is_fixed,
+            faces,
+            faces_geom_idx,
+            edges,
+            self.verts_info,
+            self.faces_info,
+            self.edges_info,
+            self._static_rigid_sim_config,
+        )
+
+        # Per-geom payloads.
+        def center(g):
+            tmesh = g.mesh.trimesh
+            return tmesh.center_mass if tmesh.is_watertight else np.mean(tmesh.vertices, axis=0)
+
+        # Use the raw stored sol_params: the geom.sol_params property reads the device (still zero for a
+        # freshly-reserved slot) because these transient geoms hang off a built link.
+        sol_params = np.array([g._sol_params for g in geoms], dtype=gs.np_float)
+        _sanitize_sol_params(sol_params, self._sol_min_timeconst, self._sol_default_timeconst)
+        kernel_upload_geom_slot(
+            ranges.geom[0],
+            np.array([g.init_pos for g in geoms], dtype=gs.np_float),
+            np.array([center(g) for g in geoms], dtype=gs.np_float),
+            np.array([g.init_quat for g in geoms], dtype=gs.np_float),
+            np.full(n_geoms, geoms[0].link.idx, dtype=gs.np_int),
+            np.array([g.type for g in geoms], dtype=gs.np_int),
+            np.array([g.friction for g in geoms], dtype=gs.np_float),
+            sol_params,
+            np.array([g.vert_start for g in geoms], dtype=gs.np_int),
+            np.array([g.face_start for g in geoms], dtype=gs.np_int),
+            np.array([g.edge_start for g in geoms], dtype=gs.np_int),
+            np.array([g.verts_state_start for g in geoms], dtype=gs.np_int),
+            np.array([g.vert_end for g in geoms], dtype=gs.np_int),
+            np.array([g.face_end for g in geoms], dtype=gs.np_int),
+            np.array([g.edge_end for g in geoms], dtype=gs.np_int),
+            np.array([g.verts_state_start + g.n_verts for g in geoms], dtype=gs.np_int),
+            np.array([g.data for g in geoms], dtype=gs.np_float),
+            np.array([g.is_convex for g in geoms], dtype=gs.np_bool),
+            np.array([g.needs_coup for g in geoms], dtype=gs.np_int),
+            np.array([g.contype for g in geoms], dtype=np.int32),
+            np.array([g.conaffinity for g in geoms], dtype=np.int32),
+            np.array([g.coup_softness for g in geoms], dtype=gs.np_float),
+            np.array([g.coup_friction for g in geoms], dtype=gs.np_float),
+            np.array([g.coup_restitution for g in geoms], dtype=gs.np_float),
+            np.zeros(n_geoms, dtype=gs.np_bool),
+            np.array([g.metadata.get("decomposed", False) for g in geoms], dtype=gs.np_bool),
+            self.geoms_info,
+            self.geoms_state,
+            self.verts_info,
+            self.geoms_init_AABB,
+            self._static_rigid_sim_config,
+        )
+
+        # Nonconvex sub-geoms collide via the vertex-vs-SDF narrowphase, so upload their baked SDF grids into
+        # the slot's reserved cell range (convex/primitive geoms use analytic/MPR support and need no grid).
+        sdf_geoms = [g for g in geoms if not g.is_convex]
+        if sdf_geoms:
+            kernel_upload_sdf_slot(
+                sdf_geoms[0].cell_start,
+                np.array([g.idx for g in sdf_geoms], dtype=gs.np_int),
+                np.array([g.T_mesh_to_sdf for g in sdf_geoms], dtype=gs.np_float),
+                np.array([g.sdf_res for g in sdf_geoms], dtype=gs.np_int),
+                np.array([g.cell_start for g in sdf_geoms], dtype=gs.np_int),
+                np.array([g.sdf_max for g in sdf_geoms], dtype=gs.np_float),
+                np.array(
+                    [np.broadcast_to(np.asarray(g.sdf_cell_size, dtype=gs.np_float), (3,)) for g in sdf_geoms],
+                    dtype=gs.np_float,
+                ),
+                np.concatenate([g.sdf_val_flattened for g in sdf_geoms], dtype=gs.np_float),
+                np.concatenate([g.sdf_grad_flattened for g in sdf_geoms], dtype=gs.np_float),
+                np.concatenate([g.sdf_closest_vert_flattened for g in sdf_geoms], dtype=gs.np_int),
+                self._static_rigid_sim_config,
+                self.collider._sdf._sdf_info,
+            )
+
+    def _pool_bind_slot(self, entity, segment, slot, envs_idx_np):
+        """Point each selected env's base link at the slot's live geom range + inertial (device rebind)."""
+        ranges = segment.slots[slot]
+        link = entity.base_link
+        n = len(envs_idx_np)
+        mass, com, quat, inertia = segment.inertial[slot]
+        # Bind only the live sub-range (the uploaded sub-geoms); the rest of the slot stays reserved/inert.
+        geom_start = ranges.geom[0]
+        geom_end = geom_start + segment.n_live_geoms[slot]
+        # Keep the base morph's visual geometry (visual pooling is a follow-up); rebind collision + inertial.
+        kernel_update_heterogeneous_link_info(
+            link.idx,
+            envs_idx_np,
+            np.full(n, geom_start, dtype=gs.np_int),
+            np.full(n, geom_end, dtype=gs.np_int),
+            np.full(n, link.vgeom_start, dtype=gs.np_int),
+            np.full(n, link.vgeom_end, dtype=gs.np_int),
+            np.full(n, mass, dtype=gs.np_float),
+            np.tile(com, (n, 1)),
+            np.tile(quat, (n, 1)),
+            np.tile(inertia, (n, 1, 1)),
+            self.links_info,
+        )
+
+    @mutates(StateChange.GEOMETRY)
+    def set_entity_scale(self, entity, scale, envs_idx=None):
+        """Set a per-environment geometry scale (diagonal, about each geom's frame origin) for an entity.
+
+        Scales the entity's collision geometry, AABBs and per-link inertial for the selected environments.
+        'scale' is a scalar (isotropic), a length-3 vector, or a per-environment (n_envs, 3) array. Requires
+        the scene built with 'enable_geom_scaling=True'. Radial primitives (capsule/cylinder) require an
+        isotropic radial scale (sx == sy). The joint configuration is preserved.
+        """
+        if not self._enable_geom_scaling:
+            gs.raise_exception("set_scale requires the scene built with RigidOptions(enable_geom_scaling=True).")
+        if self._requires_grad:
+            gs.raise_exception("set_scale is not supported under requires_grad.")
+
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        n_sel = len(envs_idx)
+
+        # A geometry-pool entity's per-env active geoms live in the reserved block (a bound slot), not in the
+        # entity's static geom range, so scale the active slot per env instead of the base geoms.
+        pool_segment = self._geom_pool.segment_for_entity(entity._idx_in_solver) if self._geom_pool else None
+        if pool_segment is not None:
+            self._pool_set_scale(entity, pool_segment, scale, envs_idx)
+            return
+
+        # Resolve scale to a per-selected-environment (n_sel, 3) array.
+        scale = np.asarray(scale, dtype=gs.np_float)
+        if scale.ndim == 0:
+            scale = np.broadcast_to(scale.reshape(1, 1), (n_sel, 3))
+        elif scale.shape == (3,):
+            scale = np.broadcast_to(scale.reshape(1, 3), (n_sel, 3))
+        scale = np.ascontiguousarray(np.broadcast_to(scale, (n_sel, 3)))
+        if (scale <= 0.0).any():
+            gs.raise_exception("scale must be strictly positive.")
+
+        geoms = entity.geoms
+        for geom in geoms:
+            if geom.is_fixed and not entity._batch_fixed_verts:
+                gs.raise_exception(
+                    "set_scale is not supported for fixed-vertex geoms; build the entity with batch_fixed_verts=True."
+                )
+            if geom.type in (gs.GEOM_TYPE.CAPSULE, gs.GEOM_TYPE.CYLINDER) and not np.allclose(scale[:, 0], scale[:, 1]):
+                gs.raise_exception(f"Radial primitive {geom.type} requires an isotropic radial scale (sx == sy).")
+
+        envs_idx_np = tensor_to_array(envs_idx)
+
+        # 1. Write the per-env geom scale field (the same scale for every geom of the entity).
+        geoms_idx = np.array([geom.idx for geom in geoms], dtype=gs.np_int)
+        geoms_scale = np.ascontiguousarray(np.broadcast_to(scale[:, None, :], (n_sel, len(geoms_idx), 3)))
+        kernel_set_geoms_scale(geoms_scale, geoms_idx, envs_idx_np, self.geoms_state, self._static_rigid_sim_config)
+
+        # 1b. Mirror the scale onto the entity's visual geometry so vverts/vAABB and rendering rescale too.
+        vgeoms = entity.vgeoms
+        if vgeoms:
+            vgeoms_idx = np.array([vgeom.idx for vgeom in vgeoms], dtype=gs.np_int)
+            vgeoms_scale = np.ascontiguousarray(np.broadcast_to(scale[:, None, :], (n_sel, len(vgeoms_idx), 3)))
+            kernel_set_vgeoms_scale(
+                vgeoms_scale, vgeoms_idx, envs_idx_np, self.vgeoms_state, self._static_rigid_sim_config
+            )
+
+        # 2. Recompute per-link inertial from the baseline (unit-scale) inertial via the covariance transform:
+        #    mass *= det(S), com -> S com, and (with the link-frame tensor I0) C0 = 0.5 tr(I0) Id - I0,
+        #    C = det(S) S C0 S, I = tr(C) Id - C. The scaled tensor is stored in the link frame (quat = identity).
+        links = entity.links
+        links_idx = np.array([link.idx for link in links], dtype=gs.np_int)
+        n_l = len(links_idx)
+        out_mass = np.empty((n_sel, n_l), dtype=gs.np_float)
+        out_pos = np.empty((n_sel, n_l, 3), dtype=gs.np_float)
+        out_quat = np.zeros((n_sel, n_l, 4), dtype=gs.np_float)
+        out_quat[..., 0] = 1.0
+        out_i = np.empty((n_sel, n_l, 3, 3), dtype=gs.np_float)
+        eye = np.eye(3, dtype=gs.np_float)
+        for i_l_, link in enumerate(links):
+            rot = gu.quat_to_R(np.array(link._inertial_quat, dtype=gs.np_float))
+            i_link = rot @ np.array(link._inertial_i, dtype=gs.np_float) @ rot.T
+            com0 = np.array(link._inertial_pos, dtype=gs.np_float)
+            mass0 = float(link._inertial_mass)
+            c0 = 0.5 * np.trace(i_link) * eye - i_link
+            for i_b_ in range(n_sel):
+                s = scale[i_b_]
+                det = float(s[0] * s[1] * s[2])
+                s_mat = np.diag(s)
+                cov = det * (s_mat @ c0 @ s_mat)
+                out_i[i_b_, i_l_] = np.trace(cov) * eye - cov
+                out_pos[i_b_, i_l_] = s * com0
+                out_mass[i_b_, i_l_] = mass0 * det
+        kernel_set_links_inertial(
+            out_mass, out_pos, out_quat, out_i, links_idx, envs_idx_np, self.links_info, self._static_rigid_sim_config
+        )
+
+        # 3. Refresh neutral-rest invweight/meaninertia (preserving the current joint configuration; the restoring
+        #    set_qpos also drops stale contact caches and re-runs forward kinematics so geom poses/AABBs rescale).
+        if self._n_dofs > 0:
+            restore_envs = envs_idx if self.n_envs > 0 else None
+            qpos_saved = qd_to_torch(self.qpos, envs_idx, transpose=True, copy=True)
+            if self.n_envs == 0:
+                qpos_saved = qpos_saved[0]
+            self._init_invweight_and_meaninertia(envs_idx=restore_envs)
+            self.set_qpos(qpos_saved, envs_idx=restore_envs)
+        else:
+            if self.collider is not None:
+                self.collider.reset(envs_idx)
+            if self.constraint_solver is not None:
+                self.constraint_solver.reset(envs_idx)
+
     def set_global_sol_params(self, sol_params):
         """
         Set constraint solver parameters.
@@ -2990,6 +3818,24 @@ class RigidSolver(KinematicSolver):
         if self._options.batch_links_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched links info.")
         tensor = qd_to_torch(self.links_info.inertial_mass, envs_idx, links_idx, transpose=True, copy=True)
+        return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor
+
+    def get_links_inertial_pos(self, links_idx=None, envs_idx=None):
+        if self._options.batch_links_info and envs_idx is not None:
+            gs.raise_exception("`envs_idx` cannot be specified for non-batched links info.")
+        tensor = qd_to_torch(self.links_info.inertial_pos, envs_idx, links_idx, transpose=True, copy=True)
+        return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor
+
+    def get_links_inertial_quat(self, links_idx=None, envs_idx=None):
+        if self._options.batch_links_info and envs_idx is not None:
+            gs.raise_exception("`envs_idx` cannot be specified for non-batched links info.")
+        tensor = qd_to_torch(self.links_info.inertial_quat, envs_idx, links_idx, transpose=True, copy=True)
+        return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor
+
+    def get_links_inertial_i(self, links_idx=None, envs_idx=None):
+        if self._options.batch_links_info and envs_idx is not None:
+            gs.raise_exception("`envs_idx` cannot be specified for non-batched links info.")
+        tensor = qd_to_torch(self.links_info.inertial_i, envs_idx, links_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor
 
     def get_links_invweight(self, links_idx=None, envs_idx=None):

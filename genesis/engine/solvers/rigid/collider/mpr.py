@@ -161,26 +161,27 @@ def support_driver(
     i_b,
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
+    scale: qd.types.vector(3),
 ):
     v = qd.Vector.zero(gs.qd_float, 3)
     geom_type = geoms_info.type[i_g]
     if geom_type == gs.GEOM_TYPE.SPHERE:
-        v, v_, vid = support_field._func_support_sphere(geoms_info, direction, i_g, pos, quat, False)
+        v, v_, vid = support_field._func_support_sphere(geoms_info, direction, i_g, pos, quat, False, scale)
     elif geom_type == gs.GEOM_TYPE.ELLIPSOID:
-        v = support_field._func_support_ellipsoid(geoms_info, direction, i_g, pos, quat)
+        v = support_field._func_support_ellipsoid(geoms_info, direction, i_g, pos, quat, scale)
     elif geom_type == gs.GEOM_TYPE.CAPSULE:
-        v = support_field._func_support_capsule(geoms_info, direction, i_g, pos, quat, False)
+        v = support_field._func_support_capsule(geoms_info, direction, i_g, pos, quat, False, scale)
     elif geom_type == gs.GEOM_TYPE.CYLINDER:
-        v = support_field._func_support_cylinder(geoms_info, direction, i_g, pos, quat, False)
+        v = support_field._func_support_cylinder(geoms_info, direction, i_g, pos, quat, False, scale)
     elif geom_type == gs.GEOM_TYPE.BOX:
-        v, v_, vid = support_field._func_support_box(geoms_info, direction, i_g, pos, quat)
+        v, v_, vid = support_field._func_support_box(geoms_info, direction, i_g, pos, quat, scale)
     elif geom_type == gs.GEOM_TYPE.TERRAIN:
         if qd.static(collider_static_config.has_terrain):
             # Terrain support doesn't depend on geometry pos/quat - uses collider_state.prism
             # Terrain is global and not perturbed, so we use the global state directly
             v, _ = support_field._func_support_prism(collider_state, direction, i_b)
     else:
-        v, v_, vid = support_field._func_support_world(support_field_info, direction, i_g, pos, quat)
+        v, v_, vid = support_field._func_support_world(support_field_info, direction, i_g, pos, quat, scale)
 
     return v
 
@@ -199,12 +200,32 @@ def compute_support(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
+    scale_a: qd.types.vector(3),
+    scale_b: qd.types.vector(3),
 ):
     v1 = support_driver(
-        geoms_info, collider_state, collider_static_config, support_field_info, direction, i_ga, i_b, pos_a, quat_a
+        geoms_info,
+        collider_state,
+        collider_static_config,
+        support_field_info,
+        direction,
+        i_ga,
+        i_b,
+        pos_a,
+        quat_a,
+        scale_a,
     )
     v2 = support_driver(
-        geoms_info, collider_state, collider_static_config, support_field_info, -direction, i_gb, i_b, pos_b, quat_b
+        geoms_info,
+        collider_state,
+        collider_static_config,
+        support_field_info,
+        -direction,
+        i_gb,
+        i_b,
+        pos_b,
+        quat_b,
+        scale_b,
     )
 
     v = v1 - v2
@@ -253,6 +274,8 @@ def mpr_refine_portal(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
+    scale_a: qd.types.vector(3),
+    scale_b: qd.types.vector(3),
 ):
     ret = 1
     while True:
@@ -275,6 +298,8 @@ def mpr_refine_portal(
             quat_a,
             pos_b,
             quat_b,
+            scale_a,
+            scale_b,
         )
 
         if not mpr_portal_can_encapsule_origin(mpr_info, v, direction) or mpr_portal_reach_tolerance(
@@ -369,6 +394,8 @@ def mpr_find_penetration(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
+    scale_a: qd.types.vector(3),
+    scale_b: qd.types.vector(3),
 ):
     iterations = 0
 
@@ -392,6 +419,8 @@ def mpr_find_penetration(
             quat_a,
             pos_b,
             quat_b,
+            scale_a,
+            scale_b,
         )
         reached = mpr_portal_reach_tolerance(mpr_state, mpr_info, v, direction, i_ga, i_gb, i_b)
         if reached or iterations > mpr_info.CCD_ITERATIONS[None]:
@@ -499,6 +528,8 @@ def mpr_discover_portal(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
+    scale_a: qd.types.vector(3),
+    scale_b: qd.types.vector(3),
 ):
     mpr_state.simplex_support.v1[0, i_b] = center_a
     mpr_state.simplex_support.v2[0, i_b] = center_b
@@ -527,6 +558,8 @@ def mpr_discover_portal(
                 quat_a,
                 pos_b,
                 quat_b,
+                scale_a,
+                scale_b,
             )
             extent = probe_v.dot(probe)
             if i_axis == 0 or extent > best_extent:
@@ -549,6 +582,8 @@ def mpr_discover_portal(
         quat_a,
         pos_b,
         quat_b,
+        scale_a,
+        scale_b,
     )
 
     mpr_state.simplex_support.v1[1, i_b] = v1
@@ -595,6 +630,8 @@ def mpr_discover_portal(
                 quat_a,
                 pos_b,
                 quat_b,
+                scale_a,
+                scale_b,
             )
             dot = v.dot(direction)
             if dot < 0.0:
@@ -633,6 +670,8 @@ def mpr_discover_portal(
                         quat_a,
                         pos_b,
                         quat_b,
+                        scale_a,
+                        scale_b,
                     )
                     dot = v.dot(direction)
                     if dot < 0.0:
@@ -779,6 +818,8 @@ def func_mpr_contact_from_centers(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
+    scale_a: qd.types.vector(3),
+    scale_b: qd.types.vector(3),
 ):
     res = mpr_discover_portal(
         geoms_info=geoms_info,
@@ -796,6 +837,8 @@ def func_mpr_contact_from_centers(
         quat_a=quat_a,
         pos_b=pos_b,
         quat_b=quat_b,
+        scale_a=scale_a,
+        scale_b=scale_b,
     )
 
     is_col = False
@@ -826,6 +869,8 @@ def func_mpr_contact_from_centers(
             quat_a,
             pos_b,
             quat_b,
+            scale_a,
+            scale_b,
         )
         if res >= 0:
             is_col, normal, penetration, pos = mpr_find_penetration(
@@ -843,6 +888,8 @@ def func_mpr_contact_from_centers(
                 quat_a,
                 pos_b,
                 quat_b,
+                scale_a,
+                scale_b,
             )
     return is_col, normal, penetration, pos
 
@@ -866,6 +913,8 @@ def func_mpr_contact(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
+    scale_a: qd.types.vector(3),
+    scale_b: qd.types.vector(3),
 ):
     center_a, center_b = guess_geoms_center(
         geoms_info,
@@ -898,6 +947,8 @@ def func_mpr_contact(
         quat_a=quat_a,
         pos_b=pos_b,
         quat_b=quat_b,
+        scale_a=scale_a,
+        scale_b=scale_b,
     )
 
 

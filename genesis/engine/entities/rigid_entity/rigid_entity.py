@@ -90,11 +90,15 @@ class KinematicEntity(Entity):
         custom_vvert_start: int,
         custom_vface_start: int,
         morph_heterogeneous: list[Morph] | None = None,
+        geom_pool=None,
         name: str | None = None,
     ):
         # Set heterogeneous support before super().__init__() because _get_morph_identifier() needs it
         self._morph_heterogeneous = morph_heterogeneous if morph_heterogeneous is not None else []
         self._enable_heterogeneous = bool(self._morph_heterogeneous)
+        # Per-entity dynamic geometry pool request (Phase 3); the solver reserves its slots at build.
+        self._geom_pool_options = geom_pool
+        self._enable_geom_pool = geom_pool is not None
 
         super().__init__(idx, scene, morph, solver, material, surface, name=name)
 
@@ -1793,8 +1797,10 @@ class KinematicEntity(Entity):
         if self.n_vgeoms == 0:
             gs.raise_exception("Entity has no visual geometries.")
 
-        # For heterogeneous entities, compute AABB per-environment respecting active_envs_idx
-        if self._enable_heterogeneous:
+        # For heterogeneous or geometry-pool entities, compute the AABB per environment respecting each
+        # vgeom's active_envs_mask (pool placeholders are visible only in the envs bound to their slot, and the
+        # base morph vgeoms are hidden in envs showing a pooled object).
+        if self._enable_heterogeneous or self._enable_geom_pool:
             envs_idx = self._scene._sanitize_envs_idx(envs_idx)
             n_envs = len(envs_idx)
             aabb_min = torch.full((n_envs, 3), float("inf"), dtype=gs.tc_float, device=gs.device)
@@ -2146,6 +2152,52 @@ class KinematicEntity(Entity):
             return f"{len(self.morphs)} morph variants"
         return f"{self.main_morph}"
 
+    def set_active_variant(self, variant_idx, envs_idx=None):
+        """Rebind which heterogeneous geometry variant each environment simulates, at runtime.
+
+        Only valid for entities built with a heterogeneous morph list (`morph=[m0, m1, ...]`). Variant 0
+        is the primary morph and 1..N are the additional variants. `variant_idx` is a single index applied
+        to all selected environments, or one index per selected environment. The joint configuration is
+        preserved; this changes the active geometry, collision shape and inertial per environment.
+        """
+        if not self._enable_heterogeneous:
+            gs.raise_exception(
+                "set_active_variant is only supported for heterogeneous entities (built with morph=[...])."
+            )
+        if not self._solver.is_built:
+            gs.raise_exception("set_active_variant can only be called after the scene is built.")
+        self._solver.set_active_variant(self, variant_idx, envs_idx)
+
+    def set_active_object(self, object_ref, envs_idx=None):
+        """Load a processed object into this entity's geometry pool and bind environments to it at runtime.
+
+        Only valid for entities built with `add_entity(geom_pool=...)`. `object_ref` is a `gs.morphs.Mesh` or
+        `gs.morphs.Primitive`; it is processed to collision geometry, uploaded into a free pool slot (reused if
+        already resident), and the selected environments are rebound to it. The object inherits this entity's
+        collision filters and base link; the joint configuration is preserved.
+        """
+        if not self._enable_geom_pool:
+            gs.raise_exception("set_active_object is only supported for entities built with add_entity(geom_pool=...).")
+        if not self._solver.is_built:
+            gs.raise_exception("set_active_object can only be called after the scene is built.")
+        self._solver.set_active_object(self, object_ref, envs_idx)
+
+    def set_scale(self, scale, envs_idx=None):
+        """Set a per-environment geometry scale for this entity at runtime.
+
+        `scale` is a scalar (isotropic), a length-3 vector `(sx, sy, sz)`, or a per-environment
+        `(n_envs, 3)` array. Requires the scene built with `RigidOptions(enable_geom_scaling=True)`. Scales
+        the entity's collision geometry, AABBs and inertial about each geom's frame origin; the joint
+        configuration is preserved. Radial primitives (capsule, cylinder) require an isotropic radial scale.
+        """
+        if not self._solver.is_built:
+            gs.raise_exception("set_scale can only be called after the scene is built.")
+        self._solver.set_entity_scale(self, scale, envs_idx)
+
+    def get_scale(self, envs_idx=None):
+        """Return this entity's per-environment geometry scale as `(n_envs, 3)` (or `(3,)` for a single env)."""
+        return qd_to_numpy(self._solver.geoms_state.scale, envs_idx, self._geom_start, transpose=True)
+
     @property
     def n_joints(self):
         """The number of `RigidJoint` in the entity."""
@@ -2277,6 +2329,9 @@ class KinematicEntity(Entity):
             init = torch.as_tensor(vgeom.init_vverts, dtype=gs.tc_float, device=gs.device)
             pos = vgeoms_pos[..., vgeom.idx, :].unsqueeze(-2)
             quat = vgeoms_quat[..., vgeom.idx, :].unsqueeze(-2)
+            vscale = vgeom._vscale(envs_idx)
+            if vscale is not None:
+                init = vscale * init
             parts.append(gu.transform_by_trans_quat(init, pos, quat))
         tensor = torch.cat(parts, dim=-2)
         return tensor[0] if self._solver.n_envs == 0 else tensor
@@ -2347,6 +2402,7 @@ class RigidEntity(KinematicEntity):
         equality_start=0,
         visualize_contact: bool = False,
         morph_heterogeneous: list[Morph] | None = None,
+        geom_pool=None,
         name: str | None = None,
     ):
         self._geom_start = geom_start
@@ -2381,6 +2437,7 @@ class RigidEntity(KinematicEntity):
             custom_vvert_start,
             custom_vface_start,
             morph_heterogeneous,
+            geom_pool,
             name,
         )
 
@@ -3527,9 +3584,22 @@ class RigidEntity(KinematicEntity):
         if self.n_geoms == 0:
             gs.raise_exception("Entity has no collision geometries.")
 
-        # Already computed internally by the solver. Let's access it directly for efficiency.
-        if allow_fast_approx and isinstance(self.sim.coupler, LegacyCoupler):
+        # Already computed internally by the solver. Let's access it directly for efficiency. Not usable for
+        # heterogeneous entities: the solver aggregates the full contiguous geom range, which includes variant
+        # geoms inactive in a given env, over-sizing that env's AABB. Fall through to the active-masked branch.
+        if (
+            allow_fast_approx
+            and isinstance(self.sim.coupler, LegacyCoupler)
+            and not self._enable_heterogeneous
+            and not self._enable_geom_pool
+        ):
             return self._solver.get_AABB(entities_idx=[self._idx_in_solver], envs_idx=envs_idx)[..., 0, :]
+
+        # For a geometry-pool entity, the per-env active geoms live in the reserved pool block (bound via
+        # links_info per env), not in the entity's contiguous range and not as RigidGeom objects. Reduce the
+        # device per-env AABBs over each env's link geom ranges.
+        if self._enable_geom_pool and self._solver.n_envs > 0:
+            return self._solver.get_entity_aabb_per_env(self, envs_idx)
 
         # For heterogeneous entities, compute AABB per-environment respecting active_envs_idx.
         # FIXME: Remove this branch after implementing 'get_verts'.
@@ -3718,6 +3788,11 @@ class RigidEntity(KinematicEntity):
         """
         if self._enable_heterogeneous:
             gs.raise_exception("This method is not supported by heterogeneous entities.")
+        if self._enable_geom_pool:
+            gs.raise_exception(
+                "get_verts is not supported for geometry-pool entities (the active geometry is per-env); "
+                "use get_AABB for per-env bounds."
+            )
 
         self._solver.update_verts_for_geoms(slice(self.geom_start, self.geom_end))
 
@@ -4264,9 +4339,16 @@ class RigidEntity(KinematicEntity):
         """
         gravity = self._solver.get_gravity(envs_idx=envs_idx)  # (3,) or (n_envs, 3)
         links_pos = self.get_links_pos(envs_idx=envs_idx, ref="link_com")  # (..., n_links, 3)
-        # Link masses are static properties (not batched per environment),
-        # so always fetch without envs_idx to avoid indexing conflicts.
-        links_mass = self.get_links_inertial_mass()  # (n_links,)
+        # Link masses are batched per environment for heterogeneous or per-env-scaled entities (the runtime
+        # inertial differs per env); otherwise they are a static per-link vector. When batched, fetch all envs
+        # (the solver forbids envs_idx for batched links) and index down to the requested envs so the mass axis
+        # aligns with links_pos.
+        if (self._enable_heterogeneous or self._solver._enable_geom_scaling) and self._solver.n_envs > 0:
+            links_mass = self.get_links_inertial_mass()  # (n_envs, n_links)
+            if envs_idx is not None:
+                links_mass = links_mass[self._scene._sanitize_envs_idx(envs_idx)]
+        else:
+            links_mass = self.get_links_inertial_mass()  # (n_links,)
 
         # PE_i = m_i * g^T * p_i => PE = sum_i(m_i * (g . p_i))
         # g is (..., 3), links_pos is (..., n_links, 3) -> broadcast g to (..., 1, 3)
@@ -4540,7 +4622,7 @@ class RigidEntity(KinematicEntity):
             The total mass of the entity in kg. For heterogeneous entities, returns
             an array of shape (n_envs,) with per-environment masses.
         """
-        if self._enable_heterogeneous:
+        if self._enable_heterogeneous or self._solver._enable_geom_scaling or self._enable_geom_pool:
             links_idx = slice(self.link_start, self.link_end)
             links_mass = qd_to_numpy(self._solver.links_info.inertial_mass, None, links_idx, transpose=True)
             return links_mass.sum(axis=1)

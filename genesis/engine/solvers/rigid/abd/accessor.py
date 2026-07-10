@@ -584,6 +584,64 @@ def kernel_set_geoms_friction_ratio(
 
 
 @qd.kernel(fastcache=True)
+def kernel_set_geoms_scale(
+    scale: qd.types.ndarray(),
+    geoms_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    geoms_state: array_class.GeomsState,
+    static_rigid_sim_config: qd.template(),
+):
+    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_g_, i_b_ in qd.ndrange(geoms_idx.shape[0], envs_idx.shape[0]):
+        i_g, i_b = geoms_idx[i_g_], envs_idx[i_b_]
+        geoms_state.scale[i_g, i_b] = qd.Vector(
+            [scale[i_b_, i_g_, 0], scale[i_b_, i_g_, 1], scale[i_b_, i_g_, 2]], dt=gs.qd_float
+        )
+        # Stored verts are refreshed lazily from the new scale on the next forward-kinematics pass.
+        geoms_state.verts_updated[i_g, i_b] = False
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_vgeoms_scale(
+    scale: qd.types.ndarray(),
+    vgeoms_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    vgeoms_state: array_class.VGeomsState,
+    static_rigid_sim_config: qd.template(),
+):
+    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_vg_, i_b_ in qd.ndrange(vgeoms_idx.shape[0], envs_idx.shape[0]):
+        i_vg, i_b = vgeoms_idx[i_vg_], envs_idx[i_b_]
+        vgeoms_state.scale[i_vg, i_b] = qd.Vector(
+            [scale[i_b_, i_vg_, 0], scale[i_b_, i_vg_, 1], scale[i_b_, i_vg_, 2]], dt=gs.qd_float
+        )
+
+
+@qd.kernel(fastcache=True)
+def kernel_set_links_inertial(
+    inertial_mass: qd.types.ndarray(),
+    inertial_pos: qd.types.ndarray(),
+    inertial_quat: qd.types.ndarray(),
+    inertial_i: qd.types.ndarray(),
+    links_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    links_info: array_class.LinksInfo,
+    static_rigid_sim_config: qd.template(),
+):
+    """Write per-environment link inertial (mass/COM/orientation/tensor). Requires batch_links_info."""
+    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_l_, i_b_ in qd.ndrange(links_idx.shape[0], envs_idx.shape[0]):
+        i_l, i_b = links_idx[i_l_], envs_idx[i_b_]
+        links_info.inertial_mass[i_l, i_b] = inertial_mass[i_b_, i_l_]
+        for j in qd.static(range(3)):
+            links_info.inertial_pos[i_l, i_b][j] = inertial_pos[i_b_, i_l_, j]
+        for j in qd.static(range(4)):
+            links_info.inertial_quat[i_l, i_b][j] = inertial_quat[i_b_, i_l_, j]
+        for j1, j2 in qd.static(qd.ndrange(3, 3)):
+            links_info.inertial_i[i_l, i_b][j1, j2] = inertial_i[i_b_, i_l_, j1, j2]
+
+
+@qd.kernel(fastcache=True)
 def kernel_set_qpos(
     qpos: qd.types.ndarray(),
     qs_idx: qd.types.ndarray(),

@@ -105,7 +105,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
             if ray_hit.geom and ray_hit.geom.link is not None and not ray_hit.geom.link.is_fixed:
                 link = ray_hit.geom.link
                 hit_env_idx = self._get_last_raycast_env_idx()
-                mass = float(link.get_mass())
+                mass = self._link_mass_at(link, hit_env_idx)
 
                 # Validate mass is not too small to prevent numerical instability
                 if mass < MIN_PICKABLE_MASS:
@@ -253,7 +253,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
                 self._sim_running
                 and link is not None
                 and not link.is_fixed
-                and float(link.get_mass()) >= MIN_PICKABLE_MASS
+                and self._link_mass_at(link, self._get_last_raycast_env_idx()) >= MIN_PICKABLE_MASS
             )
             if is_pickable:
                 arrow_T = gu.trans_R_to_T(closest_hit.position, gu.z_up_to_R(closest_hit.normal))
@@ -320,6 +320,29 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
     def _get_last_raycast_env_idx(self) -> int | None:
         return self._raycaster.last_hit_env_idx
 
+    def _link_mass_at(self, link: "RigidLink", env_idx: int | None) -> float:
+        """Mass of `link` in the hit environment as a scalar.
+
+        `get_mass` returns a per-environment vector when the runtime inertial can differ per env (heterogeneous
+        variants or per-env geom scaling), so it must be indexed by the hit env before reducing to a scalar.
+        """
+        mass = np.atleast_1d(tensor_to_array(link.get_mass()))
+        return float(mass[env_idx] if (env_idx is not None and mass.size > 1) else mass[0])
+
+    def _link_inertial_at(self, link: "RigidLink", env_idx: int | None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Inertial-frame COM, orientation and inertia tensor of `link` in the hit env, as (3,), (4,), (3,3).
+
+        These are per-env arrays when the runtime inertial can differ per env (heterogeneous variants, per-env
+        geom scaling, or a geometry pool), so index the hit env; otherwise they are the single build-time
+        values. Using the true per-env inertial keeps the spring drag consistent - the base-link inertia is
+        wrong for a swapped-in or scaled object and destabilizes the force integration.
+        """
+        pos = np.atleast_2d(np.asarray(tensor_to_array(link.get_inertial_pos()), dtype=gs.np_float))
+        quat = np.atleast_2d(np.asarray(tensor_to_array(link.get_inertial_quat()), dtype=gs.np_float))
+        inertia = np.asarray(tensor_to_array(link.get_inertial_i()), dtype=gs.np_float).reshape(-1, 3, 3)
+        idx = env_idx if (env_idx is not None and pos.shape[0] > 1) else 0
+        return pos[idx], quat[idx], inertia[idx]
+
     def _apply_spring_force(self, control_point: np.ndarray, dt: float) -> None:
         if not self._held_link:
             return
@@ -335,9 +358,8 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
         held_point_env_local = gu.transform_by_trans_quat(self._held_point_local, link_pos, link_quat)
         control_point_env_local = control_point - self._env_offset
 
-        # Compute inertial frame properties
-        inertial_pos = tensor_to_array(self._held_link.inertial_pos)
-        inertial_quat = tensor_to_array(self._held_link.inertial_quat)
+        # Inertial-frame properties in the hit environment (per-env for heterogeneous / scaled / pooled links).
+        inertial_pos, inertial_quat, inertial_i = self._link_inertial_at(self._held_link, envs_idx)
         world_principal_quat = gu.transform_quat_by_quat(inertial_quat, link_quat)
 
         # Compute arm from COM to held point in world frame
@@ -346,11 +368,11 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
 
         # Compute inverse inertia in world frame
         R_world = gu.quat_to_R(world_principal_quat)
-        inertia_world = R_world @ self._held_link.inertial_i @ R_world.T
+        inertia_world = R_world @ inertial_i @ R_world.T
         inv_inertia_world = np.linalg.inv(inertia_world)
 
         pos_err_v = control_point_env_local - held_point_env_local
-        inv_mass = 1.0 / float(self._held_link.get_mass())
+        inv_mass = 1.0 / self._link_mass_at(self._held_link, envs_idx)
 
         total_impulse = np.zeros(3, dtype=gs.np_float)
         total_torque_impulse = np.zeros(3, dtype=gs.np_float)

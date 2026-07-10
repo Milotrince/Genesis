@@ -7742,6 +7742,740 @@ def test_heterogeneous_aabb(tol):
     assert_allclose(aabb_size_sphere, vaabb_size_sphere, tol=1e-3)  # Allow small tolerance for decimation
 
 
+def test_heterogeneous_runtime_variant_rebind(tol):
+    """Rebinding a heterogeneous variant at runtime updates per-env geometry, inertial and physics."""
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    big, small = 0.04, 0.02
+    het_obj = scene.add_entity(
+        morph=(
+            gs.morphs.Box(size=(big,) * 3, pos=(0.0, 0.0, 0.1)),
+            gs.morphs.Box(size=(small,) * 3, pos=(0.0, 0.0, 0.1)),
+        ),
+    )
+    # 4 envs, balanced: envs 0-1 -> variant 0 (big), envs 2-3 -> variant 1 (small).
+    scene.build(n_envs=4)
+
+    mass = het_obj.get_mass()
+    assert_allclose(mass[0], mass[1], tol=tol)
+    assert_allclose(mass[2], mass[3], tol=tol)
+    assert_allclose(mass[0], mass[2] * (big / small) ** 3, tol=tol)
+    aabb = het_obj.get_AABB()
+    assert_allclose(aabb[0], aabb[1], tol=gs.EPS)
+    assert_allclose(aabb[2], aabb[3], tol=gs.EPS)
+
+    # Rebind only env 0 to the small variant; the other envs must be untouched.
+    het_obj.set_active_variant(1, envs_idx=[0])
+    mass = het_obj.get_mass()
+    assert_allclose(mass[0], mass[2], tol=tol)  # env 0 is now the small variant
+    assert_allclose(mass[1], mass[3] * (big / small) ** 3, tol=tol)  # env 1 still big
+    aabb = het_obj.get_AABB()
+    assert_allclose(aabb[0], aabb[2], tol=gs.EPS)  # env 0 now matches the small variant
+    with pytest.raises(AssertionError):
+        assert_allclose(aabb[0], aabb[1], tol=1e-3)
+
+    # A per-env variant assignment sets a known mix: envs 0-1 big, envs 2-3 small.
+    het_obj.set_active_variant((0, 0, 1, 1), envs_idx=(0, 1, 2, 3))
+    mass = het_obj.get_mass()
+    assert_allclose(mass[0], mass[1], tol=tol)
+    assert_allclose(mass[0], mass[2] * (big / small) ** 3, tol=tol)
+
+    # Drop the boxes and let them settle; each must rest on its own half-extent, proving the
+    # runtime-bound geometry collides correctly per environment (a tunnelling box would not rest here).
+    for _ in range(300):
+        scene.step()
+    z = het_obj.get_pos()[..., 2]
+    assert torch.isfinite(z).all()
+    assert_allclose(z[[0, 1]], big / 2, tol=1e-2)
+    assert_allclose(z[[2, 3]], small / 2, tol=1e-2)
+
+
+def test_geom_scale(tol):
+    """Per-environment runtime geom scale rescales inertia, AABB and box-vs-plane collision per env."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_geom_scaling=True,
+            gravity=(0.0, 0.0, -10.0),
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    box = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0.0, 0.0, 0.3),
+        ),
+    )
+    cylinder = scene.add_entity(
+        gs.morphs.Cylinder(
+            radius=0.05,
+            height=0.2,
+            pos=(1.0, 0.0, 0.3),
+        ),
+    )
+    # 4 envs: scale envs 0-1 non-uniformly by (2, 1, 3); leave envs 2-3 at unit scale.
+    scene.build(n_envs=4)
+
+    scene.step()
+    mass0 = box.get_mass()
+    box.set_scale((2.0, 1.0, 3.0), envs_idx=[0, 1])
+    scene.step()
+
+    # Mass scales by det(S) = 6 on the scaled envs and is unchanged elsewhere.
+    mass1 = box.get_mass()
+    assert_allclose(mass1[[0, 1]], mass0[[0, 1]] * 6.0, tol=tol)
+    assert_allclose(mass1[[2, 3]], mass0[[2, 3]], tol=tol)
+
+    # AABB scales per-axis on the scaled envs (unit box -> extents (0.2, 0.1, 0.3)); unit envs unchanged.
+    ext = box.get_AABB()[:, 1] - box.get_AABB()[:, 0]
+    assert_allclose(ext[[0, 1]], (0.2, 0.1, 0.3), tol=1e-3)
+    assert_allclose(ext[[2, 3]], (0.1, 0.1, 0.1), tol=1e-3)
+    assert_allclose(box.get_scale()[[0, 1]], (2.0, 1.0, 3.0), tol=tol)
+    assert_allclose(box.get_scale()[[2, 3]], (1.0, 1.0, 1.0), tol=tol)
+
+    # Drop: scaled boxes rest on their scaled half-height (0.15), unit boxes on 0.05.
+    for _ in range(400):
+        scene.step()
+    z = box.get_pos()[..., 2]
+    assert torch.isfinite(z).all()
+    assert_allclose(z[[0, 1]], 0.15, tol=6e-3)
+    assert_allclose(z[[2, 3]], 0.05, tol=6e-3)
+
+    # A non-uniform radial scale of a radial primitive is not representable and must raise; uniform is fine.
+    with pytest.raises(gs.GenesisException):
+        cylinder.set_scale((2.0, 1.0, 1.0))
+    cylinder.set_scale((2.0, 2.0, 3.0))
+
+
+def test_geom_scale_requires_option():
+    """set_scale must raise when the scene was not built with enable_geom_scaling."""
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)))
+    scene.build(n_envs=2)
+    with pytest.raises(gs.GenesisException):
+        box.set_scale((2.0, 2.0, 2.0))
+
+
+@pytest.mark.parametrize("backend", [gs.gpu])
+def test_geom_scale_collision(tol):
+    """Per-env scale is honored by the support-based collision path (box-box MPR, sphere-plane)."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_geom_scaling=True,
+            gravity=(0.0, 0.0, -10.0),
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    # Fixed platform with its top surface at z = 0.1.
+    scene.add_entity(gs.morphs.Box(size=(0.6, 0.6, 0.1), pos=(0.0, 0.0, 0.05), fixed=True))
+    faller = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.6)))
+    sphere = scene.add_entity(gs.morphs.Sphere(radius=0.05, pos=(2.0, 0.0, 0.6)))
+    # env 0 is the unscaled control; env 1 scales the faller (box-box MPR) and sphere (plane-special support).
+    scene.build(n_envs=2)
+
+    faller.set_scale((1.0, 1.0, 3.0), envs_idx=[1])
+    sphere.set_scale(2.0, envs_idx=[1])
+    for _ in range(600):
+        scene.step()
+
+    fz = faller.get_pos()[..., 2]
+    sz = sphere.get_pos()[..., 2]
+    assert torch.isfinite(fz).all() and torch.isfinite(sz).all()
+    # Faller rests on the platform top (0.1) plus its half-height: 0.15 unscaled, 0.25 with z-scale 3.
+    assert_allclose(fz[0], 0.15, tol=8e-3)
+    assert_allclose(fz[1], 0.25, tol=8e-3)
+    # Sphere rests on the plane at its radius: 0.05 unscaled, 0.10 with uniform scale 2.
+    assert_allclose(sz[0], 0.05, tol=8e-3)
+    assert_allclose(sz[1], 0.10, tol=8e-3)
+
+
+@pytest.mark.parametrize("backend", [gs.gpu])
+def test_geom_scale_collision_gjk(tol):
+    """Per-env scale is honored on the GJK collision path (forced via use_gjk_collision)."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_geom_scaling=True,
+            use_gjk_collision=True,
+            gravity=(0.0, 0.0, -10.0),
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    scene.add_entity(gs.morphs.Box(size=(0.6, 0.6, 0.1), pos=(0.0, 0.0, 0.05), fixed=True))
+    faller = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.6)))
+    # env 0 unscaled control; env 1 z-scaled x3 -> box-box contact resolved by GJK.
+    scene.build(n_envs=2)
+
+    faller.set_scale((1.0, 1.0, 3.0), envs_idx=[1])
+    for _ in range(600):
+        scene.step()
+
+    fz = faller.get_pos()[..., 2]
+    assert torch.isfinite(fz).all()
+    # Rests on the platform top (0.1) plus its half-height: 0.15 unscaled, 0.25 with z-scale 3.
+    assert_allclose(fz[0], 0.15, tol=1e-2)
+    assert_allclose(fz[1], 0.25, tol=1e-2)
+
+
+@pytest.mark.parametrize("backend", [gs.gpu])
+def test_geom_scale_nonconvex(tol):
+    """Per-env scale is honored by the nonconvex-mesh SDF-polytope collision path."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_geom_scaling=True,
+            gravity=(0.0, 0.0, -10.0),
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    duck = scene.add_entity(
+        gs.morphs.Mesh(
+            file="meshes/duck.obj",
+            scale=0.1,
+            convexify=False,
+            pos=(0.0, 0.0, 0.5),
+        ),
+    )
+    # env 0 is the unscaled control; env 1 scales the nonconvex mesh uniformly by 1.5.
+    scene.build(n_envs=2)
+
+    duck.set_scale(1.5, envs_idx=[1])
+    for _ in range(500):
+        scene.step()
+
+    aabb = duck.get_AABB()
+    min_z = aabb[:, 0, 2]
+    ext_z = aabb[:, 1, 2] - aabb[:, 0, 2]
+    assert torch.isfinite(duck.get_pos()).all()
+    # Both rest on the plane (lowest point ~ 0): the scaled nonconvex mesh collides without tunneling.
+    assert_allclose(min_z, 0.0, tol=0.02)
+    # env 1 is 1.5x taller.
+    assert float(ext_z[1]) > float(ext_z[0]) * 1.3
+
+
+def test_link_mass_api_scaled(tol):
+    """link.get_mass / entity.set_mass / link.set_mass track the per-env runtime mass under scaling."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5)))
+    scene.build(n_envs=4)
+    scene.step()
+
+    link = box.links[0]
+    # With scaling enabled, per-link mass is per-env even before any scale is applied.
+    base = link.get_mass()
+    assert base.shape == (4,)
+    assert_allclose(base, base[0], tol=tol)
+
+    # link.get_mass reflects the per-env runtime mass after a non-uniform scale (det(S) = 6 on envs 0-1).
+    box.set_scale((2.0, 1.0, 3.0), envs_idx=[0, 1])
+    scene.step()
+    scaled = link.get_mass()
+    assert_allclose(scaled[[0, 1]], base[[0, 1]] * 6.0, tol=tol)
+    assert_allclose(scaled[[2, 3]], base[[2, 3]], tol=tol)
+    # Single-link entity: entity mass equals the link mass on every env.
+    assert_allclose(box.get_mass(), scaled, tol=tol)
+
+    # entity.set_mass distributes a scalar target across links; get_mass must return it on every env,
+    # including the scaled ones (the ratio uses the current per-env mass, not the stale build-time value).
+    box.set_mass(2.0)
+    assert_allclose(box.get_mass(), 2.0, tol=tol)
+    assert_allclose(link.get_mass(), 2.0, tol=tol)
+
+    # link.set_mass accepts an explicit per-env vector.
+    target = np.array([1.0, 2.0, 3.0, 4.0])
+    link.set_mass(target)
+    assert_allclose(link.get_mass(), target, tol=tol)
+
+
+def test_link_mass_api_heterogeneous(tol):
+    """link.get_mass returns the per-env mass of each environment's bound variant."""
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    big, small = 0.04, 0.02
+    het = scene.add_entity(
+        morph=(
+            gs.morphs.Box(size=(big,) * 3, pos=(0.0, 0.0, 0.1)),
+            gs.morphs.Box(size=(small,) * 3, pos=(0.0, 0.0, 0.1)),
+        ),
+    )
+    # Balanced: envs 0-1 -> big, envs 2-3 -> small.
+    scene.build(n_envs=4)
+    scene.step()
+
+    m = het.links[0].get_mass()
+    assert m.shape == (4,)
+    assert_allclose(m[0], m[1], tol=tol)
+    assert_allclose(m[2], m[3], tol=tol)
+    assert_allclose(m[0], m[2] * (big / small) ** 3, tol=tol)
+    # Single-link variants: entity mass equals link mass per env.
+    assert_allclose(het.get_mass(), m, tol=tol)
+
+
+def test_potential_energy_scaled(tol):
+    """entity.get_potential_energy is per-env aware under scaling; the mass axis aligns with the requested envs."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
+        show_viewer=False,
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 1.0)))
+    scene.build(n_envs=4)
+
+    # Non-uniform scale on envs 0-1 (det(S) = 6); envs 2-3 stay unit. No plane: free fall keeps every env's
+    # COM at the same height, so at a common instant PE is proportional to mass.
+    box.set_scale((2.0, 1.0, 3.0), envs_idx=[0, 1])
+    for _ in range(5):
+        scene.step()
+
+    pe = box.get_potential_energy()
+    assert pe.shape == (4,)
+    assert_allclose(pe[0], pe[1], tol=tol)
+    assert_allclose(pe[2], pe[3], tol=tol)
+    assert_allclose(pe[0] / pe[2], 6.0, tol=tol)
+
+    # envs_idx subset must not crash and must return the matching per-env slice (regression: the per-env mass
+    # axis was previously fetched for all envs, mismatching the sliced links_pos).
+    pe_subset = box.get_potential_energy(envs_idx=[0, 2])
+    assert pe_subset.shape == (2,)
+    assert_allclose(pe_subset, pe[[0, 2]], tol=tol)
+
+
+def test_potential_energy_heterogeneous(tol):
+    """entity.get_potential_energy uses each env's bound-variant mass, including an envs_idx subset."""
+    scene = gs.Scene(show_viewer=False)
+    big, small = 0.04, 0.02
+    het = scene.add_entity(
+        morph=(
+            gs.morphs.Box(size=(big,) * 3, pos=(0.0, 0.0, 1.0)),
+            gs.morphs.Box(size=(small,) * 3, pos=(0.0, 0.0, 1.0)),
+        ),
+    )
+    scene.build(n_envs=4)  # envs 0-1 -> big, envs 2-3 -> small
+    for _ in range(5):
+        scene.step()
+
+    pe = het.get_potential_energy()
+    assert pe.shape == (4,)
+    assert_allclose(pe[0], pe[1], tol=tol)
+    assert_allclose(pe[2], pe[3], tol=tol)
+    # Both variants are centered at the same height, so the PE ratio is the mass ratio (big/small)**3.
+    assert_allclose(pe[0] / pe[2], (big / small) ** 3, tol=tol)
+
+    pe_subset = het.get_potential_energy(envs_idx=[1, 3])
+    assert pe_subset.shape == (2,)
+    assert_allclose(pe_subset, pe[[1, 3]], tol=tol)
+
+
+def test_heterogeneous_aabb_fast_approx(tol):
+    """get_AABB(allow_fast_approx=True) must fall back to the active-masked branch for heterogeneous entities.
+
+    The solver fast path aggregates the full contiguous geom range, which includes variant geoms inactive in a
+    given env; without the fallback, envs bound to the sphere variant would report the box variant's AABB too.
+    """
+    scene = gs.Scene(show_viewer=False)  # default LegacyCoupler enables the fast-approx path
+    scene.add_entity(gs.morphs.Plane())
+    het = scene.add_entity(
+        morph=(
+            gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.1)),
+            gs.morphs.Sphere(radius=0.01, pos=(0.1, 0.0, 0.15)),
+        ),
+    )
+    scene.build(n_envs=4)  # envs 0-1 -> box, envs 2-3 -> sphere
+
+    fast = het.get_AABB(allow_fast_approx=True)
+    accurate = het.get_AABB(allow_fast_approx=False)
+    assert_allclose(fast, accurate, tol=gs.EPS)
+    # The two variants differ, so the box envs and sphere envs must not share an AABB.
+    with pytest.raises(AssertionError):
+        assert_allclose(fast[0], fast[2], tol=1e-3)
+
+
+def test_geom_pool_reserved_block_inert(tol):
+    """A reserved but unfilled geometry pool block enlarges device allocation yet is physically inert.
+
+    The pool appends empty geom/vert/face/edge/cell slots to the global arrays (so the device allocation
+    n_geoms_ grows past the real geom count), but until set_active_object fills a slot those rows stay zero:
+    a zero quaternion rotates to a finite point and contype == conaffinity == 0 yields no collision pairs, so
+    the simulation must be bit-identical to the same scene built without a pool.
+    """
+
+    def build(with_pool):
+        pool = None
+        if with_pool:
+            pool = gs.options.GeomPoolOptions(
+                n_slots=3, max_geoms_per_slot=2, max_verts_per_slot=16, max_faces_per_slot=28, max_edges_per_slot=42
+            )
+        scene = gs.Scene(show_viewer=False)
+        scene.add_entity(gs.morphs.Plane())
+        box = scene.add_entity(gs.morphs.Box(size=(0.12, 0.12, 0.12), pos=(0.05, -0.03, 0.4)), geom_pool=pool)
+        scene.build(n_envs=3)
+        for _ in range(60):
+            scene.step()
+        return scene, box
+
+    scene_ref, box_ref = build(with_pool=False)
+    scene_pool, box_pool = build(with_pool=True)
+
+    # The pool reserves device rows beyond the real geom count, but the logical geom list is unchanged.
+    assert scene_ref.rigid_solver.n_geoms_ == scene_ref.rigid_solver.n_geoms
+    assert scene_pool.rigid_solver.n_geoms == scene_ref.rigid_solver.n_geoms
+    assert scene_pool.rigid_solver.n_geoms_ == scene_pool.rigid_solver.n_geoms + 3 * 2
+    assert len(scene_pool.rigid_solver.geoms) == scene_ref.rigid_solver.n_geoms
+    # A pooled scene forces SAP broadphase (per-env slot bindings diverge like heterogeneous variants).
+    assert scene_pool.rigid_solver._resolve_broadphase_traversal() == gs.broadphase_traversal.SAP
+
+    # The reserved block is inert: identical settling to the pool-free scene, and no NaNs from empty slots.
+    ref_pos, pool_pos = box_ref.get_pos(), box_pool.get_pos()
+    assert not torch.isnan(pool_pos).any()
+    assert_allclose(pool_pos, ref_pos, tol=tol)
+    assert_allclose(box_pool.get_mass(), box_ref.get_mass(), tol=tol)
+
+
+def test_set_active_object_runtime_bind(tol):
+    """entity.set_active_object uploads an object into a pool slot and rebinds envs to it at runtime.
+
+    A pooled box entity is built, then env 0 is bound to a larger box loaded at runtime while env 1 keeps the
+    base box. The swap must take effect in physics: env 0's per-env mass and rest height reflect the larger
+    box, env 1's the base box. Re-binding the same object must reuse its slot rather than upload again.
+    """
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    pool = gs.options.GeomPoolOptions(
+        n_slots=3, max_geoms_per_slot=1, max_verts_per_slot=8, max_faces_per_slot=12, max_edges_per_slot=18
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=pool)
+    scene.build(n_envs=2)
+    scene.step()
+
+    base_mass = box.get_mass()
+    assert base_mass.shape == (2,)
+    assert_allclose(base_mass, 0.6, tol=tol)
+
+    # Load a box twice the size into a pool slot and bind env 0 only.
+    big = gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.3))
+    box.set_active_object(big, envs_idx=[0])
+    box.set_pos(np.array([[0.0, 0.0, 0.3], [0.0, 0.0, 0.3]]), zero_velocity=True)
+    scene.step()
+
+    # Per-env mass reflects the swap: env 0 is the 2x box (8x volume/mass), env 1 the base box.
+    mass = box.get_mass()
+    assert_allclose(mass[0], base_mass[0] * 8.0, tol=tol)
+    assert_allclose(mass[1], base_mass[1], tol=tol)
+
+    # get_AABB is pool-aware: env 0's extent is the 2x box, env 1's the base box.
+    ext = torch.diff(box.get_AABB(), dim=-2)[:, 0]  # (n_envs, 3)
+    assert_allclose(ext[0], 0.2, tol=tol)
+    assert_allclose(ext[1], 0.1, tol=tol)
+
+    # Binding the same object again reuses its slot (no second upload).
+    segment = scene.rigid_solver._geom_pool.segment_for_entity(box._idx_in_solver)
+    assert len(segment.key_to_slot) == 1
+    box.set_active_object(big, envs_idx=[0])
+    assert len(segment.key_to_slot) == 1
+
+    # Drop-and-settle: each env rests on its own half-height (0.1 for the big box, 0.05 for the base box).
+    box.set_pos(np.array([[0.0, 0.0, 0.3], [0.0, 0.0, 0.3]]), zero_velocity=True)
+    for _ in range(250):
+        scene.step()
+    z = box.get_pos()[:, 2]
+    assert not torch.isnan(z).any()
+    assert_allclose(z[0], 0.1, tol=5e-3)
+    assert_allclose(z[1], 0.05, tol=5e-3)
+
+
+def test_geom_pool_derived_budgets(tol):
+    """Passing an object catalog auto-derives the pool budgets and slot count; declared objects are cached.
+
+    The bare-list shorthand (`geom_pool=<list of morphs>`) enables the pool, sizes every per-slot budget as
+    the per-dimension maximum over the catalog, defaults n_slots to the catalog size, and caches each object's
+    processed geometry so set_active_object binds it without re-processing (and always within budget).
+    """
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    small = gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3))
+    big = gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.3))
+    ball = gs.morphs.Sphere(radius=0.12, pos=(0.0, 0.0, 0.3))
+    catalog = [small, big, ball]
+    # Bare list of morphs is promoted to a GeomPoolOptions that auto-sizes the pool.
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=catalog)
+    assert box._enable_geom_pool
+    scene.build(n_envs=3)
+
+    segment = scene.rigid_solver._geom_pool.segment_for_entity(box._idx_in_solver)
+    # n_slots defaults to the catalog size; every declared object was processed and cached at build.
+    assert segment.n_slots == len(catalog)
+    assert len(segment.declared) == len(catalog)
+    # Budgets are derived: one geom per primitive, and strictly positive vert/face/edge capacities.
+    assert segment.per_slot["geom"] == 1
+    assert segment.per_slot["vert"] > 0 and segment.per_slot["face"] > 0 and segment.per_slot["edge"] > 0
+
+    # Each declared object binds (cache hit, no upload growth) and rests at its own half-height/radius.
+    for i, morph in enumerate(catalog):
+        box.set_active_object(morph, envs_idx=[i])
+    assert len(segment.key_to_slot) == len(catalog)
+    box.set_pos(np.tile(np.array([0.0, 0.0, 0.3], dtype=np.float32), (3, 1)), zero_velocity=True)
+    for _ in range(250):
+        scene.step()
+    z = box.get_pos()[:, 2]
+    assert not torch.isnan(z).any()
+    assert_allclose(z[0], 0.05, tol=5e-3)  # small box half-height
+    assert_allclose(z[1], 0.1, tol=5e-3)  # big box half-height
+    assert_allclose(z[2], 0.12, tol=5e-3)  # sphere radius
+
+
+def test_geom_pool_raycast_pick(tol):
+    """Viewer raycasting resolves a hit on a pooled (reserved-block) geom to the owning entity's base link.
+
+    Reserved-block slot geoms are absent from the solver's logical geom list, so without the pool-aware lookup
+    a raycast hit on a swapped-in object resolves to None and cannot be picked/dragged (mouse interaction).
+    """
+    from genesis.vis.viewer_plugins.raycast import Raycaster
+
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    big = gs.morphs.Box(size=(0.4, 0.4, 0.4), pos=(0.0, 0.0, 0.5))
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5)), geom_pool=[big])
+    scene.build(n_envs=1)
+    box.set_active_object(big, envs_idx=[0])
+    box.set_pos(np.array([[0.0, 0.0, 0.5]], dtype=np.float32), zero_velocity=True)
+    scene.step()
+
+    # A ray straight down hits the swapped-in 0.4 box (top face near z=0.7); the hit must carry the base link.
+    hit = Raycaster(scene).cast(
+        np.array([0.0, 0.0, 2.0], dtype=gs.np_float), np.array([0.0, 0.0, -1.0], dtype=gs.np_float)
+    )
+    assert hit is not None and hit.geom is not None
+    assert hit.geom.link is box.base_link
+    assert not hit.geom.link.is_fixed
+    assert_allclose(hit.position[2], 0.7, tol=5e-3)
+
+
+def test_link_per_env_inertial(tol):
+    """Per-env inertial getters (mass / COM / orientation / inertia tensor) reflect each env's runtime geometry.
+
+    With per-env geom scaling a link's mass scales as det(scale) and its inertia tensor by the covariance
+    transform; the getters must return these per-env values from the device, not the base build-time ones. This
+    is what lets the mouse spring drag use the correct inertial for a swapped-in / scaled object.
+    """
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    box = scene.add_entity(gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.5)))
+    scene.build(n_envs=2)
+    box.set_scale(np.array([[2.0, 2.0, 2.0], [1.0, 1.0, 1.0]], dtype=np.float32))
+    scene.step()
+
+    link = box.base_link
+    mass = np.asarray(link.get_mass())
+    pos = np.asarray(link.get_inertial_pos())
+    quat = np.asarray(link.get_inertial_quat())
+    inertia = np.asarray(link.get_inertial_i())
+    assert mass.shape == (2,) and pos.shape == (2, 3) and quat.shape == (2, 4) and inertia.shape == (2, 3, 3)
+    # Isotropic 2x scale: mass x det(2I)=8; inertia tensor x 2^5 (mass 2^3 times length^2 2^2).
+    assert_allclose(mass[0], mass[1] * 8.0, tol=tol)
+    assert_allclose(np.diagonal(inertia[0]), np.diagonal(inertia[1]) * 32.0, tol=tol)
+
+
+def test_set_active_object_requires_pool():
+    """set_active_object without a geom pool raises a clear error."""
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)))
+    scene.build(n_envs=2)
+    with pytest.raises(Exception, match="geom_pool"):
+        box.set_active_object(gs.morphs.Box(size=(0.2, 0.2, 0.2)))
+
+
+def test_set_active_object_eviction(tol):
+    """When the pool is full, binding a new object evicts the LRU slot no env is bound to."""
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    pool = gs.options.GeomPoolOptions(
+        n_slots=2, max_geoms_per_slot=1, max_verts_per_slot=8, max_faces_per_slot=12, max_edges_per_slot=18
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=pool)
+    scene.build(n_envs=2)
+    scene.step()
+    segment = scene.rigid_solver._geom_pool.segment_for_entity(box._idx_in_solver)
+
+    a = gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.3))  # env 0
+    b = gs.morphs.Box(size=(0.3, 0.3, 0.3), pos=(0.0, 0.0, 0.3))  # env 1
+    c = gs.morphs.Box(size=(0.4, 0.4, 0.4), pos=(0.0, 0.0, 0.3))  # env 0, evicts a
+    box.set_active_object(a, envs_idx=[0])
+    box.set_active_object(b, envs_idx=[1])
+    assert len(segment.key_to_slot) == 2  # both slots resident
+    box.set_active_object(c, envs_idx=[0])  # env 0 leaves a's slot (refcount 0) -> a evicted, c reused there
+    assert len(segment.key_to_slot) == 2  # still 2 (a gone, c added)
+    assert id(a) not in segment.key_to_slot
+
+    # env 0 now the 0.4 box, env 1 still the 0.3 box.
+    box.set_pos(np.array([[0.0, 0.0, 0.5], [0.0, 0.0, 0.5]]), zero_velocity=True)
+    for _ in range(220):
+        scene.step()
+    z = box.get_pos()[:, 2]
+    assert_allclose(z[0], 0.2, tol=1e-2)
+    assert_allclose(z[1], 0.15, tol=1e-2)
+
+
+def test_set_active_object_pool_exhausted():
+    """Binding a new object raises when every slot is bound to an environment (none evictable)."""
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    pool = gs.options.GeomPoolOptions(
+        n_slots=1, max_geoms_per_slot=1, max_verts_per_slot=8, max_faces_per_slot=12, max_edges_per_slot=18
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=pool)
+    scene.build(n_envs=2)
+    box.set_active_object(gs.morphs.Box(size=(0.2, 0.2, 0.2)), envs_idx=[0])
+    with pytest.raises(Exception, match="full"):
+        box.set_active_object(gs.morphs.Box(size=(0.3, 0.3, 0.3)), envs_idx=[1])
+
+
+def test_set_active_object_nonconvex(tol):
+    """set_active_object uploads a nonconvex mesh (SDF grid) into a pool slot and it collides correctly.
+
+    A nonconvex duck is loaded at runtime into env 0's slot; its SDF grid is uploaded into the slot's reserved
+    cell range and the vertex-vs-SDF narrowphase must let it rest on the plane (finite, no tunnelling), while
+    env 1 keeps the base box.
+    """
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    # Budgets sized for the duck mesh (n_verts~502, n_faces~1000, n_edges~1500, sdf cells ~65*67*97).
+    pool = gs.options.GeomPoolOptions(
+        n_slots=1,
+        max_geoms_per_slot=1,
+        max_verts_per_slot=600,
+        max_faces_per_slot=1100,
+        max_edges_per_slot=1600,
+        max_cells_per_slot=430000,
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=pool)
+    scene.build(n_envs=2)
+    scene.step()
+
+    duck = gs.morphs.Mesh(file="meshes/duck.obj", scale=0.1, pos=(0.0, 0.0, 0.3), convexify=False)
+    box.set_active_object(duck, envs_idx=[0])
+    box.set_pos(np.array([[0.0, 0.0, 0.3], [0.0, 0.0, 0.3]]), zero_velocity=True)
+
+    # Per-env mass reflects the swap (duck != base box).
+    mass = box.get_mass()
+    assert mass.shape == (2,)
+    with pytest.raises(AssertionError):
+        assert_allclose(mass[0], mass[1], tol=1e-2)
+
+    for _ in range(300):
+        scene.step()
+    z = box.get_pos()[:, 2]
+    assert torch.isfinite(z).all()
+    assert z[0] > 0.0  # duck rests on the plane (nonconvex SDF collision), no tunnelling
+    assert_allclose(z[1], 0.05, tol=5e-3)  # env 1 base box unchanged
+
+
+def test_set_active_object_visual(tol):
+    """With visual pooling (max_vgeoms_per_slot), a pooled object renders its own shape per environment.
+
+    get_vAABB is the backend-agnostic proxy: the pooled object's placeholder vgeom is visible only in the
+    bound envs (its trimesh + per-env link pose), and the base morph's visual is hidden there, so env 0's
+    visual bounds match the swapped object while env 1 keeps the base box.
+    """
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    pool = gs.options.GeomPoolOptions(
+        n_slots=2,
+        max_geoms_per_slot=1,
+        max_verts_per_slot=8,
+        max_faces_per_slot=12,
+        max_edges_per_slot=18,
+        max_vgeoms_per_slot=1,
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=pool)
+    scene.build(n_envs=2)
+    scene.step()
+
+    base_ext = torch.diff(box.get_vAABB(), dim=-2)[:, 0]  # (n_envs, 3)
+    assert_allclose(base_ext[0], 0.1, tol=tol)
+    assert_allclose(base_ext[1], 0.1, tol=tol)
+
+    box.set_active_object(gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.3)), envs_idx=[0])
+    scene.step()
+    ext = torch.diff(box.get_vAABB(), dim=-2)[:, 0]
+    assert_allclose(ext[0], 0.2, tol=tol)  # env 0 renders the pooled 2x box
+    assert_allclose(ext[1], 0.1, tol=tol)  # env 1 still renders the base box
+
+
+def test_set_active_object_scale(tol):
+    """set_scale rescales the ACTIVE pooled object per env (collision + visual + inertial), not the base geom."""
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    pool = gs.options.GeomPoolOptions(
+        n_slots=2,
+        max_geoms_per_slot=1,
+        max_verts_per_slot=8,
+        max_faces_per_slot=12,
+        max_edges_per_slot=18,
+        max_vgeoms_per_slot=1,
+    )
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)), geom_pool=pool)
+    scene.build(n_envs=2)
+    box.set_active_object(gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.3)), envs_idx=[0])
+    box.set_active_object(gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(0.0, 0.0, 0.3)), envs_idx=[1])
+    mass_before = box.get_mass()
+
+    box.set_scale(2.0, envs_idx=[0])  # scale env 0's active object x2 (det = 8)
+    scene.step()
+    # Mass scales by det on env 0 only; collision + visual AABB double on env 0.
+    mass = box.get_mass()
+    assert_allclose(mass[0], mass_before[0] * 8.0, tol=tol)
+    assert_allclose(mass[1], mass_before[1], tol=tol)
+    assert_allclose(torch.diff(box.get_AABB(), dim=-2)[0, 0], 0.4, tol=tol)
+    assert_allclose(torch.diff(box.get_vAABB(), dim=-2)[0, 0], 0.4, tol=tol)
+    assert_allclose(torch.diff(box.get_AABB(), dim=-2)[1, 0], 0.2, tol=tol)
+
+    # Drop-and-settle: env 0's 0.4 box rests at 0.2, env 1's 0.2 box at 0.1.
+    box.set_pos(np.array([[0.0, 0.0, 0.6], [0.0, 0.0, 0.6]]), zero_velocity=True)
+    for _ in range(250):
+        scene.step()
+    z = box.get_pos()[:, 2]
+    assert_allclose(z[0], 0.2, tol=1e-2)
+    assert_allclose(z[1], 0.1, tol=1e-2)
+
+
+@pytest.mark.parametrize("backend", [gs.gpu])
+def test_geom_scale_visual(tol):
+    """Per-env scale is mirrored onto visual geometry: get_vAABB / get_vverts rescale per env."""
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
+        show_viewer=False,
+    )
+    scene.add_entity(gs.morphs.Plane())
+    box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5)))
+    scene.build(n_envs=2)
+    scene.step()
+
+    ext0 = torch.diff(box.get_vAABB(), dim=-2)[:, 0]  # (n_envs, 3) visual extents, both unit
+    assert_allclose(ext0[0], ext0[1], tol=1e-3)
+
+    box.set_scale((2.0, 1.0, 3.0), envs_idx=[1])
+    scene.step()
+
+    # Visual AABB: env 0 unchanged, env 1 scaled per axis.
+    ext1 = torch.diff(box.get_vAABB(), dim=-2)[:, 0]
+    assert_allclose(ext1[0], ext0[0], tol=1e-3)
+    assert_allclose(ext1[1] / ext0[1], (2.0, 1.0, 3.0), tol=2e-2)
+
+    # get_vverts reflects the same scale (env 1 world-vert bbox is the per-axis-scaled env 0 bbox).
+    vv = box.get_vverts()
+    vext = vv.max(dim=-2).values - vv.min(dim=-2).values
+    assert_allclose(vext[1] / vext[0], (2.0, 1.0, 3.0), tol=2e-2)
+
+    # Visual and collision geometry stay consistent under scale.
+    assert_allclose(torch.diff(box.get_AABB(), dim=-2)[1, 0], ext1[1], tol=1e-2)
+
+
 # 30s
 @pytest.mark.slow  # ~250s
 @pytest.mark.parametrize("backend", [gs.gpu])  # Grasping physics requires GPU

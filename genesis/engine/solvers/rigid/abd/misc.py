@@ -360,22 +360,27 @@ def kernel_init_link_fields(
 @qd.kernel(fastcache=True)
 def kernel_update_heterogeneous_links_vgeom(
     i_l: qd.i32,
+    envs_idx: qd.types.ndarray(),
     links_vgeom_start: qd.types.ndarray(),
     links_vgeom_end: qd.types.ndarray(),
     # Quadrants variables
     links_info: array_class.LinksInfo,
 ):
-    """Update per-environment links vgeom for heterogeneous entities."""
-    _B = links_vgeom_start.shape[0]
+    """Bind per-environment link vgeom ranges for a heterogeneous variant.
 
-    for i_b in range(_B):
-        links_info.vgeom_start[i_l, i_b] = links_vgeom_start[i_b]
-        links_info.vgeom_end[i_l, i_b] = links_vgeom_end[i_b]
+    'envs_idx' selects the environments to (re)bind; the value arrays are indexed positionally by the
+    selection, so the same kernel serves both build-time dispatch (all envs) and runtime rebind (subset).
+    """
+    for i_b_ in range(envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        links_info.vgeom_start[i_l, i_b] = links_vgeom_start[i_b_]
+        links_info.vgeom_end[i_l, i_b] = links_vgeom_end[i_b_]
 
 
 @qd.kernel(fastcache=True)
 def kernel_update_heterogeneous_link_info(
     i_l: qd.i32,
+    envs_idx: qd.types.ndarray(),
     links_geom_start: qd.types.ndarray(),
     links_geom_end: qd.types.ndarray(),
     links_vgeom_start: qd.types.ndarray(),
@@ -387,24 +392,27 @@ def kernel_update_heterogeneous_link_info(
     # Quadrants variables
     links_info: array_class.LinksInfo,
 ):
-    """Update per-environment link info for heterogeneous entities."""
-    _B = links_geom_start.shape[0]
+    """Bind per-environment link geom/vgeom ranges and inertial for a heterogeneous variant.
 
-    for i_b in range(_B):
-        links_info.geom_start[i_l, i_b] = links_geom_start[i_b]
-        links_info.geom_end[i_l, i_b] = links_geom_end[i_b]
-        links_info.vgeom_start[i_l, i_b] = links_vgeom_start[i_b]
-        links_info.vgeom_end[i_l, i_b] = links_vgeom_end[i_b]
-        links_info.inertial_mass[i_l, i_b] = links_inertial_mass[i_b]
+    'envs_idx' selects the environments to (re)bind; the value arrays are indexed positionally by the
+    selection, so the same kernel serves both build-time dispatch (all envs) and runtime rebind (subset).
+    """
+    for i_b_ in range(envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        links_info.geom_start[i_l, i_b] = links_geom_start[i_b_]
+        links_info.geom_end[i_l, i_b] = links_geom_end[i_b_]
+        links_info.vgeom_start[i_l, i_b] = links_vgeom_start[i_b_]
+        links_info.vgeom_end[i_l, i_b] = links_vgeom_end[i_b_]
+        links_info.inertial_mass[i_l, i_b] = links_inertial_mass[i_b_]
 
         for j in qd.static(range(3)):
-            links_info.inertial_pos[i_l, i_b][j] = links_inertial_pos[i_b, j]
+            links_info.inertial_pos[i_l, i_b][j] = links_inertial_pos[i_b_, j]
 
         for j in qd.static(range(4)):
-            links_info.inertial_quat[i_l, i_b][j] = links_inertial_quat[i_b, j]
+            links_info.inertial_quat[i_l, i_b][j] = links_inertial_quat[i_b_, j]
 
         for j1, j2 in qd.static(qd.ndrange(3, 3)):
-            links_info.inertial_i[i_l, i_b][j1, j2] = links_inertial_i[i_b, j1, j2]
+            links_info.inertial_i[i_l, i_b][j1, j2] = links_inertial_i[i_b_, j1, j2]
 
 
 @qd.kernel(fastcache=True)
@@ -642,6 +650,7 @@ def kernel_init_geom_fields(
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g, i_b in qd.ndrange(n_geoms, _B):
         geoms_state.friction_ratio[i_g, i_b] = 1.0
+        geoms_state.scale[i_g, i_b] = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
 
 
 @qd.kernel(fastcache=True)
@@ -656,9 +665,15 @@ def kernel_init_vgeom_fields(
     vgeoms_color: qd.types.ndarray(),
     # Quadrants variables
     vgeoms_info: array_class.VGeomsInfo,
+    vgeoms_state: array_class.VGeomsState,
     static_rigid_sim_config: qd.template(),
 ):
     n_vgeoms = vgeoms_pos.shape[0]
+    _B = vgeoms_state.pos.shape[1]
+
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_vg, i_b in qd.ndrange(n_vgeoms, _B):
+        vgeoms_state.scale[i_vg, i_b] = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
 
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_vg in range(n_vgeoms):
@@ -913,6 +928,12 @@ def kernel_update_vgeoms_render_T(
         geom_T = gu.qd_trans_quat_to_T(
             vgeoms_state.pos[i_g, i_b] + rigid_global_info.envs_offset[i_b], vgeoms_state.quat[i_g, i_b], EPS
         )
+        if qd.static(static_rigid_sim_config.enable_geom_scaling):
+            # Bake the scale into the rotation block (R @ diag(scale)) so the mesh renders scaled about its frame.
+            scale = vgeoms_state.scale[i_g, i_b]
+            for i in qd.static(range(3)):
+                for j in qd.static(range(3)):
+                    geom_T[i, j] = geom_T[i, j] * scale[j]
         if (qd.abs(geom_T) < 1e20).all():
             for J in qd.static(qd.grouped(qd.ndrange(4, 4))):
                 vgeoms_render_T[(i_g, i_b, *J)] = qd.cast(geom_T[J], qd.float32)

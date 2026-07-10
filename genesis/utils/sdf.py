@@ -9,7 +9,10 @@ import genesis.utils.array_class as array_class
 class SDF:
     def __init__(self, rigid_solver):
         self.solver = rigid_solver
-        self._sdf_info = array_class.get_sdf_info(self.solver.n_geoms, self.solver.n_cells)
+        # Size to the device allocation counts (which include any reserved geometry-pool block), not the
+        # logical geom/cell counts, so set_active_object can upload SDF grids into reserved slot cell ranges.
+        # Equivalent to the logical counts for pool-free scenes (n_geoms_ == max(1, n_geoms)).
+        self._sdf_info = array_class.get_sdf_info(self.solver.n_geoms_, self.solver.n_cells_)
         self._is_active = False
 
     def activate(self):
@@ -56,8 +59,10 @@ def sdf_kernel_init_geom_fields(
     static_rigid_sim_config: qd.template(),
     sdf_info: array_class.SDFInfo,
 ):
-    n_geoms = sdf_info.geoms_sdf_start.shape[0]
-    n_cells = sdf_info.geoms_sdf_val.shape[0]
+    # Iterate the payload extents (the real geoms/cells being uploaded), not the field allocation, which may
+    # be larger when a geometry pool reserves trailing geom/cell rows; those reserved rows stay zero here.
+    n_geoms = geoms_sdf_res.shape[0]
+    n_cells = geoms_sdf_val.shape[0]
 
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i in range(n_geoms):
