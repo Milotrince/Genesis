@@ -7444,6 +7444,41 @@ def test_topology_variant_inert_dof(show_viewer, tol):
 
 
 @pytest.mark.required
+def test_topology_variant_contact(show_viewer, tol):
+    # A ragged entity (a free base plus a child link whose joint is a hinge in one env and a slide in the
+    # other) dropped onto a plane. Contact must resolve per env: the base rests on the plane without
+    # tunnelling and settles, validating the collider + constraint solver under ragged topology.
+    def robot(child_joint):
+        mjcf = ET.Element("mujoco", model=f"robot_{child_joint}")
+        ET.SubElement(mjcf, "option", gravity="0 0 -9.81")
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        base = ET.SubElement(worldbody, "body", name="base", pos="0 0 0.4")
+        ET.SubElement(base, "joint", name="root", type="free")
+        ET.SubElement(base, "geom", type="box", size="0.1 0.1 0.05", mass="1.0")
+        arm = ET.SubElement(base, "body", name="arm", pos="0.1 0 0")
+        ET.SubElement(arm, "joint", name="j", type=child_joint, axis="0 1 0", pos="0 0 0")
+        ET.SubElement(arm, "geom", type="capsule", fromto="0 0 0 0.15 0 0", size="0.02", mass="0.1")
+        return ET.tostring(mjcf, encoding="unicode")
+
+    scene = gs.Scene(show_viewer=show_viewer)
+    scene.add_entity(gs.morphs.Plane())
+    ragged = scene.add_entity(
+        morph=(gs.morphs.MJCF(file=robot("hinge")), gs.morphs.MJCF(file=robot("slide"))),
+    )
+    scene.build(n_envs=2)
+    assert scene.rigid_solver._enable_ragged_topology
+    assert ragged.n_dofs == 7  # free base (6) + one child DOF
+
+    for _ in range(120):
+        scene.step()
+    base_z = ragged.get_pos()[..., 2]
+    assert not torch.isnan(base_z).any()
+    assert (base_z > 0.0).all()  # no tunnelling through the plane
+    assert_allclose(base_z, 0.05, tol=5e-3)  # box half-height resting on the plane
+    assert (ragged.get_vel().abs() < 0.05).all()  # settled
+
+
+@pytest.mark.required
 def test_heterogeneous_invalid_material_raises():
     """Test that heterogeneous morphs with unsupported material raises an exception."""
     scene = gs.Scene(
