@@ -155,6 +155,7 @@ from .abd.accessor import (
     kernel_set_geoms_scale,
     kernel_set_vgeoms_scale,
     kernel_set_links_inertial,
+    kernel_set_links_local_pos,
     kernel_set_qpos,
     kernel_set_global_sol_params,
     kernel_set_sol_params,
@@ -1078,7 +1079,7 @@ class RigidSolver(KinematicSolver):
             _update_geom_active_envs(vgeom, vgeom_starts, vgeom_ends, envs_idx, self._B)
 
     def _reset_entity_geom_scale(self, entity, envs_idx):
-        """Reset an entity's per-environment geom/vgeom scale to unit (native size) for the given envs.
+        """Reset an entity's per-environment geom/vgeom scale (and scaled kinematic tree) to native size.
 
         A variant/object rebind writes the newly bound geometry's *unscaled* baseline inertial, so any
         per-env scale left over from an earlier `set_scale` would leave the geometry sized inconsistently
@@ -1098,6 +1099,15 @@ class RigidSolver(KinematicSolver):
             vgeoms_idx = np.array([vgeom.idx for vgeom in vgeoms], dtype=gs.np_int)
             ones = np.ones((n_sel, len(vgeoms_idx), 3), dtype=gs.np_float)
             kernel_set_vgeoms_scale(ones, vgeoms_idx, envs_idx, self.vgeoms_state, self._static_rigid_sim_config)
+        # set_scale also scales each non-root link's offset relative to its parent. A ragged rebind already
+        # rewrote every link pose to its variant baseline, but a non-ragged (shared-skeleton) entity needs its
+        # scaled tree restored to the primary baseline here so the geometry, inertial and tree agree at unit size.
+        if not entity._has_ragged_topology and len(entity.links) > 1:
+            links = entity.links
+            links_idx = np.array([link.idx for link in links], dtype=gs.np_int)
+            base_pos = np.stack([np.array(link.pos, dtype=gs.np_float) for link in links])
+            base_pos = np.broadcast_to(base_pos[None], (n_sel, len(links), 3)).copy()
+            kernel_set_links_local_pos(base_pos, links_idx, envs_idx, self.links_info, self._static_rigid_sim_config)
 
     def _dispatch_heterogeneous_topology(self):
         """Bind per-env kinematic topology (joint type + DOF/q mapping) for ragged heterogeneous entities.
@@ -3537,6 +3547,23 @@ class RigidSolver(KinematicSolver):
         kernel_set_links_inertial(
             out_mass, out_pos, out_quat, out_i, links_idx, envs_idx_np, self.links_info, self._static_rigid_sim_config
         )
+
+        # 2b. Scale the kinematic tree itself: each non-root link's offset relative to its parent scales with the
+        #     entity, so a multi-link body grows/shrinks as one rigid structure instead of each link scaling in
+        #     place about its own frame (which left the links overlapping at their unscaled relative positions).
+        #     The root link keeps its pose (the entity stays put and its children scale outward from the base).
+        #     Offsets are expressed in the parent frame, so componentwise scaling is exact for an isotropic scale;
+        #     an anisotropic scale of a rotated joint is approximate. Intra-link joint anchors and geom offsets are
+        #     env-shared (not batched), so they are not per-env scaled here - bodies whose links are framed at their
+        #     joint (the common case) scale exactly; a large intra-link geom/joint offset is a known limitation.
+        out_link_pos = np.empty((n_sel, n_l, 3), dtype=gs.np_float)
+        for i_l_, link in enumerate(links):
+            base_pos = np.array(link.pos, dtype=gs.np_float)
+            if link.parent_idx < 0:
+                out_link_pos[:, i_l_] = base_pos  # root: unscaled, keeps the entity in place
+            else:
+                out_link_pos[:, i_l_] = scale * base_pos
+        kernel_set_links_local_pos(out_link_pos, links_idx, envs_idx_np, self.links_info, self._static_rigid_sim_config)
 
         # 3. Refresh neutral-rest invweight/meaninertia (preserving the current joint configuration; the restoring
         #    set_qpos also drops stale contact caches and re-runs forward kinematics so geom poses/AABBs rescale).

@@ -642,6 +642,22 @@ def kernel_set_links_inertial(
 
 
 @qd.kernel(fastcache=True)
+def kernel_set_links_local_pos(
+    links_pos: qd.types.ndarray(),
+    links_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    links_info: array_class.LinksInfo,
+    static_rigid_sim_config: qd.template(),
+):
+    """Write per-environment link local position (static offset relative to parent). Requires batch_links_info."""
+    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_l_, i_b_ in qd.ndrange(links_idx.shape[0], envs_idx.shape[0]):
+        i_l, i_b = links_idx[i_l_], envs_idx[i_b_]
+        for j in qd.static(range(3)):
+            links_info.pos[i_l, i_b][j] = links_pos[i_b_, i_l_, j]
+
+
+@qd.kernel(fastcache=True)
 def kernel_set_qpos(
     qpos: qd.types.ndarray(),
     qs_idx: qd.types.ndarray(),

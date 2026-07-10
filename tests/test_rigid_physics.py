@@ -7883,6 +7883,44 @@ def test_geom_scale(tol):
     cylinder.set_scale((2.0, 2.0, 3.0))
 
 
+def test_geom_scale_multi_link_tree(tol):
+    """Per-env scale grows a multi-link body as one rigid structure: each non-root link's offset relative to
+    its parent scales too, so the links separate proportionally instead of scaling in place about their own
+    frames (which left every link at its unscaled relative position while only the geometry grew)."""
+    mjcf = ET.Element("mujoco", model="two_link")
+    ET.SubElement(mjcf, "option", gravity="0 0 0")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    link1 = ET.SubElement(worldbody, "body", name="l1", pos="0 0 1.0")
+    ET.SubElement(link1, "joint", name="j1", type="hinge", axis="0 1 0")
+    ET.SubElement(link1, "geom", type="capsule", fromto="0 0 0 0.4 0 0", size="0.03", mass="0.2")
+    link2 = ET.SubElement(link1, "body", name="l2", pos="0.4 0 0")
+    ET.SubElement(link2, "joint", name="j2", type="hinge", axis="0 1 0")
+    ET.SubElement(link2, "geom", type="capsule", fromto="0 0 0 0.4 0 0", size="0.03", mass="0.2")
+
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
+    arm = scene.add_entity(morph=gs.morphs.MJCF(file=ET.tostring(mjcf, encoding="unicode")))
+    scene.build(n_envs=2)
+    scene.step()
+
+    arm.set_scale(np.array([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]))  # env 1 is twice as big
+    scene.step()
+    pos = arm.get_links_pos()  # (n_envs, n_links, 3), world frame; links = [base child l1, l2]
+    root = arm.n_links - 2  # index of l1 (the fixed base occupies slot 0)
+    off_1x = (pos[0, root + 1] - pos[0, root]).norm()
+    off_2x = (pos[1, root + 1] - pos[1, root]).norm()
+    assert_allclose(off_2x / off_1x, 2.0, tol=tol)  # the child link separated twice as far
+    assert_allclose(pos[1, root, 2] / pos[0, root, 2], 2.0, tol=tol)  # base child rose twice as high off the root
+
+    # Returning to unit scale restores the native tree (scaling reads from the baseline, not cumulative), so the
+    # previously-2x env's child offset shrinks back to match the unit env's.
+    arm.set_scale(np.ones((2, 3)))
+    scene.step()
+    pos = arm.get_links_pos()
+    off_0 = (pos[0, root + 1] - pos[0, root]).norm()
+    off_1 = (pos[1, root + 1] - pos[1, root]).norm()
+    assert_allclose(off_1 / off_0, 1.0, tol=1e-4)
+
+
 def test_geom_scale_requires_option():
     """set_scale must raise when the scene was not built with enable_geom_scaling."""
     scene = gs.Scene(show_viewer=False)
