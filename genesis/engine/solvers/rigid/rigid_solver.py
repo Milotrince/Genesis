@@ -3062,8 +3062,24 @@ class RigidSolver(KinematicSolver):
             g_infos = entity._load_mesh(object_ref, entity._surface, load_geom_only_for_heterogeneous=True)
         elif isinstance(object_ref, gs.morphs.Primitive):
             g_infos = entity._load_primitive(object_ref, entity._surface, load_geom_only_for_heterogeneous=True)
+        elif isinstance(object_ref, gs.morphs.USD):
+            # A pool object is a single swappable body, so only a basic (single free/fixed base) USD is allowed;
+            # an articulated USD (multiple links / a joint tree) has no single geom group to pool. Parse it and
+            # take the sole link's collision geometry - its inertial is derived from that geometry at upload,
+            # exactly like a Mesh/Primitive pool object (any authored MassAPI is not used in the pool).
+            l_infos, _, links_g_infos, _ = entity._parse_scene(object_ref, entity._surface)
+            if len(l_infos) != 1:
+                gs.raise_exception(
+                    f"geom_pool USD objects must be a single rigid body (basic), but '{object_ref.file}' parsed "
+                    f"to {len(l_infos)} links (an articulated tree). Use it as an add_entity(morph=[...]) variant "
+                    "instead."
+                )
+            g_infos = links_g_infos[0]
         else:
-            gs.raise_exception("set_active_object only supports gs.morphs.Mesh and gs.morphs.Primitive objects.")
+            gs.raise_exception(
+                "set_active_object only supports gs.morphs.Mesh, gs.morphs.Primitive and (single-body) "
+                "gs.morphs.USD objects."
+            )
         return entity._postprocess_geoms_info(object_ref, g_infos, is_robot=False)
 
     def _pool_make_geom(self, entity, g_info, idx, vert_start, face_start, edge_start, cell_start, verts_state_start):

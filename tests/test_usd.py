@@ -1132,6 +1132,34 @@ def test_heterogeneous_usd_variants(het_free_body_usd, het_articulated_usd):
     assert not np.isnan(tensor_to_array(mixed.get_dofs_position())).any()
 
 
+@pytest.mark.required
+def test_geom_pool_usd_object(het_free_body_usd, het_articulated_usd):
+    """A single-body USD can live in the geometry pool alongside primitives and be bound per environment; an
+    articulated USD (a joint tree, no single geom group to pool) is rejected."""
+
+    def usd(path):
+        return gs.morphs.USD(file=path, convexify=False, decimate=False, align=False, pos=(0.0, 0.0, 0.5))
+
+    objects = [usd(het_free_body_usd), gs.morphs.Sphere(radius=0.1, pos=(0.0, 0.0, 0.5))]
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    obj = scene.add_entity(gs.morphs.Box(size=(0.15, 0.15, 0.15), pos=(0.0, 0.0, 0.5)), geom_pool=objects)
+    scene.build(n_envs=4)
+
+    obj.set_active_object(objects[0], envs_idx=[0, 2])  # the USD body
+    obj.set_active_object(objects[1], envs_idx=[1, 3])  # the sphere
+    for _ in range(30):
+        scene.step()
+    assert not np.isnan(tensor_to_array(obj.get_pos())).any()
+
+    # An articulated USD has no single swappable geom group, so pooling it must raise.
+    scene = gs.Scene(show_viewer=False)
+    scene.add_entity(gs.morphs.Plane())
+    with pytest.raises(gs.GenesisException):
+        scene.add_entity(gs.morphs.Box(size=(0.15, 0.15, 0.15)), geom_pool=[usd(het_articulated_usd)])
+        scene.build(n_envs=2)
+
+
 @pytest.fixture(scope="session")
 def visual_collision_usd(asset_tmp_path):
     """Create a USD file mimicking Pan011 structure: separate Visual/Collision groups + invisible Sites.

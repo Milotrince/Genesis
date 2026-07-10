@@ -416,7 +416,8 @@ class GeomPoolOptions(Options):
     Parameters
     ----------
     objects : list of gs.morphs.Morph | None
-        Catalog of objects the pool will hold (``gs.morphs.Mesh`` / ``gs.morphs.Primitive``). When given, every
+        Catalog of objects the pool will hold (``gs.morphs.Mesh`` / ``gs.morphs.Primitive`` / a single-body
+        ``gs.morphs.USD``). When given, every
         per-slot budget is derived as the per-dimension maximum over these objects and ``n_slots`` defaults to
         ``len(objects)``; the explicit ``max_*_per_slot`` fields are ignored. ``set_active_object`` may still be
         called with any of these objects (fast, cache-backed) or with a new object that fits the derived
