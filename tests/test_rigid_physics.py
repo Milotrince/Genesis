@@ -7911,6 +7911,13 @@ def test_geom_scale_multi_link_tree(tol):
     assert_allclose(off_2x / off_1x, 2.0, tol=tol)  # the child link separated twice as far
     assert_allclose(pos[1, root, 2] / pos[0, root, 2], 2.0, tol=tol)  # base child rose twice as high off the root
 
+    # The capsule geom is offset from its link origin (its center is halfway along the link), so its link-frame
+    # offset must scale too: the scaled env's geom sits twice as far from its link as the unit env's.
+    link1_geom = arm.geoms[0].get_pos(relative=False)  # (n_envs, 3) world frame; the capsule on link l1
+    off_geom_1x = (link1_geom[0] - pos[0, root]).norm()
+    off_geom_2x = (link1_geom[1] - pos[1, root]).norm()
+    assert_allclose(off_geom_2x / off_geom_1x, 2.0, tol=tol)
+
     # Returning to unit scale restores the native tree (scaling reads from the baseline, not cumulative), so the
     # previously-2x env's child offset shrinks back to match the unit env's.
     arm.set_scale(np.ones((2, 3)))

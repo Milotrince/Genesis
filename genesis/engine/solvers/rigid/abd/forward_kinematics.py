@@ -783,11 +783,17 @@ def func_update_geoms_entity(
                 continue
         if func_check_index_range(i_g, entities_info.geom_start[i_e], entities_info.geom_end[i_e], BW):
             if force_update_fixed_geoms or not geoms_info.is_fixed[i_g]:
+                # A per-env geom scale grows the geom's shape about its own frame; the frame's offset within the
+                # link must scale by the same factor so the whole link (offset geoms included) scales uniformly
+                # about the link origin, rather than each geom swelling in place at its unscaled offset.
+                geom_offset = geoms_info.pos[i_g]
+                if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                    geom_offset = geoms_state.scale[i_g, i_b] * geom_offset
                 (
                     geoms_state.pos[i_g, i_b],
                     geoms_state.quat[i_g, i_b],
                 ) = gu.qd_transform_pos_quat_by_trans_quat(
-                    geoms_info.pos[i_g],
+                    geom_offset,
                     geoms_info.quat[i_g],
                     links_state.pos[geoms_info.link_idx[i_g], i_b],
                     links_state.quat[geoms_info.link_idx[i_g], i_b],
@@ -1240,8 +1246,13 @@ def kernel_update_vgeoms(
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g, i_b in qd.ndrange(n_vgeoms, _B):
         i_l = vgeoms_info.link_idx[i_g]
+        # Scale the visual geom's link-frame offset with its per-env scale so it tracks the scaled collision
+        # geometry (which scales its own offset in forward kinematics); keeps rendering aligned with physics.
+        vgeom_offset = vgeoms_info.pos[i_g]
+        if qd.static(static_rigid_sim_config.enable_geom_scaling):
+            vgeom_offset = vgeoms_state.scale[i_g, i_b] * vgeom_offset
         vgeoms_state.pos[i_g, i_b], vgeoms_state.quat[i_g, i_b] = gu.qd_transform_pos_quat_by_trans_quat(
-            vgeoms_info.pos[i_g], vgeoms_info.quat[i_g], links_state.pos[i_l, i_b], links_state.quat[i_l, i_b]
+            vgeom_offset, vgeoms_info.quat[i_g], links_state.pos[i_l, i_b], links_state.quat[i_l, i_b]
         )
 
 

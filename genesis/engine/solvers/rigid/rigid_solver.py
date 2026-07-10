@@ -3553,9 +3553,11 @@ class RigidSolver(KinematicSolver):
         #     place about its own frame (which left the links overlapping at their unscaled relative positions).
         #     The root link keeps its pose (the entity stays put and its children scale outward from the base).
         #     Offsets are expressed in the parent frame, so componentwise scaling is exact for an isotropic scale;
-        #     an anisotropic scale of a rotated joint is approximate. Intra-link joint anchors and geom offsets are
-        #     env-shared (not batched), so they are not per-env scaled here - bodies whose links are framed at their
-        #     joint (the common case) scale exactly; a large intra-link geom/joint offset is a known limitation.
+        #     an anisotropic scale of a rotated joint is approximate. Intra-link geom offsets are scaled by the same
+        #     per-env factor in forward kinematics (func_update_geoms_entity / kernel_update_vgeoms), so an offset
+        #     geom tracks its link. Joint anchors (joints_info.pos) are env-shared and not per-env scaled here; a
+        #     body whose links are framed at their joint (the common case, e.g. every URDF) is unaffected - a large
+        #     intra-link joint anchor is the one remaining known limitation.
         out_link_pos = np.empty((n_sel, n_l, 3), dtype=gs.np_float)
         for i_l_, link in enumerate(links):
             base_pos = np.array(link.pos, dtype=gs.np_float)
@@ -3579,6 +3581,11 @@ class RigidSolver(KinematicSolver):
                 self.collider.reset(envs_idx)
             if self.constraint_solver is not None:
                 self.constraint_solver.reset(envs_idx)
+
+        # A fixed geom's world pose is only recomputed on a forced update, so a fixed base link's offset geoms
+        # would otherwise keep their unscaled position while their shape scaled. Force one update here so their
+        # scaled link-frame offset (applied in forward kinematics) takes effect.
+        self._func_update_geoms(envs_idx, force_update_fixed_geoms=True)
 
     def set_global_sol_params(self, sol_params):
         """
