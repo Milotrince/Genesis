@@ -1049,7 +1049,6 @@ class RigidLink(KinematicLink):
             self._inertial_i = self._inertial_i * ratio[..., None, None]
             self._invweight = self._invweight / ratio[..., None]
 
-    @gs.assert_built
     @property
     def _has_per_env_inertial(self) -> bool:
         """Whether the runtime link inertial can differ per environment.
