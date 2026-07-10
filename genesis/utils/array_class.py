@@ -2291,6 +2291,7 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # Per-island adaptive timestep: each island integrates at macro_dt / rate. Gated to require use_contact_island.
     use_adaptive_timestep: bool = False
     adaptive_timestep_max_rate: int = 1  # upper bound on an island's rate; also caps the micro-step schedule length
+    adaptive_timestep_ref_speed: float = 1.0  # DOF speed above which an island sub-steps (rate assignment criterion)
     # Consecutive sub-tolerance steps a body's max DOF velocity must hold before it is ready to hibernate. Guards
     # against a body that is only momentarily slow (e.g. at the apex of a toss) sleeping prematurely.
     hibernation_min_steps: int = 10

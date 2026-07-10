@@ -265,10 +265,19 @@ class RigidSolver(KinematicSolver):
         # Per-island adaptive timesteps build on the island partition (a rate is per island), so they require islands.
         self._use_adaptive_timestep = options.use_adaptive_timestep
         self._adaptive_timestep_max_rate = options.adaptive_timestep_max_rate
-        if self._use_adaptive_timestep and not self._use_contact_island:
-            gs.raise_exception(
-                "`use_adaptive_timestep=True` requires `use_contact_island=True`, as per-island rates build on islands."
-            )
+        self._adaptive_timestep_ref_speed = options.adaptive_timestep_ref_speed
+        if self._use_adaptive_timestep:
+            if not self._use_contact_island:
+                gs.raise_exception(
+                    "`use_adaptive_timestep=True` requires `use_contact_island=True`, as per-island rates build on "
+                    "islands."
+                )
+            max_rate = self._adaptive_timestep_max_rate
+            if max_rate & (max_rate - 1) != 0:
+                gs.raise_exception(
+                    f"`adaptive_timestep_max_rate` must be a power of two (got {max_rate}) so every power-of-two island "
+                    "rate divides it evenly."
+                )
 
         # Resolve the hibernation velocity tolerance. MuJoCo compatibility uses MuJoCo's own default (1e-4); otherwise
         # use a coarser floor that a body reliably settles below across float precisions and dense contact piles, where
@@ -529,6 +538,7 @@ class RigidSolver(KinematicSolver):
             use_contact_island=self._use_contact_island,
             use_adaptive_timestep=self._use_adaptive_timestep,
             adaptive_timestep_max_rate=self._adaptive_timestep_max_rate if self._use_adaptive_timestep else 1,
+            adaptive_timestep_ref_speed=self._adaptive_timestep_ref_speed,
             # The per-island solve engages wherever islands are on by default (CPU, where it composes with the sparse
             # skyline). The GPU block below narrows it to exclude the whole-env-fits-shared no-hibernation case, which
             # factors faster through the whole-env path (its block-diagonal Cholesky is the exact per-island result).
@@ -1253,6 +1263,15 @@ class RigidSolver(KinematicSolver):
             )
             self._func_constraint_force()
             if self._use_adaptive_timestep:
+                # Assign per-island rates once, at the macro boundary, from pre-integration velocities; they then
+                # persist across this macro step's micro-ticks. The scatter converts them to per-DOF dt each tick.
+                if tick == 0:
+                    kernel_assign_island_rates(
+                        self.dofs_state,
+                        self.constraint_solver.island_state,
+                        self._rigid_global_info,
+                        self._static_rigid_sim_config,
+                    )
                 kernel_update_dofs_dt(
                     tick,
                     self.constraint_solver.island_state,
@@ -3437,6 +3456,41 @@ def kernel_step_1(
         island_state=island_state,
         is_backward=is_backward,
     )
+
+
+@qd.kernel(fastcache=True)
+def kernel_assign_island_rates(
+    dofs_state: array_class.DofsState,
+    island_state: array_class.IslandState,
+    rigid_global_info: array_class.RigidGlobalInfo,
+    static_rigid_sim_config: qd.template(),
+):
+    """Assign each island a power-of-two rate from its maximum DOF speed (a velocity CFL).
+
+    An island whose fastest DOF moves at speed v gets rate clamp(next_pow2(ceil(v / ref_speed)), 1, R_max), so a
+    settled island stays at rate 1 (one macro step) and a fast one sub-steps. Assigned at the macro boundary from
+    pre-integration velocities and left to persist across the macro step's micro-ticks. Rotational and translational
+    DOF speeds are compared to the same reference, i.e. the criterion does not yet weight rotation by swept radius.
+    """
+    R_max = qd.static(static_rigid_sim_config.adaptive_timestep_max_rate)
+    v_ref = qd.static(static_rigid_sim_config.adaptive_timestep_ref_speed)
+    n_links = island_state.island_rate.shape[0]
+    _B = island_state.island_rate.shape[1]
+    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_island, i_b in qd.ndrange(n_links, _B):
+        if i_island < island_state.n_islands[i_b]:
+            vmax = 0.0
+            i_start = island_state.dof_slices.start[i_island, i_b]
+            for i_local in range(island_state.dof_slices.n[i_island, i_b]):
+                i_d = island_state.dof_id[i_start + i_local, i_b]
+                v = qd.abs(dofs_state.vel[i_d, i_b])
+                if v > vmax:
+                    vmax = v
+            ratio = vmax / v_ref
+            rate = 1
+            while rate < R_max and rate < ratio:
+                rate = rate * 2
+            island_state.island_rate[i_island, i_b] = rate
 
 
 @qd.kernel(fastcache=True)
