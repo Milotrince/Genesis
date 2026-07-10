@@ -214,9 +214,13 @@ class KinematicEntity(Entity):
 
         # Load additional heterogeneous variants
         for morph in self._morph_heterogeneous:
-            if isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF)):
-                # Parse variant scene file
-                morph._enable_mujoco_compatibility = self._morph._enable_mujoco_compatibility
+            if isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF, gs.morphs.USD)):
+                # Parse variant scene file. A USD variant parses into the same link/joint tree as URDF/MJCF - a
+                # single free/fixed base body yields one link (basic, is_robot False), a jointed one yields the
+                # articulated tree - so both flow through this branch and the ragged machinery below reconciles
+                # differing link/joint/DOF counts across variants.
+                if isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF)):
+                    morph._enable_mujoco_compatibility = self._morph._enable_mujoco_compatibility
                 v_l_infos, v_links_j_infos, v_links_g_infos, _ = self._parse_scene(morph, self._surface)
                 self._variant_links_l_infos.append(v_l_infos)
                 self._variant_links_j_infos.append(v_links_j_infos)
@@ -361,7 +365,8 @@ class KinematicEntity(Entity):
                 self._variant_offset_quat.append(offset_quat)
             else:
                 gs.raise_exception(
-                    f"Heterogeneous morphs only support URDF, MJCF, Primitive, and Mesh, got: {type(morph).__name__}."
+                    f"Heterogeneous morphs only support URDF, MJCF, USD, Primitive, and Mesh, got: "
+                    f"{type(morph).__name__}."
                 )
 
         # For multi-link entities, reassign indices and recompute variant ranges

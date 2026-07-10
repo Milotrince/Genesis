@@ -399,12 +399,19 @@ class Scene(RBC):
                     "Heterogeneous morphs (iterable of morphs) are only supported for Rigid and Kinematic materials."
                 )
             if not all(
-                isinstance(m, (gs.morphs.Primitive, gs.morphs.Mesh, gs.morphs.URDF, gs.morphs.MJCF)) for m in morph
+                isinstance(m, (gs.morphs.Primitive, gs.morphs.Mesh, gs.morphs.URDF, gs.morphs.MJCF, gs.morphs.USD))
+                for m in morph
             ):
-                gs.raise_exception("Heterogeneous morphs only support Primitive, Mesh, URDF and MJCF types.")
-            if len(set(isinstance(m, (gs.morphs.URDF, gs.morphs.MJCF)) for m in morph)) > 1:
+                gs.raise_exception("Heterogeneous morphs only support Primitive, Mesh, URDF, MJCF and USD types.")
+            # Scene-based morphs (URDF/MJCF/USD) parse into a link/joint tree and may mix freely: variants with
+            # different link/joint/DOF counts are reconciled by ragged topology (a narrower variant pads its
+            # trailing slots inert), and a USD that is a single free/fixed base body just parses as a one-link
+            # tree. Basic geom-only morphs (Primitive/Mesh) instead swap geometry on one body. The two groups use
+            # different machinery and cannot be mixed in a single entity.
+            is_scene_based = [isinstance(m, (gs.morphs.URDF, gs.morphs.MJCF, gs.morphs.USD)) for m in morph]
+            if len(set(is_scene_based)) > 1:
                 gs.raise_exception(
-                    "Heterogeneous morphs must be consistent: either all articulated robots (ie URDF, MJCF) or all "
+                    "Heterogeneous morphs must be consistent: either all scene-based (URDF, MJCF, USD) or all "
                     "basic objects (ie Primitive, Mesh)."
                 )
         else:
