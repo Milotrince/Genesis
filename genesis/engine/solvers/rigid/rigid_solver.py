@@ -33,6 +33,7 @@ from genesis.utils.sdf import SDF
 from ..base_solver import Solver, StateChange, mutates
 from ..kinematic_solver import (
     KinematicSolver,
+    _balanced_variant_mapping,
     _select_links_offset,
     _offset_world_shift,
     _fill_base_link_geom_offsets,
@@ -68,6 +69,7 @@ from .abd.misc import (
     kernel_reset_hibernation,
     kernel_init_link_fields,
     kernel_update_heterogeneous_link_info,
+    kernel_update_heterogeneous_topology,
     kernel_init_joint_fields,
     kernel_init_vert_fields,
     kernel_init_vvert_fields,
@@ -271,6 +273,9 @@ class RigidSolver(KinematicSolver):
         self._box_box_detection = options.box_box_detection
         self._requires_grad = self._sim.options.requires_grad
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
+        # Set at build when any heterogeneous entity has variants that differ in joint type / DOF count, i.e.
+        # ragged per-env kinematic topology (requires per-env joint + DOF info to rebind each env's variant).
+        self._enable_ragged_topology = False
         self._enable_geom_scaling = options.enable_geom_scaling  # per-env runtime geom scale (set_scale)
         # Dynamic geometry residency pool (Phase 3). Declared per-entity via add_entity(geom_pool=...), which
         # flips _enable_geom_pool; the aggregated static layout is built in build() once real counts are known.
@@ -535,6 +540,13 @@ class RigidSolver(KinematicSolver):
         # rest test, so this is needed exactly when both features are active. We must update options because
         # get_dofs_info reads from solver._options.batch_dofs_info.
         if self._enable_heterogeneous and self._use_hibernation:
+            self._options.batch_dofs_info = True
+
+        # Ragged per-env topology (variants differing in joint type / DOF count) rebinds each env's joint type
+        # and DOF mapping, so joints_info and dofs_info must be batched per env. Detect it from the entities.
+        self._enable_ragged_topology = any(entity._has_ragged_topology for entity in self.entities)
+        if self._enable_ragged_topology:
+            self._options.batch_joints_info = True
             self._options.batch_dofs_info = True
 
         # sparse_solve=None resolves automatically: the skyline-envelope solver pays off on CPU only when the scene
@@ -1064,6 +1076,104 @@ class RigidSolver(KinematicSolver):
             _update_geom_active_envs(geom, geom_starts, geom_ends, envs_idx, self._B)
         for vgeom in link.vgeoms:
             _update_geom_active_envs(vgeom, vgeom_starts, vgeom_ends, envs_idx, self._B)
+
+    def _dispatch_heterogeneous_topology(self):
+        """Bind per-env kinematic topology (joint type + DOF/q mapping) for ragged heterogeneous entities.
+
+        Each ragged entity's environments are assigned variants by the same balanced mapping used for geometry.
+        """
+        if not self._enable_ragged_topology:
+            return
+        envs_idx = np.arange(self._B, dtype=gs.np_int)
+        for entity in self.entities:
+            if not entity._has_ragged_topology:
+                continue
+            variant_idx = _balanced_variant_mapping(len(entity._variant_links_j_infos), self._B)
+            self._bind_entity_topology(entity, variant_idx, envs_idx)
+
+    def _bind_entity_topology(self, entity, variant_idx, envs_idx):
+        """Rebind each environment's joint type and DOF/q mapping to its assigned variant for one entity.
+
+        The first morph defines the skeleton slot widths; a narrower variant leaves the slot's trailing padding
+        DOFs inert (armature 1 so the mass-matrix diagonal is 1 and they decouple). Only single-joint links are
+        supported for ragged topology so a link's active DOFs stay contiguous at its slot start.
+        """
+        links = entity.links
+        joints = entity.joints
+        n_sel = len(envs_idx)
+        link_idxs = np.array([link.idx for link in links], dtype=gs.np_int)
+        joint_idxs = np.array([joint.idx for joint in joints], dtype=gs.np_int)
+        dof_idxs = np.arange(entity.dof_start, entity.dof_end, dtype=gs.np_int)
+
+        links_n_dofs = np.empty((len(links), n_sel), dtype=gs.np_int)
+        links_dof_start = np.empty((len(links), n_sel), dtype=gs.np_int)
+        links_dof_end = np.empty((len(links), n_sel), dtype=gs.np_int)
+        links_q_start = np.empty((len(links), n_sel), dtype=gs.np_int)
+        links_q_end = np.empty((len(links), n_sel), dtype=gs.np_int)
+        joints_type = np.empty((len(joints), n_sel), dtype=gs.np_int)
+        joints_n_dofs = np.empty((len(joints), n_sel), dtype=gs.np_int)
+        joints_dof_start = np.empty((len(joints), n_sel), dtype=gs.np_int)
+        joints_dof_end = np.empty((len(joints), n_sel), dtype=gs.np_int)
+        joints_q_start = np.empty((len(joints), n_sel), dtype=gs.np_int)
+        joints_q_end = np.empty((len(joints), n_sel), dtype=gs.np_int)
+        dofs_armature = np.empty((len(dof_idxs), n_sel), dtype=gs.np_float)
+
+        for i_b_, variant in enumerate(variant_idx):
+            variant_links_j_infos = entity._variant_links_j_infos[variant]
+            i_j_flat = 0
+            for i_l_, link in enumerate(links):
+                if len(link.joints) > 1:
+                    gs.raise_exception(
+                        f"Ragged heterogeneous topology requires single-joint links; link '{link.name}' has "
+                        f"{len(link.joints)} joints."
+                    )
+                link_n_dofs = 0
+                link_n_qs = 0
+                for i_j_local, p_joint in enumerate(link.joints):
+                    v_j_info = variant_links_j_infos[i_l_][i_j_local]
+                    v_n_dofs = v_j_info["n_dofs"]
+                    v_n_qs = v_j_info["n_qs"]
+                    joints_type[i_j_flat, i_b_] = int(v_j_info["type"])
+                    joints_n_dofs[i_j_flat, i_b_] = v_n_dofs
+                    joints_dof_start[i_j_flat, i_b_] = p_joint.dof_start
+                    joints_dof_end[i_j_flat, i_b_] = p_joint.dof_start + v_n_dofs
+                    joints_q_start[i_j_flat, i_b_] = p_joint.q_start
+                    joints_q_end[i_j_flat, i_b_] = p_joint.q_start + v_n_qs
+                    v_armature = v_j_info.get("dofs_armature", np.zeros(v_n_dofs, dtype=gs.np_float))
+                    for i_d_slot in range(p_joint.n_dofs):
+                        i_d_local = p_joint.dof_start + i_d_slot - entity.dof_start
+                        # Active DOFs take the variant's armature; trailing padding DOFs are inert (diagonal 1).
+                        dofs_armature[i_d_local, i_b_] = v_armature[i_d_slot] if i_d_slot < v_n_dofs else 1.0
+                    link_n_dofs += v_n_dofs
+                    link_n_qs += v_n_qs
+                    i_j_flat += 1
+                links_n_dofs[i_l_, i_b_] = link_n_dofs
+                links_dof_start[i_l_, i_b_] = link.dof_start
+                links_dof_end[i_l_, i_b_] = link.dof_start + link_n_dofs
+                links_q_start[i_l_, i_b_] = link.q_start
+                links_q_end[i_l_, i_b_] = link.q_start + link_n_qs
+
+        kernel_update_heterogeneous_topology(
+            envs_idx,
+            link_idxs,
+            links_n_dofs,
+            links_dof_start,
+            links_dof_end,
+            links_q_start,
+            links_q_end,
+            joint_idxs,
+            joints_type,
+            joints_n_dofs,
+            joints_dof_start,
+            joints_dof_end,
+            joints_q_start,
+            joints_q_end,
+            dof_idxs,
+            dofs_armature,
+            self.links_info,
+            self.joints_info,
+            self.dofs_info,
+        )
 
     def _init_vert_fields(self):
         self.verts_info = self.data_manager.verts_info

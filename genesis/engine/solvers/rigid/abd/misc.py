@@ -416,6 +416,58 @@ def kernel_update_heterogeneous_link_info(
 
 
 @qd.kernel(fastcache=True)
+def kernel_update_heterogeneous_topology(
+    envs_idx: qd.types.ndarray(),
+    link_idxs: qd.types.ndarray(),
+    links_n_dofs: qd.types.ndarray(),
+    links_dof_start: qd.types.ndarray(),
+    links_dof_end: qd.types.ndarray(),
+    links_q_start: qd.types.ndarray(),
+    links_q_end: qd.types.ndarray(),
+    joint_idxs: qd.types.ndarray(),
+    joints_type: qd.types.ndarray(),
+    joints_n_dofs: qd.types.ndarray(),
+    joints_dof_start: qd.types.ndarray(),
+    joints_dof_end: qd.types.ndarray(),
+    joints_q_start: qd.types.ndarray(),
+    joints_q_end: qd.types.ndarray(),
+    dof_idxs: qd.types.ndarray(),
+    dofs_armature: qd.types.ndarray(),
+    # Quadrants variables
+    links_info: array_class.LinksInfo,
+    joints_info: array_class.JointsInfo,
+    dofs_info: array_class.DofsInfo,
+):
+    """Bind per-environment kinematic topology (joint type + DOF/q mapping) for ragged heterogeneous variants.
+
+    For the selected environments, rewrites each link's DOF/q range, each joint's type and DOF/q range, and
+    each DOF's armature (1 on an inert padding DOF a narrower variant does not use, so the mass-matrix diagonal
+    stays 1 and the DOF decouples). Requires batched links/joints/dofs info; value arrays are indexed
+    positionally by the selection, so this serves both build-time dispatch and runtime rebind.
+    """
+    for i_b_ in range(envs_idx.shape[0]):
+        i_b = envs_idx[i_b_]
+        for i_l_ in range(link_idxs.shape[0]):
+            i_l = link_idxs[i_l_]
+            links_info.n_dofs[i_l, i_b] = links_n_dofs[i_l_, i_b_]
+            links_info.dof_start[i_l, i_b] = links_dof_start[i_l_, i_b_]
+            links_info.dof_end[i_l, i_b] = links_dof_end[i_l_, i_b_]
+            links_info.q_start[i_l, i_b] = links_q_start[i_l_, i_b_]
+            links_info.q_end[i_l, i_b] = links_q_end[i_l_, i_b_]
+        for i_j_ in range(joint_idxs.shape[0]):
+            i_j = joint_idxs[i_j_]
+            joints_info.type[i_j, i_b] = joints_type[i_j_, i_b_]
+            joints_info.n_dofs[i_j, i_b] = joints_n_dofs[i_j_, i_b_]
+            joints_info.dof_start[i_j, i_b] = joints_dof_start[i_j_, i_b_]
+            joints_info.dof_end[i_j, i_b] = joints_dof_end[i_j_, i_b_]
+            joints_info.q_start[i_j, i_b] = joints_q_start[i_j_, i_b_]
+            joints_info.q_end[i_j, i_b] = joints_q_end[i_j_, i_b_]
+        for i_d_ in range(dof_idxs.shape[0]):
+            i_d = dof_idxs[i_d_]
+            dofs_info.armature[i_d, i_b] = dofs_armature[i_d_, i_b_]
+
+
+@qd.kernel(fastcache=True)
 def kernel_init_joint_fields(
     joints_type: qd.types.ndarray(),
     joints_sol_params: qd.types.ndarray(),

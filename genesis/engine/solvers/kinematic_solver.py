@@ -517,6 +517,12 @@ class KinematicSolver(Solver):
 
         # Dispatch heterogeneous variant vgeom ranges per-environment
         self._dispatch_heterogeneous_vgeoms()
+        # Dispatch per-env kinematic topology (joint type + DOF mapping) for ragged variants. No-op unless the
+        # RigidSolver override handles it; kinematic-only scenes carry no dynamics topology.
+        self._dispatch_heterogeneous_topology()
+
+    def _dispatch_heterogeneous_topology(self):
+        """Bind per-env kinematic topology for ragged heterogeneous variants. No-op in the base solver."""
 
     def _dispatch_heterogeneous_vgeoms(self):
         """Bind each heterogeneous link's build-time variant assignment across all environments."""

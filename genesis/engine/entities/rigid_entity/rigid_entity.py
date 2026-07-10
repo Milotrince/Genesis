@@ -100,6 +100,9 @@ class KinematicEntity(Entity):
         # per-env kinematic topology (joint type + DOF mapping) can be rebound per environment. None otherwise.
         self._primary_links_j_infos = None
         self._variant_links_j_infos = None
+        # True when heterogeneous variants differ in joint type or DOF count at a shared slot (ragged per-env
+        # topology). The first morph defines the skeleton slot widths; narrower variants inert the padding DOFs.
+        self._has_ragged_topology = False
         # Per-entity dynamic geometry pool request (Phase 3); the solver reserves its slots at build.
         self._geom_pool_options = geom_pool
         self._enable_geom_pool = geom_pool is not None
@@ -232,11 +235,17 @@ class KinematicEntity(Entity):
                                 f"Joint name mismatch at link {i_l}: primary has '{p_joint.name}', "
                                 f"variant has '{v_j_info['name']}'. All variants must have the same joint names."
                             )
-                        if p_joint.type != v_j_info["type"]:
+                        # Joint type and DOF count may differ per variant (per-env joint locking / DOF-count
+                        # variation); the variant joint must fit the skeleton slot's DOF/q width, which the first
+                        # morph defines. A wider variant joint needs a wider primary - order the widest first.
+                        if v_j_info["n_dofs"] > p_joint.n_dofs or v_j_info["n_qs"] > p_joint.n_qs:
                             gs.raise_exception(
-                                f"Joint type mismatch for '{p_joint.name}': primary has {p_joint.type}, "
-                                f"variant has {v_j_info['type']}."
+                                f"Heterogeneous variant joint '{p_joint.name}' has {v_j_info['n_dofs']} DOFs / "
+                                f"{v_j_info['n_qs']} qs, exceeding the first morph's slot ({p_joint.n_dofs} / "
+                                f"{p_joint.n_qs}). Order the variants so the joint with the most DOFs comes first."
                             )
+                        if p_joint.type != v_j_info["type"] or p_joint.n_dofs != v_j_info["n_dofs"]:
+                            self._has_ragged_topology = True
                         if p_joint.n_dofs != v_j_info["n_dofs"]:
                             gs.raise_exception(
                                 f"DoF count mismatch for joint '{p_joint.name}': primary has {p_joint.n_dofs}, "
