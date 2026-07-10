@@ -1248,12 +1248,28 @@ class RigidSolver(KinematicSolver):
         island_state = self.constraint_solver.island_state
         for tick in range(max_ticks):
             if self._use_adaptive_timestep:
-                # Flag which islands are frozen on this tick before the solve, so it skips them. Tick 0 is the macro
-                # boundary (all islands active); later ticks reuse the rates assigned at tick 0 (stable by index).
+                # Assign per-island rates once, at the macro boundary, from the pre-integration velocities of the
+                # previous step's partition (dofs_rate is DOF-keyed, so it stays valid across the rebuild below).
+                # sched_len (the fastest rate) then bounds the loop. The dt scatter runs BEFORE kernel_step_1 so the
+                # implicit-damping mass factor and func_integrate both read this tick's dofs_dt; the per-island solve
+                # then skips any island all of whose DOFs are held this tick (dofs_dt == 0), read off the freshly
+                # rebuilt partition inside func_island_solve_skip.
                 if tick == 0:
-                    island_state.island_inactive.fill(0)
-                else:
-                    kernel_mark_active_islands(tick, sched_len, island_state, self._static_rigid_sim_config)
+                    island_state.island_rate_max.fill(1)
+                    kernel_assign_island_rates(
+                        self.dofs_state,
+                        island_state,
+                        self._rigid_global_info,
+                        self._static_rigid_sim_config,
+                    )
+                    sched_len = int(qd_to_numpy(island_state.island_rate_max)[0])
+                kernel_update_dofs_dt(
+                    tick,
+                    sched_len,
+                    island_state,
+                    self._rigid_global_info,
+                    self._static_rigid_sim_config,
+                )
             kernel_step_1(
                 self.links_state,
                 self.links_info,
@@ -1273,25 +1289,6 @@ class RigidSolver(KinematicSolver):
                 self._is_backward,
             )
             self._func_constraint_force()
-            if self._use_adaptive_timestep:
-                # Assign per-island rates once, at the macro boundary, from pre-integration velocities; they then
-                # persist across this macro step's micro-ticks. sched_len (the fastest rate) then bounds the loop.
-                if tick == 0:
-                    island_state.island_rate_max.fill(1)
-                    kernel_assign_island_rates(
-                        self.dofs_state,
-                        island_state,
-                        self._rigid_global_info,
-                        self._static_rigid_sim_config,
-                    )
-                    sched_len = int(qd_to_numpy(island_state.island_rate_max)[0])
-                kernel_update_dofs_dt(
-                    tick,
-                    sched_len,
-                    island_state,
-                    self._rigid_global_info,
-                    self._static_rigid_sim_config,
-                )
             kernel_step_2(
                 self.dofs_state,
                 self.dofs_info,
@@ -3513,39 +3510,6 @@ def kernel_assign_island_rates(
             # this island later merges with another mid-macro-step.
             for i_local in range(island_state.dof_slices.n[i_island, i_b]):
                 island_state.dofs_rate[island_state.dof_id[i_start + i_local, i_b], i_b] = rate
-
-
-@qd.kernel(fastcache=True)
-def kernel_mark_active_islands(
-    tick: qd.i32,
-    sched_len: qd.i32,
-    island_state: array_class.IslandState,
-    static_rigid_sim_config: qd.template(),
-):
-    """Flag islands frozen (inactive) on micro-step `tick`, so the per-island solve skips them.
-
-    An island of rate r is active iff tick is a multiple of sched_len / r; an inactive island does not integrate this
-    tick, so its factor/solve is redundant and func_island_solve_skip skips it. Run before the constraint solve, using
-    the rates assigned at the macro boundary (which persist by island index across the macro step's re-partitions).
-    """
-    n_links = island_state.island_inactive.shape[0]
-    _B = island_state.island_inactive.shape[1]
-    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
-    for i_island, i_b in qd.ndrange(n_links, _B):
-        if i_island < island_state.n_islands[i_b]:
-            # Active if ANY of the island's DOFs integrates this tick. A merged island holding both a fast and a slow
-            # body is thus solved (the fast DOF is active), while the slow body's DOFs stay frozen via dofs_dt.
-            any_active = False
-            i_start = island_state.dof_slices.start[i_island, i_b]
-            for i_local in range(island_state.dof_slices.n[i_island, i_b]):
-                rate = island_state.dofs_rate[island_state.dof_id[i_start + i_local, i_b], i_b]
-                if rate < 1:
-                    rate = 1
-                elif rate > sched_len:
-                    rate = sched_len
-                if tick % (sched_len // rate) == 0:
-                    any_active = True
-            island_state.island_inactive[i_island, i_b] = 0 if any_active else 1
 
 
 @qd.kernel(fastcache=True)
