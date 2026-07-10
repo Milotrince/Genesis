@@ -141,6 +141,10 @@ def func_forward_dynamics(
     entities_state: array_class.EntitiesState,
     entities_info: array_class.EntitiesInfo,
     geoms_state: array_class.GeomsState,
+    geoms_info: array_class.GeomsInfo,
+    sites_info: array_class.SitesInfo,
+    tendons_info: array_class.TendonsInfo,
+    tendons_state: array_class.TendonsState,
     rigid_global_info: array_class.RigidGlobalInfo,
     static_rigid_sim_config: qd.template(),
     island_state: array_class.IslandState,
@@ -166,6 +170,18 @@ def func_forward_dynamics(
         static_rigid_sim_config=static_rigid_sim_config,
         is_backward=is_backward,
     )
+    func_compute_tendon_length_moment(
+        tendons_info=tendons_info,
+        tendons_state=tendons_state,
+        sites_info=sites_info,
+        dofs_state=dofs_state,
+        links_info=links_info,
+        links_state=links_state,
+        geoms_state=geoms_state,
+        geoms_info=geoms_info,
+        rigid_global_info=rigid_global_info,
+        static_rigid_sim_config=static_rigid_sim_config,
+    )
     func_torque_and_passive_force(
         entities_state=entities_state,
         entities_info=entities_info,
@@ -175,6 +191,8 @@ def func_forward_dynamics(
         links_info=links_info,
         joints_info=joints_info,
         geoms_state=geoms_state,
+        tendons_info=tendons_info,
+        tendons_state=tendons_state,
         rigid_global_info=rigid_global_info,
         static_rigid_sim_config=static_rigid_sim_config,
         island_state=island_state,
@@ -225,6 +243,10 @@ def kernel_forward_dynamics(
     entities_state: array_class.EntitiesState,
     entities_info: array_class.EntitiesInfo,
     geoms_state: array_class.GeomsState,
+    geoms_info: array_class.GeomsInfo,
+    sites_info: array_class.SitesInfo,
+    tendons_info: array_class.TendonsInfo,
+    tendons_state: array_class.TendonsState,
     rigid_global_info: array_class.RigidGlobalInfo,
     static_rigid_sim_config: qd.template(),
     island_state: array_class.IslandState,
@@ -238,6 +260,10 @@ def kernel_forward_dynamics(
         entities_state=entities_state,
         entities_info=entities_info,
         geoms_state=geoms_state,
+        geoms_info=geoms_info,
+        sites_info=sites_info,
+        tendons_info=tendons_info,
+        tendons_state=tendons_state,
         rigid_global_info=rigid_global_info,
         static_rigid_sim_config=static_rigid_sim_config,
         island_state=island_state,
@@ -274,6 +300,510 @@ def func_vel_at_point(pos_world, link_idx, i_b, links_state: array_class.LinksSt
     vel_rot = links_state.cd_ang[link_idx, i_b].cross(pos_world - links_state.root_COM[link_idx, i_b])
     vel_lin = links_state.cd_vel[link_idx, i_b]
     return vel_rot + vel_lin
+
+
+@qd.func
+def func_add_point_moment(
+    i_t,
+    i_b,
+    body_link,
+    point,
+    u,
+    scale,
+    tendons_state: array_class.TendonsState,
+    dofs_state: array_class.DofsState,
+    links_info: array_class.LinksInfo,
+    links_state: array_class.LinksState,
+    static_rigid_sim_config: qd.template(),
+):
+    # Accumulate scale * u . Jp[i_d] into the tendon moment for every DOF on the parent chain of `body_link`, where
+    # Jp[i_d] = cdof_vel[i_d] + cdof_ang[i_d] x (point - root_COM) is the translational Jacobian of `point` w.r.t. i_d.
+    root_com = links_state.root_COM[body_link, i_b]
+    i_l = body_link
+    while i_l > -1:
+        I_l = [i_l, i_b] if qd.static(static_rigid_sim_config.batch_links_info) else i_l
+        for i_d in range(links_info.dof_start[I_l], links_info.dof_end[I_l]):
+            jp = dofs_state.cdof_vel[i_d, i_b] + dofs_state.cdof_ang[i_d, i_b].cross(point - root_com)
+            tendons_state.moment[i_t, i_d, i_b] = tendons_state.moment[i_t, i_d, i_b] + scale * u.dot(jp)
+        i_l = links_info.parent_idx[I_l]
+
+
+@qd.func
+def func_site_world_pos(site_id, i_b, sites_info: array_class.SitesInfo, links_state: array_class.LinksState):
+    body = sites_info.link_idx[site_id]
+    return links_state.pos[body, i_b] + gu.qd_transform_by_quat(sites_info.pos[site_id], links_state.quat[body, i_b])
+
+
+@qd.func
+def func_add_segment(
+    i_t,
+    i_b,
+    p0,
+    b0,
+    p1,
+    b1,
+    inv_div,
+    eps,
+    tendons_state: array_class.TendonsState,
+    dofs_state: array_class.DofsState,
+    links_info: array_class.LinksInfo,
+    links_state: array_class.LinksState,
+    static_rigid_sim_config: qd.template(),
+):
+    # Accumulate one path segment p0(body b0) -> p1(body b1): add its length/divisor to the return value and its moment
+    # contribution (only when the endpoints are on different bodies).
+    seg = p1 - p0
+    seglen = seg.norm()
+    if b0 != b1 and seglen > eps:
+        u = seg / seglen
+        func_add_point_moment(
+            i_t, i_b, b1, p1, u, inv_div, tendons_state, dofs_state, links_info, links_state, static_rigid_sim_config
+        )
+        func_add_point_moment(
+            i_t, i_b, b0, p0, u, -inv_div, tendons_state, dofs_state, links_info, links_state, static_rigid_sim_config
+        )
+    return seglen * inv_div
+
+
+# ------------------------------------------------------------------------------------------------------------------
+# Tendon geom-wrapping geometry (port of MuJoCo's mju_wrap / wrap_circle / wrap_inside; see engine_util_misc.c).
+# All 2D routines operate in the wrap object's local frame. Return value packs [wlen, p0x, p0y, p1x, p1y]; wlen < 0
+# means "no wrap". The 3D func_wrap returns [wlen, w0(3), w1(3)] in world coordinates.
+# ------------------------------------------------------------------------------------------------------------------
+@qd.func
+def func_normalize3(v):
+    n = qd.sqrt(v.dot(v))
+    return v / qd.max(n, gs.qd_float(1e-15))
+
+
+@qd.func
+def func_mat_vec3(R, v):
+    # R @ v for a 3x3 matrix and 3-vector.
+    return qd.Vector(
+        [
+            R[0, 0] * v[0] + R[0, 1] * v[1] + R[0, 2] * v[2],
+            R[1, 0] * v[0] + R[1, 1] * v[1] + R[1, 2] * v[2],
+            R[2, 0] * v[0] + R[2, 1] * v[1] + R[2, 2] * v[2],
+        ]
+    )
+
+
+@qd.func
+def func_matT_vec3(R, v):
+    # R^T @ v for a 3x3 matrix and 3-vector.
+    return qd.Vector(
+        [
+            R[0, 0] * v[0] + R[1, 0] * v[1] + R[2, 0] * v[2],
+            R[0, 1] * v[0] + R[1, 1] * v[1] + R[2, 1] * v[2],
+            R[0, 2] * v[0] + R[1, 2] * v[1] + R[2, 2] * v[2],
+        ]
+    )
+
+
+@qd.func
+def func_is_intersect(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y):
+    # Whether segment (p1->p2) intersects segment (p3->p4) in 2D.
+    result = False
+    det = (p4y - p3y) * (p2x - p1x) - (p4x - p3x) * (p2y - p1y)
+    if qd.abs(det) >= 1e-15:
+        a = ((p4x - p3x) * (p1y - p3y) - (p4y - p3y) * (p1x - p3x)) / det
+        b = ((p2x - p1x) * (p1y - p3y) - (p2y - p1y) * (p1x - p3x)) / det
+        result = (a >= 0.0) and (a <= 1.0) and (b >= 0.0) and (b <= 1.0)
+    return result
+
+
+@qd.func
+def func_length_circle(p0x, p0y, p1x, p1y, ind, radius):
+    n0 = qd.sqrt(p0x * p0x + p0y * p0y)
+    n1 = qd.sqrt(p1x * p1x + p1y * p1y)
+    d0x = p0x / n0
+    d0y = p0y / n0
+    d1x = p1x / n1
+    d1y = p1y / n1
+    angle = qd.acos(qd.math.clamp(d0x * d1x + d0y * d1y, gs.qd_float(-1.0), gs.qd_float(1.0)))
+    cross = p0y * p1x - p0x * p1y
+    if (cross > 0.0 and ind == 1) or (cross < 0.0 and ind == 0):
+        angle = 2.0 * qd.math.pi - angle
+    return radius * angle
+
+
+@qd.func
+def func_wrap_circle(e0, e1, e2, e3, has_side, sx, sy, radius):
+    # 2D circle wrap. `has_side` toggles side-point preference (the stateless MuJoCo sidesite mechanism); otherwise the
+    # shortest wrap is chosen. Returns [wlen, p0x, p0y, p1x, p1y]; wlen < 0 = no wrap.
+    res = qd.Vector([gs.qd_float(-1.0), gs.qd_float(0.0), gs.qd_float(0.0), gs.qd_float(0.0), gs.qd_float(0.0)])
+    sqlen0 = e0 * e0 + e1 * e1
+    sqlen1 = e2 * e2 + e3 * e3
+    sqrad = radius * radius
+    difx = e2 - e0
+    dify = e3 - e1
+    dd = difx * difx + dify * dify
+
+    valid = True
+    if sqlen0 < sqrad or sqlen1 < sqrad or radius < 1e-15 or dd < 1e-15:
+        valid = False
+
+    if valid:
+        a = -(difx * e0 + dify * e1) / dd
+        a = qd.math.clamp(a, gs.qd_float(0.0), gs.qd_float(1.0))
+        tmpx = a * difx + e0
+        tmpy = a * dify + e1
+        if (tmpx * tmpx + tmpy * tmpy) > sqrad and ((not has_side) or (sx * tmpx + sy * tmpy) >= 0.0):
+            valid = False
+
+    if valid:
+        sqrt0 = qd.sqrt(qd.max(sqlen0 - sqrad, gs.qd_float(0.0)))
+        sqrt1 = qd.sqrt(qd.max(sqlen1 - sqrad, gs.qd_float(0.0)))
+
+        best_good = gs.qd_float(-1e30)
+        best_i = 0
+        best = qd.Vector([gs.qd_float(0.0), gs.qd_float(0.0), gs.qd_float(0.0), gs.qd_float(0.0)])
+        for i in range(2):
+            sgn = gs.qd_float(1.0) if i == 0 else gs.qd_float(-1.0)
+            s00 = (e0 * sqrad + sgn * radius * e1 * sqrt0) / sqlen0
+            s01 = (e1 * sqrad - sgn * radius * e0 * sqrt0) / sqlen0
+            s10 = (e2 * sqrad - sgn * radius * e3 * sqrt1) / sqlen1
+            s11 = (e3 * sqrad + sgn * radius * e2 * sqrt1) / sqlen1
+
+            good = gs.qd_float(0.0)
+            if has_side:
+                tx = s00 + s10
+                ty = s01 + s11
+                tn = qd.sqrt(tx * tx + ty * ty)
+                good = (tx / tn) * sx + (ty / tn) * sy
+            else:
+                tx = s00 - s10
+                ty = s01 - s11
+                good = -(tx * tx + ty * ty)
+            if func_is_intersect(e0, e1, s00, s01, e2, e3, s10, s11):
+                good = gs.qd_float(-10000.0)
+            if good > best_good:
+                best_good = good
+                best_i = i
+                best = qd.Vector([s00, s01, s10, s11])
+
+        if func_is_intersect(e0, e1, best[0], best[1], e2, e3, best[2], best[3]):
+            valid = False
+        else:
+            wlen = func_length_circle(best[0], best[1], best[2], best[3], best_i, radius)
+            res = qd.Vector([wlen, best[0], best[1], best[2], best[3]])
+
+    return res
+
+
+@qd.func
+def func_wrap_inside(e0, e1, e2, e3, radius):
+    # 2D inside wrap (Newton iteration). Returns [wlen(=0 on success, -1 no wrap), p0x, p0y, p1x, p1y].
+    res = qd.Vector([gs.qd_float(-1.0), gs.qd_float(0.0), gs.qd_float(0.0), gs.qd_float(0.0), gs.qd_float(0.0)])
+    maxiter = 20
+    zinit = gs.qd_float(1.0 - 1e-7)
+    tolerance = gs.qd_float(1e-6)
+
+    len0 = qd.sqrt(e0 * e0 + e1 * e1)
+    len1 = qd.sqrt(e2 * e2 + e3 * e3)
+    difx = e2 - e0
+    dify = e3 - e1
+    dd = difx * difx + dify * dify
+
+    valid = True
+    if len0 <= radius or len1 <= radius or radius < 1e-15 or len0 < 1e-15 or len1 < 1e-15:
+        valid = False
+    if valid and dd > 1e-15:
+        a = -(difx * e0 + dify * e1) / dd
+        if a > 0.0 and a < 1.0:
+            tx = e0 + a * difx
+            ty = e1 + a * dify
+            if qd.sqrt(tx * tx + ty * ty) <= radius:
+                valid = False
+
+    if valid:
+        A = radius / len0
+        B = radius / len1
+        cosG = (len0 * len0 + len1 * len1 - dd) / (2.0 * len0 * len1)
+        if cosG < -1.0 + 1e-15:
+            valid = False
+        elif cosG > 1.0 - 1e-15:
+            valid = False  # wlen 0 with default average handled below via no-op (treated as no wrap)
+
+    if valid:
+        # Default (numerical-failure) fallback point: normalized average, scaled to the radius.
+        px = 0.5 * (e0 + e2)
+        py = 0.5 * (e1 + e3)
+        pn = qd.sqrt(px * px + py * py)
+        px = radius * px / pn
+        py = radius * py / pn
+
+        A = radius / len0
+        B = radius / len1
+        cosG = (len0 * len0 + len1 * len1 - dd) / (2.0 * len0 * len1)
+        G = qd.acos(qd.math.clamp(cosG, gs.qd_float(-1.0), gs.qd_float(1.0)))
+
+        z = zinit
+        f = qd.asin(A * z) + qd.asin(B * z) - 2.0 * qd.asin(z) + G
+        converged = f <= 0.0
+        it = 0
+        while it < maxiter and qd.abs(f) > tolerance and converged:
+            df = (
+                A / qd.max(gs.qd_float(1e-15), qd.sqrt(1.0 - z * z * A * A))
+                + B / qd.max(gs.qd_float(1e-15), qd.sqrt(1.0 - z * z * B * B))
+                - 2.0 / qd.max(gs.qd_float(1e-15), qd.sqrt(1.0 - z * z))
+            )
+            if df > -1e-15:
+                converged = False
+            else:
+                z1 = z - f / df
+                if z1 > z:
+                    converged = False
+                else:
+                    z = z1
+                    f = qd.asin(A * z) + qd.asin(B * z) - 2.0 * qd.asin(z) + G
+                    if f > tolerance:
+                        converged = False
+            it += 1
+
+        if converged and it < maxiter:
+            # rotate vec (= a or b) by ang depending on sign of cross(a, b)
+            vx = e0
+            vy = e1
+            ang = qd.asin(z) - qd.asin(A * z)
+            if e0 * e3 - e1 * e2 <= 0.0:
+                vx = e2
+                vy = e3
+                ang = qd.asin(z) - qd.asin(B * z)
+            vn = qd.sqrt(vx * vx + vy * vy)
+            vx = vx / vn
+            vy = vy / vn
+            px = radius * (qd.cos(ang) * vx - qd.sin(ang) * vy)
+            py = radius * (qd.sin(ang) * vx + qd.cos(ang) * vy)
+
+        res = qd.Vector([gs.qd_float(0.0), px, py, px, py])
+
+    return res
+
+
+@qd.func
+def func_wrap(x0, x1, xpos, xmat, radius, is_cylinder, has_side, side):
+    # 3D tendon wrap around a sphere/cylinder geom. Returns [wlen, w0x, w0y, w0z, w1x, w1y, w1z]; wlen < 0 = no wrap.
+    out = qd.Vector([gs.qd_float(-1.0)] + [gs.qd_float(0.0)] * 6)
+
+    # map endpoints to the geom's local frame
+    p0 = func_matT_vec3(xmat, x0 - xpos)
+    p1 = func_matT_vec3(xmat, x1 - xpos)
+
+    valid = True
+    if qd.sqrt(p0.dot(p0)) < 1e-15 or qd.sqrt(p1.dot(p1)) < 1e-15:
+        valid = False
+    axis0 = qd.Vector([gs.qd_float(1.0), gs.qd_float(0.0), gs.qd_float(0.0)])
+    axis1 = qd.Vector([gs.qd_float(0.0), gs.qd_float(1.0), gs.qd_float(0.0)])
+    if valid:
+        # construct the 2D wrap frame
+        if not is_cylinder:
+            axis0 = func_normalize3(p0)
+            normal = p0.cross(p1)
+            nrm = qd.sqrt(normal.dot(normal))
+            if nrm < 1e-15:
+                # p0, p1 parallel: pick an alternative in-plane axis
+                i_max = 0
+                if qd.abs(axis0[1]) > qd.abs(axis0[0]) and qd.abs(axis0[1]) > qd.abs(axis0[2]):
+                    i_max = 1
+                if qd.abs(axis0[2]) > qd.abs(axis0[0]) and qd.abs(axis0[2]) > qd.abs(axis0[1]):
+                    i_max = 2
+                alt = qd.Vector([gs.qd_float(1.0), gs.qd_float(1.0), gs.qd_float(1.0)])
+                alt[i_max] = gs.qd_float(0.0)
+                normal = axis0.cross(alt)
+            normal = func_normalize3(normal)
+            axis1 = func_normalize3(normal.cross(axis0))
+
+        d0 = p0.dot(axis0)
+        d1 = p0.dot(axis1)
+        d2 = p1.dot(axis0)
+        d3 = p1.dot(axis1)
+
+        sx = gs.qd_float(0.0)
+        sy = gs.qd_float(0.0)
+        s_local = qd.Vector([gs.qd_float(0.0), gs.qd_float(0.0), gs.qd_float(0.0)])
+        if has_side:
+            s_local = func_matT_vec3(xmat, side - xpos)
+            sx = s_local.dot(axis0)
+            sy = s_local.dot(axis1)
+            sn = qd.sqrt(sx * sx + sy * sy)
+            sx = radius * sx / sn
+            sy = radius * sy / sn
+
+        wrap2d = func_wrap_circle(d0, d1, d2, d3, has_side, sx, sy, radius)
+        if has_side and s_local.norm() < radius:
+            wrap2d = func_wrap_inside(d0, d1, d2, d3, radius)
+
+        wlen = wrap2d[0]
+        if wlen < 0.0:
+            valid = False
+        else:
+            # reconstruct 3D wrap points in the local frame
+            res0 = axis0 * wrap2d[1] + axis1 * wrap2d[2]
+            res1 = axis0 * wrap2d[3] + axis1 * wrap2d[4]
+
+            if is_cylinder:
+                # interpolate the z (cylinder-axis) coordinate along the path and correct wlen for height
+                L0 = qd.sqrt((p0[0] - res0[0]) ** 2 + (p0[1] - res0[1]) ** 2)
+                L1 = qd.sqrt((p1[0] - res1[0]) ** 2 + (p1[1] - res1[1]) ** 2)
+                denom = L0 + wlen + L1
+                res0[2] = p0[2] + (p1[2] - p0[2]) * L0 / denom
+                res1[2] = p0[2] + (p1[2] - p0[2]) * (L0 + wlen) / denom
+                height = qd.abs(res1[2] - res0[2])
+                wlen = qd.sqrt(wlen * wlen + height * height)
+
+            w0 = func_mat_vec3(xmat, res0) + xpos
+            w1 = func_mat_vec3(xmat, res1) + xpos
+            out = qd.Vector([wlen, w0[0], w0[1], w0[2], w1[0], w1[1], w1[2]])
+
+    return out
+
+
+@qd.func
+def func_compute_tendon_length_moment(
+    tendons_info: array_class.TendonsInfo,
+    tendons_state: array_class.TendonsState,
+    sites_info: array_class.SitesInfo,
+    dofs_state: array_class.DofsState,
+    links_info: array_class.LinksInfo,
+    links_state: array_class.LinksState,
+    geoms_state: array_class.GeomsState,
+    geoms_info: array_class.GeomsInfo,
+    rigid_global_info: array_class.RigidGlobalInfo,
+    static_rigid_sim_config: qd.template(),
+):
+    EPS = rigid_global_info.EPS[None]
+    _B = dofs_state.ctrl_mode.shape[1]
+
+    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_t, i_b in qd.ndrange(qd.static(static_rigid_sim_config.n_tendons), _B):
+        n_mem = tendons_info.n_members[i_t]
+
+        # Reset the moment row (only the relevant DOFs are ever nonzero).
+        for k in range(n_mem):
+            tendons_state.moment[i_t, tendons_info.dof_idx[i_t, k], i_b] = gs.qd_float(0.0)
+
+        length = gs.qd_float(0.0)
+        path_n = 0  # number of recorded world path points (spatial tendons only; for debug visualization)
+        max_path = tendons_state.path_pos.shape[1]
+        if tendons_info.kind[i_t] == gs.TENDON_TYPE.FIXED:
+            for k in range(n_mem):
+                i_d = tendons_info.dof_idx[i_t, k]
+                coef = tendons_info.coef[i_t, k]
+                tendons_state.moment[i_t, i_d, i_b] = coef
+                length = length + coef * rigid_global_info.qpos[tendons_info.q_idx[i_t, k], i_b]
+        else:
+            divisor = gs.qd_float(1.0)
+            prev_valid = False
+            prev_pnt = qd.Vector.zero(gs.qd_float, 3)
+            prev_body = -1
+            n_w = tendons_info.n_wraps[i_t]
+            w = 0
+            while w < n_w:
+                wt = tendons_info.wrap_type[i_t, w]
+                if wt == gs.WRAP_TYPE.PULLEY:
+                    divisor = tendons_info.wrap_prm[i_t, w]
+                    prev_valid = False
+                    w = w + 1
+                elif wt == gs.WRAP_TYPE.SITE:
+                    site_id = tendons_info.wrap_objid[i_t, w]
+                    body = sites_info.link_idx[site_id]
+                    cur_pnt = func_site_world_pos(site_id, i_b, sites_info, links_state)
+
+                    # Emit the segment from the previous point to this site.
+                    if prev_valid:
+                        length = length + func_add_segment(
+                            i_t,
+                            i_b,
+                            prev_pnt,
+                            prev_body,
+                            cur_pnt,
+                            body,
+                            gs.qd_float(1.0) / divisor,
+                            EPS,
+                            tendons_state,
+                            dofs_state,
+                            links_info,
+                            links_state,
+                            static_rigid_sim_config,
+                        )
+                    prev_pnt = cur_pnt
+                    prev_body = body
+                    prev_valid = True
+                    if path_n < max_path:
+                        tendons_state.path_pos[i_t, path_n, i_b] = cur_pnt
+                        path_n = path_n + 1
+
+                    # Look ahead: a geom wrap element (site -> geom -> site) wraps this site to the next one.
+                    is_geom_next = False
+                    if w + 1 < n_w:
+                        wt1 = tendons_info.wrap_type[i_t, w + 1]
+                        is_geom_next = wt1 == gs.WRAP_TYPE.SPHERE or wt1 == gs.WRAP_TYPE.CYLINDER
+                    if is_geom_next:
+                        is_cyl = tendons_info.wrap_type[i_t, w + 1] == gs.WRAP_TYPE.CYLINDER
+                        sideid = tendons_info.wrap_sideid[i_t, w + 1]
+                        geom_body = tendons_info.wrap_geom_link[i_t, w + 1]
+                        site1_id = tendons_info.wrap_objid[i_t, w + 2]
+                        body1 = sites_info.link_idx[site1_id]
+                        next_pnt = func_site_world_pos(site1_id, i_b, sites_info, links_state)
+
+                        # Geom world pose from its owning link's transform (wrap geoms are frames on links).
+                        link_pos = links_state.pos[geom_body, i_b]
+                        link_quat = links_state.quat[geom_body, i_b]
+                        geom_pos = link_pos + gu.qd_transform_by_quat(tendons_info.wrap_geom_pos[i_t, w + 1], link_quat)
+                        geom_quat = gu.qd_transform_quat_by_quat(link_quat, tendons_info.wrap_geom_quat[i_t, w + 1])
+                        geom_R = gu.qd_quat_to_R(geom_quat, EPS)
+                        radius = tendons_info.wrap_geom_radius[i_t, w + 1]
+                        has_side = sideid >= 0
+                        side_pnt = qd.Vector.zero(gs.qd_float, 3)
+                        if has_side:
+                            side_pnt = func_site_world_pos(sideid, i_b, sites_info, links_state)
+                        wrapv = func_wrap(cur_pnt, next_pnt, geom_pos, geom_R, radius, is_cyl, has_side, side_pnt)
+                        wlen = wrapv[0]
+                        if wlen >= 0.0:
+                            w0 = qd.Vector([wrapv[1], wrapv[2], wrapv[3]])
+                            w1 = qd.Vector([wrapv[4], wrapv[5], wrapv[6]])
+                            # segment site -> first wrap point
+                            length = length + func_add_segment(
+                                i_t,
+                                i_b,
+                                prev_pnt,
+                                prev_body,
+                                w0,
+                                geom_body,
+                                gs.qd_float(1.0) / divisor,
+                                EPS,
+                                tendons_state,
+                                dofs_state,
+                                links_info,
+                                links_state,
+                                static_rigid_sim_config,
+                            )
+                            # wrapped arc (both endpoints on the geom body: length only, no moment)
+                            length = length + wlen / divisor
+                            prev_pnt = w1
+                            prev_body = geom_body
+                            if path_n < max_path:
+                                tendons_state.path_pos[i_t, path_n, i_b] = w0
+                                path_n = path_n + 1
+                            if path_n < max_path:
+                                tendons_state.path_pos[i_t, path_n, i_b] = w1
+                                path_n = path_n + 1
+                        # advance past the geom element; the next site (w+2) is handled on the next iteration
+                        w = w + 2
+                    else:
+                        w = w + 1
+                else:
+                    w = w + 1
+        tendons_state.length[i_t, i_b] = length
+        tendons_state.path_num[i_t, i_b] = path_n
+
+        # Tendon velocity = sum_i moment_i * qvel_i over the relevant DOFs.
+        velocity = gs.qd_float(0.0)
+        for k in range(n_mem):
+            i_d = tendons_info.dof_idx[i_t, k]
+            velocity = velocity + tendons_state.moment[i_t, i_d, i_b] * dofs_state.vel[i_d, i_b]
+        tendons_state.velocity[i_t, i_b] = velocity
 
 
 @qd.func
@@ -1095,6 +1625,8 @@ def func_torque_and_passive_force(
     links_info: array_class.LinksInfo,
     joints_info: array_class.JointsInfo,
     geoms_state: array_class.GeomsState,
+    tendons_info: array_class.TendonsInfo,
+    tendons_state: array_class.TendonsState,
     rigid_global_info: array_class.RigidGlobalInfo,
     static_rigid_sim_config: qd.template(),
     island_state: array_class.IslandState,
@@ -1277,6 +1809,53 @@ def func_torque_and_passive_force(
                                 -dofs_state.pos[dof_start + j_d, i_b] * dofs_info.stiffness[I_d],
                                 BW,
                             )
+
+    # Tendons: project passive (spring + damping) and actuator transmission forces onto the relevant DOFs via the
+    # per-step moment arm computed in func_compute_tendon_length_moment (moment == coef for fixed tendons; geometric
+    # for spatial ones). This runs after the per-DOF actuator/passive assignment above, so the `+=` accumulates on top.
+    # NOTE: tendon damping is applied explicitly here (into qf_passive). This is exact under the Euler integrator and a
+    # first-order approximation under implicitfast (MuJoCo folds tendon damping into the implicit velocity update via a
+    # dense moment_i*moment_j block on the mass matrix, which is not replicated here). Tendon stiffness, being a
+    # position-dependent force, is explicit in MuJoCo too, so it matches under both integrators.
+    _B_T = dofs_state.ctrl_mode.shape[1]
+    qd.loop_config(serialize=static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL)
+    for i_t, i_b in qd.ndrange(qd.static(static_rigid_sim_config.n_tendons), _B_T):
+        n_mem = tendons_info.n_members[i_t]
+        length = tendons_state.length[i_t, i_b]
+        velocity = tendons_state.velocity[i_t, i_b]
+
+        # Passive spring with [lo, hi] deadband + linear damping.
+        springlength = tendons_info.springlength[i_t]
+        stiffness = tendons_info.stiffness[i_t]
+        spring_force = gs.qd_float(0.0)
+        if length < springlength[0]:
+            spring_force = -stiffness * (length - springlength[0])
+        elif length > springlength[1]:
+            spring_force = -stiffness * (length - springlength[1])
+        passive_force = spring_force - tendons_info.damping[i_t] * velocity
+
+        # Actuator transmission (affine model, mirroring the per-DOF actuator formula above).
+        act_force = gs.qd_float(0.0)
+        ctrl_mode = tendons_state.ctrl_mode[i_t, i_b]
+        if ctrl_mode == gs.CTRL_MODE.FORCE:
+            act_force = tendons_state.ctrl_force[i_t, i_b]
+        elif ctrl_mode == gs.CTRL_MODE.VELOCITY:
+            act_force = -tendons_info.act_bias[i_t][2] * (tendons_state.ctrl_vel[i_t, i_b] - velocity)
+        elif ctrl_mode == gs.CTRL_MODE.POSITION:
+            act_force = (
+                tendons_info.act_gain[i_t] * (tendons_state.ctrl_pos[i_t, i_b] - length)
+                + tendons_info.act_bias[i_t][0]
+                + (tendons_info.act_gain[i_t] + tendons_info.act_bias[i_t][1]) * length
+                + tendons_info.act_bias[i_t][2] * (velocity - tendons_state.ctrl_vel[i_t, i_b])
+            )
+        act_force = qd.math.clamp(act_force, tendons_info.force_range[i_t][0], tendons_info.force_range[i_t][1])
+
+        # Project scalar forces onto the relevant DOFs via the moment arm.
+        for k in range(n_mem):
+            i_d = tendons_info.dof_idx[i_t, k]
+            moment = tendons_state.moment[i_t, i_d, i_b]
+            func_add_safe_backward(dofs_state.qf_passive, [i_d, i_b], moment * passive_force, BW)
+            func_add_safe_backward(dofs_state.qf_applied, [i_d, i_b], moment * act_force, BW)
 
 
 @qd.func
@@ -1710,6 +2289,10 @@ def kernel_forward_dynamics_without_qacc(
     entities_state: array_class.EntitiesState,
     entities_info: array_class.EntitiesInfo,
     geoms_state: array_class.GeomsState,
+    geoms_info: array_class.GeomsInfo,
+    sites_info: array_class.SitesInfo,
+    tendons_info: array_class.TendonsInfo,
+    tendons_state: array_class.TendonsState,
     rigid_global_info: array_class.RigidGlobalInfo,
     static_rigid_sim_config: qd.template(),
     island_state: array_class.IslandState,
@@ -1735,6 +2318,18 @@ def kernel_forward_dynamics_without_qacc(
         static_rigid_sim_config=static_rigid_sim_config,
         is_backward=is_backward,
     )
+    func_compute_tendon_length_moment(
+        tendons_info=tendons_info,
+        tendons_state=tendons_state,
+        sites_info=sites_info,
+        dofs_state=dofs_state,
+        links_info=links_info,
+        links_state=links_state,
+        geoms_state=geoms_state,
+        geoms_info=geoms_info,
+        rigid_global_info=rigid_global_info,
+        static_rigid_sim_config=static_rigid_sim_config,
+    )
     func_torque_and_passive_force(
         entities_state=entities_state,
         entities_info=entities_info,
@@ -1744,6 +2339,8 @@ def kernel_forward_dynamics_without_qacc(
         links_info=links_info,
         joints_info=joints_info,
         geoms_state=geoms_state,
+        tendons_info=tendons_info,
+        tendons_state=tendons_state,
         rigid_global_info=rigid_global_info,
         static_rigid_sim_config=static_rigid_sim_config,
         island_state=island_state,

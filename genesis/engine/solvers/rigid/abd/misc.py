@@ -755,6 +755,99 @@ def kernel_init_equality_fields(
             equalities_info.sol_params[i_eq, i_b][j] = equalities_sol_params[i_eq, j]
 
 
+@qd.kernel(fastcache=True)
+def kernel_init_site_fields(
+    sites_link_idx: qd.types.ndarray(),
+    sites_pos: qd.types.ndarray(),
+    sites_quat: qd.types.ndarray(),
+    # Quadrants variables
+    sites_info: array_class.SitesInfo,
+    static_rigid_sim_config: qd.template(),
+):
+    n_sites = sites_link_idx.shape[0]
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_s in range(n_sites):
+        sites_info.link_idx[i_s] = sites_link_idx[i_s]
+        for j in qd.static(range(3)):
+            sites_info.pos[i_s][j] = sites_pos[i_s, j]
+        for j in qd.static(range(4)):
+            sites_info.quat[i_s][j] = sites_quat[i_s, j]
+
+
+@qd.kernel(fastcache=True)
+def kernel_init_tendon_fields(
+    tendons_kind: qd.types.ndarray(),
+    tendons_n_members: qd.types.ndarray(),
+    tendons_dof_idx: qd.types.ndarray(),
+    tendons_q_idx: qd.types.ndarray(),
+    tendons_coef: qd.types.ndarray(),
+    tendons_n_wraps: qd.types.ndarray(),
+    tendons_wrap_type: qd.types.ndarray(),
+    tendons_wrap_objid: qd.types.ndarray(),
+    tendons_wrap_prm: qd.types.ndarray(),
+    tendons_wrap_sideid: qd.types.ndarray(),
+    tendons_wrap_geom_link: qd.types.ndarray(),
+    tendons_wrap_geom_pos: qd.types.ndarray(),
+    tendons_wrap_geom_quat: qd.types.ndarray(),
+    tendons_wrap_geom_radius: qd.types.ndarray(),
+    tendons_stiffness: qd.types.ndarray(),
+    tendons_damping: qd.types.ndarray(),
+    tendons_springlength: qd.types.ndarray(),
+    tendons_frictionloss: qd.types.ndarray(),
+    tendons_limited: qd.types.ndarray(),
+    tendons_limit: qd.types.ndarray(),
+    tendons_sol_params: qd.types.ndarray(),
+    tendons_sol_params_limit: qd.types.ndarray(),
+    tendons_act_gain: qd.types.ndarray(),
+    tendons_act_bias: qd.types.ndarray(),
+    tendons_force_range: qd.types.ndarray(),
+    tendons_length0: qd.types.ndarray(),
+    # Quadrants variables
+    tendons_info: array_class.TendonsInfo,
+    static_rigid_sim_config: qd.template(),
+):
+    n_tendons = tendons_n_members.shape[0]
+    max_members = tendons_dof_idx.shape[1]
+    max_wraps = tendons_wrap_type.shape[1]
+
+    # TendonsInfo is not batched (tendon parameters do not vary per environment).
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
+    for i_t in range(n_tendons):
+        tendons_info.kind[i_t] = tendons_kind[i_t]
+        tendons_info.n_members[i_t] = tendons_n_members[i_t]
+        tendons_info.n_wraps[i_t] = tendons_n_wraps[i_t]
+        tendons_info.stiffness[i_t] = tendons_stiffness[i_t]
+        tendons_info.damping[i_t] = tendons_damping[i_t]
+        tendons_info.frictionloss[i_t] = tendons_frictionloss[i_t]
+        tendons_info.limited[i_t] = tendons_limited[i_t]
+        tendons_info.act_gain[i_t] = tendons_act_gain[i_t]
+        tendons_info.length0[i_t] = tendons_length0[i_t]
+        for k in range(max_members):
+            tendons_info.dof_idx[i_t, k] = tendons_dof_idx[i_t, k]
+            tendons_info.q_idx[i_t, k] = tendons_q_idx[i_t, k]
+            tendons_info.coef[i_t, k] = tendons_coef[i_t, k]
+        for w in range(max_wraps):
+            tendons_info.wrap_type[i_t, w] = tendons_wrap_type[i_t, w]
+            tendons_info.wrap_objid[i_t, w] = tendons_wrap_objid[i_t, w]
+            tendons_info.wrap_prm[i_t, w] = tendons_wrap_prm[i_t, w]
+            tendons_info.wrap_sideid[i_t, w] = tendons_wrap_sideid[i_t, w]
+            tendons_info.wrap_geom_link[i_t, w] = tendons_wrap_geom_link[i_t, w]
+            tendons_info.wrap_geom_radius[i_t, w] = tendons_wrap_geom_radius[i_t, w]
+            for j in qd.static(range(3)):
+                tendons_info.wrap_geom_pos[i_t, w][j] = tendons_wrap_geom_pos[i_t, w, j]
+            for j in qd.static(range(4)):
+                tendons_info.wrap_geom_quat[i_t, w][j] = tendons_wrap_geom_quat[i_t, w, j]
+        for j in qd.static(range(2)):
+            tendons_info.springlength[i_t][j] = tendons_springlength[i_t, j]
+            tendons_info.limit[i_t][j] = tendons_limit[i_t, j]
+            tendons_info.force_range[i_t][j] = tendons_force_range[i_t, j]
+        for j in qd.static(range(3)):
+            tendons_info.act_bias[i_t][j] = tendons_act_bias[i_t, j]
+        for j in qd.static(range(7)):
+            tendons_info.sol_params[i_t][j] = tendons_sol_params[i_t, j]
+            tendons_info.sol_params_limit[i_t][j] = tendons_sol_params_limit[i_t, j]
+
+
 # --------------------------------------------------------------------------------------
 # External force kernels
 # --------------------------------------------------------------------------------------

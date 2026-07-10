@@ -39,6 +39,21 @@ class EQUALITY_TYPE(IntEnum):
     CONNECT = 0
     WELD = 1
     JOINT = 2
+    TENDON = 3
+
+
+# Kind of tendon (fixed = linear joint coupling; spatial = geometric path through sites/geoms).
+class TENDON_TYPE(IntEnum):
+    FIXED = 0
+    SPATIAL = 1
+
+
+# Type of a spatial-tendon wrap-path element (compact remap of MuJoCo's mjtWrap).
+class WRAP_TYPE(IntEnum):
+    SITE = 0
+    PULLEY = 1
+    SPHERE = 2
+    CYLINDER = 3
 
 
 class CTRL_MODE(IntEnum):

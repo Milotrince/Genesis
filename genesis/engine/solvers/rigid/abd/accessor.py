@@ -1026,6 +1026,68 @@ def kernel_control_dofs_position_velocity(
 
 
 @qd.kernel(fastcache=True)
+def kernel_control_tendons_force(
+    force: qd.types.ndarray(),
+    tendons_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    tendons_state: array_class.TendonsState,
+    static_rigid_sim_config: qd.template(),
+):
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_t_, i_b_ in qd.ndrange(tendons_idx.shape[0], envs_idx.shape[0]):
+        i_t = tendons_idx[i_t_]
+        i_b = envs_idx[i_b_]
+        tendons_state.ctrl_mode[i_t, i_b] = gs.CTRL_MODE.FORCE
+        tendons_state.ctrl_force[i_t, i_b] = force[i_b_, i_t_]
+
+
+@qd.kernel(fastcache=True)
+def kernel_control_tendons_velocity(
+    velocity: qd.types.ndarray(),
+    tendons_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    tendons_state: array_class.TendonsState,
+    static_rigid_sim_config: qd.template(),
+):
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_t_, i_b_ in qd.ndrange(tendons_idx.shape[0], envs_idx.shape[0]):
+        i_t = tendons_idx[i_t_]
+        i_b = envs_idx[i_b_]
+        tendons_state.ctrl_mode[i_t, i_b] = gs.CTRL_MODE.VELOCITY
+        tendons_state.ctrl_vel[i_t, i_b] = velocity[i_b_, i_t_]
+
+
+@qd.kernel(fastcache=True)
+def kernel_control_tendons_position(
+    position: qd.types.ndarray(),
+    tendons_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    tendons_state: array_class.TendonsState,
+    static_rigid_sim_config: qd.template(),
+):
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_t_, i_b_ in qd.ndrange(tendons_idx.shape[0], envs_idx.shape[0]):
+        i_t = tendons_idx[i_t_]
+        i_b = envs_idx[i_b_]
+        tendons_state.ctrl_mode[i_t, i_b] = gs.CTRL_MODE.POSITION
+        tendons_state.ctrl_pos[i_t, i_b] = position[i_b_, i_t_]
+        tendons_state.ctrl_vel[i_t, i_b] = 0.0
+
+
+@qd.kernel(fastcache=True)
+def kernel_get_tendons_length(
+    tensor: qd.types.ndarray(),
+    tendons_idx: qd.types.ndarray(),
+    envs_idx: qd.types.ndarray(),
+    tendons_state: array_class.TendonsState,
+    static_rigid_sim_config: qd.template(),
+):
+    qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.ALL))
+    for i_t_, i_b_ in qd.ndrange(tendons_idx.shape[0], envs_idx.shape[0]):
+        tensor[i_b_, i_t_] = tendons_state.length[tendons_idx[i_t_], envs_idx[i_b_]]
+
+
+@qd.kernel(fastcache=True)
 def kernel_get_links_vel(
     tensor: qd.types.ndarray(),
     links_idx: qd.types.ndarray(),

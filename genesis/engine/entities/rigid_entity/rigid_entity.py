@@ -27,6 +27,8 @@ from ..base_entity import Entity
 from .rigid_equality import RigidEquality
 from .rigid_geom import RigidGeom
 from .rigid_joint import RigidJoint
+from .rigid_site import RigidSite
+from .rigid_tendon import RigidTendon
 from .rigid_link import (
     GeomInertialInfo,
     KinematicLink,
@@ -199,7 +201,7 @@ class KinematicEntity(Entity):
             if isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF)):
                 # Parse variant scene file
                 morph._enable_mujoco_compatibility = self._morph._enable_mujoco_compatibility
-                v_l_infos, v_links_j_infos, v_links_g_infos, _ = self._parse_scene(morph, self._surface)
+                v_l_infos, v_links_j_infos, v_links_g_infos, _, _, _ = self._parse_scene(morph, self._surface)
 
                 # Validate that the variant has the same joint structure as the primary
                 if len(v_l_infos) != n_links:
@@ -627,18 +629,18 @@ class KinematicEntity(Entity):
         # initialized undetermined physics parameters.
         if isinstance(morph, gs.morphs.MJCF):
             # Mujoco's unified MJCF+URDF parser systematically for MJCF files
-            l_infos, links_j_infos, links_g_infos, eqs_info = mju.parse_xml(morph, surface)
+            l_infos, links_j_infos, links_g_infos, eqs_info, tendons_info, sites_info = mju.parse_xml(morph, surface)
         elif isinstance(morph, (gs.morphs.URDF, gs.morphs.Drone)):
             # Custom "legacy" URDF parser for loading geometries (visual and collision) and equality constraints.
             # This is necessary because Mujoco cannot parse visual geometries (meshes) reliably for URDF.
-            l_infos, links_j_infos, links_g_infos, eqs_info = uu.parse_urdf(morph, surface)
+            l_infos, links_j_infos, links_g_infos, eqs_info, tendons_info, sites_info = uu.parse_urdf(morph, surface)
 
             # Mujoco's unified MJCF+URDF parser for only link, joints, and collision geometries properties
             morph_ = morph.model_copy(update=dict(visualization=False))
             try:
                 # Mujoco's unified MJCF+URDF parser for URDF files.
                 # Note that Mujoco URDF parser completely ignores equality constraints.
-                l_infos_mj, links_j_infos_mj, links_g_infos_mj, _ = mju.parse_xml(morph_, surface)
+                l_infos_mj, links_j_infos_mj, links_g_infos_mj, _, _, _ = mju.parse_xml(morph_, surface)
 
                 # Unset link inertial properties that are actually undefined to force recomputation by genesis
                 if not morph._enable_mujoco_compatibility:
@@ -700,7 +702,9 @@ class KinematicEntity(Entity):
             from genesis.utils.usd import parse_usd_rigid_entity
 
             # Unified parser handles both articulations and rigid bodies
-            l_infos, links_j_infos, links_g_infos, eqs_info = parse_usd_rigid_entity(morph, surface)
+            l_infos, links_j_infos, links_g_infos, eqs_info, tendons_info, sites_info = parse_usd_rigid_entity(
+                morph, surface
+            )
 
         # Make sure that the inertia matrix of all links is valid
         if not morph.recompute_inertia:
@@ -911,10 +915,10 @@ class KinematicEntity(Entity):
         # Exclude joints with 0 dofs to align with Mujoco
         links_j_infos = [[j_info for j_info in link_j_infos if j_info["n_dofs"] > 0] for link_j_infos in links_j_infos]
 
-        return l_infos, links_j_infos, links_g_infos, eqs_info
+        return l_infos, links_j_infos, links_g_infos, eqs_info, tendons_info, sites_info
 
     def _load_scene(self, morph, surface):
-        l_infos, links_j_infos, links_g_infos, _eqs_info = self._parse_scene(morph, surface)
+        l_infos, links_j_infos, links_g_infos, _eqs_info, _tendons_info, _sites_info = self._parse_scene(morph, surface)
 
         # Add (link, joints, geoms) tuples sequentially
         for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
@@ -2345,6 +2349,8 @@ class RigidEntity(KinematicEntity):
         custom_vvert_start=0,
         custom_vface_start=0,
         equality_start=0,
+        tendon_start=0,
+        site_start=0,
         visualize_contact: bool = False,
         morph_heterogeneous: list[Morph] | None = None,
         name: str | None = None,
@@ -2357,6 +2363,8 @@ class RigidEntity(KinematicEntity):
         self._free_verts_state_start = free_verts_state_start
         self._fixed_verts_state_start = fixed_verts_state_start
         self._equality_start = equality_start
+        self._tendon_start = tendon_start
+        self._site_start = site_start
         self._free_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
         self._fixed_verts_idx_local = torch.tensor([], dtype=gs.tc_int, device=gs.device)
         self._visualize_contact: bool = visualize_contact
@@ -2471,6 +2479,8 @@ class RigidEntity(KinematicEntity):
 
     def _load_model(self):
         self._equalities = gs.List()
+        self._tendons = gs.List()
+        self._sites = gs.List()
         self._requires_jac_and_IK = self._morph.requires_jac_and_IK
         self._is_local_collision_mask = isinstance(self._morph, gs.morphs.MJCF)
 
@@ -2479,7 +2489,7 @@ class RigidEntity(KinematicEntity):
     def _load_scene(self, morph, surface):
         from genesis.engine.couplers import IPCCoupler
 
-        l_infos, links_j_infos, links_g_infos, eqs_info = self._parse_scene(morph, surface)
+        l_infos, links_j_infos, links_g_infos, eqs_info, tendons_info, sites_info = self._parse_scene(morph, surface)
 
         # Make sure that the entity is not object
         if (
@@ -2493,7 +2503,37 @@ class RigidEntity(KinematicEntity):
         for l_info, link_j_infos, link_g_infos in zip(l_infos, links_j_infos, links_g_infos):
             self._add_by_info(l_info, link_j_infos, link_g_infos, morph, surface)
 
-        # Add equality constraints sequentially
+        # Add sites (persistent frames used by spatial tendons) sequentially
+        for s_info in sites_info:
+            self._add_site(
+                name=s_info["name"],
+                body_name=s_info["body_name"],
+                pos=s_info["pos"],
+                quat=s_info["quat"],
+            )
+
+        # Add tendons (fixed + spatial) sequentially. Must precede equalities so tendon-tendon equalities resolve.
+        for t_info in tendons_info:
+            self._add_tendon(
+                name=t_info["name"],
+                kind=t_info["kind"],
+                members=t_info["members"],
+                wraps=t_info["wraps"],
+                stiffness=t_info["stiffness"],
+                damping=t_info["damping"],
+                springlength=t_info["springlength"],
+                frictionloss=t_info["frictionloss"],
+                limited=t_info["limited"],
+                limit=t_info["limit"],
+                sol_params=t_info["sol_params"],
+                sol_params_limit=t_info["sol_params_limit"],
+                act_gain=t_info["act_gain"],
+                act_bias=t_info["act_bias"],
+                force_range=t_info["force_range"],
+                length0=t_info["length0"],
+            )
+
+        # Add equality constraints sequentially (may reference tendons added above)
         for eq_info in eqs_info:
             self._add_equality(
                 name=eq_info["name"],
@@ -2670,8 +2710,12 @@ class RigidEntity(KinematicEntity):
                 obj_id = self.get_joint(obj_name).idx
             elif type == gs.EQUALITY_TYPE.WELD:
                 obj_id = self.get_link(obj_name).idx
+            elif type == gs.EQUALITY_TYPE.TENDON:
+                obj_id = self.get_tendon(obj_name).idx
             else:
-                gs.raise_exception(f"Equality type {type} not supported. Only CONNECT, JOINT, and WELD are supported.")
+                gs.raise_exception(
+                    f"Equality type {type} not supported. Only CONNECT, JOINT, WELD, and TENDON are supported."
+                )
             objs_id.append(obj_id)
 
         equality = RigidEquality(
@@ -2686,6 +2730,60 @@ class RigidEntity(KinematicEntity):
         )
         self._equalities.append(equality)
         return equality
+
+    def _add_site(self, name, body_name, pos, quat):
+        site = RigidSite(
+            entity=self,
+            name=name,
+            idx=self.n_sites + self._site_start,
+            link_name=body_name,
+            pos=pos,
+            quat=quat,
+        )
+        self._sites.append(site)
+        return site
+
+    def _add_tendon(
+        self,
+        name,
+        kind,
+        members,
+        wraps,
+        stiffness,
+        damping,
+        springlength,
+        frictionloss,
+        limited,
+        limit,
+        sol_params,
+        sol_params_limit,
+        act_gain,
+        act_bias,
+        force_range,
+        length0,
+    ):
+        tendon = RigidTendon(
+            entity=self,
+            name=name,
+            idx=self.n_tendons + self._tendon_start,
+            kind=kind,
+            members=members,
+            wraps=wraps,
+            stiffness=stiffness,
+            damping=damping,
+            springlength=springlength,
+            frictionloss=frictionloss,
+            limited=limited,
+            limit=limit,
+            sol_params=sol_params,
+            sol_params_limit=sol_params_limit,
+            act_gain=act_gain,
+            act_bias=act_bias,
+            force_range=force_range,
+            length0=length0,
+        )
+        self._tendons.append(tendon)
+        return tendon
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- Jacobian & IK ------------------------------------
@@ -4653,6 +4751,91 @@ class RigidEntity(KinematicEntity):
     def equalities(self):
         """The list of equality constraints (`RigidEquality`) in the entity."""
         return self._equalities
+
+    @property
+    def n_tendons(self):
+        """The number of (fixed) tendons in the entity."""
+        return len(self._tendons)
+
+    @property
+    def tendon_start(self):
+        """The index of the entity's first RigidTendon in the scene."""
+        return self._tendon_start
+
+    @property
+    def tendon_end(self):
+        """The index of the entity's last RigidTendon in the scene *plus one*."""
+        return self._tendon_start + self.n_tendons
+
+    @property
+    def tendons(self):
+        """The list of (fixed) tendons (`RigidTendon`) in the entity."""
+        return self._tendons
+
+    def get_tendon(self, name=None, uid=None):
+        """Get a tendon of the entity by name or uid."""
+        if name is not None:
+            for tendon in self._tendons:
+                if tendon.name == name:
+                    return tendon
+            gs.raise_exception(f"Tendon with name '{name}' not found.")
+        elif uid is not None:
+            for tendon in self._tendons:
+                if str(uid) in str(tendon.uid):
+                    return tendon
+            gs.raise_exception(f"Tendon with uid '{uid}' not found.")
+        gs.raise_exception("Either `name` or `uid` must be provided.")
+
+    @property
+    def n_sites(self):
+        """The number of sites in the entity."""
+        return len(self._sites)
+
+    @property
+    def site_start(self):
+        """The index of the entity's first RigidSite in the scene."""
+        return self._site_start
+
+    @property
+    def site_end(self):
+        """The index of the entity's last RigidSite in the scene *plus one*."""
+        return self._site_start + self.n_sites
+
+    @property
+    def sites(self):
+        """The list of sites (`RigidSite`) in the entity."""
+        return self._sites
+
+    def get_site(self, name):
+        """Get a site of the entity by name."""
+        for site in self._sites:
+            if site.name == name:
+                return site
+        gs.raise_exception(f"Site with name '{name}' not found.")
+
+    def draw_debug_tendons(self, color=(0.9, 0.2, 0.2, 1.0), radius=0.004, env_idx=0):
+        """Draw the world-space path of each spatial tendon as a polyline for debug visualization.
+
+        Returns the created debug objects (pass them to `scene.clear_debug_object`, or call `scene.clear_debug_objects`,
+        before redrawing each step). Fixed tendons have no geometric path and are skipped.
+        """
+        if self.n_tendons == 0:
+            return []
+        path_pos = qd_to_numpy(self._solver.tendons_state.path_pos, transpose=True)  # (B, n_tendons, max_path, 3)
+        path_num = qd_to_numpy(self._solver.tendons_state.path_num, transpose=True)  # (B, n_tendons)
+        nodes = []
+        for tendon in self._tendons:
+            n_points = int(path_num[env_idx, tendon.idx])
+            for k in range(n_points - 1):
+                nodes.append(
+                    self._solver.scene.draw_debug_line(
+                        path_pos[env_idx, tendon.idx, k],
+                        path_pos[env_idx, tendon.idx, k + 1],
+                        radius=radius,
+                        color=color,
+                    )
+                )
+        return nodes
 
     @property
     def is_free(self) -> bool:

@@ -26,6 +26,7 @@ from genesis.engine.states.solvers import RigidSolverState
 from genesis.utils.misc import get_assets_dir, qd_to_numpy, qd_to_torch, tensor_to_array
 
 from .utils import (
+    _get_model_mappings,
     assert_allclose,
     assert_equal,
     check_mujoco_data_consistency,
@@ -79,6 +80,158 @@ def mimic_hinges():
     ET.SubElement(child2, "joint", type="hinge", name="joint2", axis="0 1 0", range="-45 45")
     equality = ET.SubElement(mjcf, "equality")
     ET.SubElement(equality, "joint", name="joint_equality", joint1="joint1", joint2="joint2")
+    return mjcf
+
+
+def _two_hinge_tendon_model(name, tendon_attrs):
+    """Two hinges coupled by a fixed tendon `t1` (coef 1 each). `tendon_attrs` sets the <fixed> element attributes."""
+    mjcf = ET.Element("mujoco", model=name)
+    ET.SubElement(mjcf, "compiler", angle="radian")
+    ET.SubElement(mjcf, "option", timestep="0.01")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    parent = ET.SubElement(worldbody, "body", name="parent", pos="0 0 1.0")
+    child1 = ET.SubElement(parent, "body", name="child1", pos="0.5 0 0")
+    ET.SubElement(child1, "geom", type="capsule", size="0.05 0.2", rgba="0.9 0.1 0.1 1")
+    ET.SubElement(child1, "joint", type="hinge", name="joint1", axis="0 1 0", range="-2 2")
+    child2 = ET.SubElement(parent, "body", name="child2", pos="0 0.5 0")
+    ET.SubElement(child2, "geom", type="capsule", size="0.05 0.2", rgba="0.1 0.1 0.9 1")
+    ET.SubElement(child2, "joint", type="hinge", name="joint2", axis="0 1 0", range="-2 2")
+    tendon = ET.SubElement(mjcf, "tendon")
+    fixed = ET.SubElement(tendon, "fixed", name="t1", **tendon_attrs)
+    ET.SubElement(fixed, "joint", joint="joint1", coef="1")
+    ET.SubElement(fixed, "joint", joint="joint2", coef="1")
+    return mjcf
+
+
+@pytest.fixture(scope="session")
+def tendon_spring():
+    # Fixed tendon with a passive spring (rest length 0) coupling the two hinges. Stiffness is a position-dependent
+    # (explicit) force in both MuJoCo and Genesis, so this matches under both Euler and implicitfast.
+    return _two_hinge_tendon_model("tendon_spring", {"stiffness": "30", "springlength": "0"})
+
+
+@pytest.fixture(scope="session")
+def tendon_damped():
+    # Fixed tendon with passive damping. Genesis applies tendon damping explicitly, so this matches MuJoCo exactly
+    # only under the Euler integrator (MuJoCo integrates tendon damping implicitly under implicitfast).
+    return _two_hinge_tendon_model("tendon_damped", {"stiffness": "20", "damping": "3", "springlength": "0"})
+
+
+@pytest.fixture(scope="session")
+def tendon_limit():
+    # Fixed tendon with a length limit; the coupled hinges must not let (joint1 + joint2) leave [-0.5, 0.5].
+    return _two_hinge_tendon_model("tendon_limit", {"limited": "true", "range": "-0.5 0.5"})
+
+
+def _spatial_arm_base(name):
+    """Two-hinge planar arm with sites for routing a spatial tendon; returns (mjcf, worldbody, b2)."""
+    mjcf = ET.Element("mujoco", model=name)
+    ET.SubElement(mjcf, "compiler", angle="radian")
+    ET.SubElement(mjcf, "option", timestep="0.002")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    ET.SubElement(worldbody, "site", name="s0", pos="0.4 0 0.6")
+    b1 = ET.SubElement(worldbody, "body", name="b1", pos="0 0 0.5")
+    ET.SubElement(b1, "joint", name="j1", type="hinge", axis="0 1 0")
+    ET.SubElement(b1, "geom", type="capsule", fromto="0 0 0 0.3 0 0", size="0.03", mass="0.2")
+    ET.SubElement(b1, "site", name="s1", pos="0.15 0 0.05")
+    b2 = ET.SubElement(b1, "body", name="b2", pos="0.3 0 0")
+    ET.SubElement(b2, "joint", name="j2", type="hinge", axis="0 1 0")
+    ET.SubElement(b2, "geom", type="capsule", fromto="0 0 0 0.3 0 0", size="0.03", mass="0.2")
+    ET.SubElement(b2, "site", name="s2", pos="0.15 0 0.05")
+    return mjcf, worldbody, b2
+
+
+@pytest.fixture(scope="session")
+def tendon_spatial():
+    # Spatial tendon routed through 3 sites (world -> link1 -> link2) with a passive spring + damping.
+    mjcf, worldbody, b2 = _spatial_arm_base("tendon_spatial")
+    tendon = ET.SubElement(mjcf, "tendon")
+    sp = ET.SubElement(tendon, "spatial", name="t", stiffness="50", damping="0.5")
+    ET.SubElement(sp, "site", site="s0")
+    ET.SubElement(sp, "site", site="s1")
+    ET.SubElement(sp, "site", site="s2")
+    return mjcf
+
+
+@pytest.fixture(scope="session")
+def tendon_spatial_pulley():
+    # Spatial tendon with two branches joined by a pulley (divisor 2) and a passive spring.
+    mjcf, worldbody, b2 = _spatial_arm_base("tendon_spatial_pulley")
+    ET.SubElement(worldbody, "site", name="s3", pos="0.0 0 0.9")
+    ET.SubElement(b2, "site", name="s4", pos="0.05 0 0.05")
+    tendon = ET.SubElement(mjcf, "tendon")
+    sp = ET.SubElement(tendon, "spatial", name="t", stiffness="40", damping="0.5")
+    ET.SubElement(sp, "site", site="s0")
+    ET.SubElement(sp, "site", site="s2")
+    ET.SubElement(sp, "pulley", divisor="2")
+    ET.SubElement(sp, "site", site="s3")
+    ET.SubElement(sp, "site", site="s4")
+    return mjcf
+
+
+def _tendon_wrap_model(name, geomtype):
+    # A hinge pendulum whose spatial tendon (world site -> tip site) wraps over a fixed obstacle geom between them.
+    mjcf = ET.Element("mujoco", model=name)
+    ET.SubElement(mjcf, "compiler", angle="radian")
+    ET.SubElement(mjcf, "option", timestep="0.002")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    ET.SubElement(worldbody, "site", name="s0", pos="-0.3 0 0.5")
+    ET.SubElement(
+        worldbody, "geom", name="obstacle", type=geomtype, pos="0 0 0.5", size="0.1 0.4", contype="0", conaffinity="0"
+    )
+    b1 = ET.SubElement(worldbody, "body", name="b1", pos="0 0 0.5")
+    ET.SubElement(b1, "joint", name="j1", type="hinge", axis="0 1 0")
+    ET.SubElement(
+        b1, "geom", type="capsule", fromto="0 0 0 0.4 0 0", size="0.02", mass="0.2", contype="0", conaffinity="0"
+    )
+    ET.SubElement(b1, "site", name="s1", pos="0.4 0 0")
+    tendon = ET.SubElement(mjcf, "tendon")
+    sp = ET.SubElement(tendon, "spatial", name="t", stiffness="30", damping="0.3")
+    ET.SubElement(sp, "site", site="s0")
+    ET.SubElement(sp, "geom", geom="obstacle")
+    ET.SubElement(sp, "site", site="s1")
+    return mjcf
+
+
+@pytest.fixture(scope="session")
+def tendon_wrap_sphere():
+    return _tendon_wrap_model("tendon_wrap_sphere", "sphere")
+
+
+@pytest.fixture(scope="session")
+def tendon_wrap_cylinder():
+    return _tendon_wrap_model("tendon_wrap_cylinder", "cylinder")
+
+
+@pytest.fixture(scope="session")
+def tendon_equality():
+    # Two single-joint fixed tendons coupled by a tendon-tendon equality constraint (length1 == length2).
+    mjcf = ET.Element("mujoco", model="tendon_equality")
+    ET.SubElement(mjcf, "compiler", angle="radian")
+    ET.SubElement(mjcf, "option", timestep="0.005")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    b1 = ET.SubElement(worldbody, "body", name="b1", pos="0 0 1")
+    ET.SubElement(b1, "joint", name="j1", type="hinge", axis="0 1 0")
+    ET.SubElement(b1, "geom", type="capsule", fromto="0 0 0 0.3 0 0", size="0.03", mass="0.3")
+    b2 = ET.SubElement(worldbody, "body", name="b2", pos="0 0.4 1")
+    ET.SubElement(b2, "joint", name="j2", type="hinge", axis="0 1 0")
+    ET.SubElement(b2, "geom", type="capsule", fromto="0 0 0 0.3 0 0", size="0.03", mass="0.3")
+    tendon = ET.SubElement(mjcf, "tendon")
+    t1 = ET.SubElement(tendon, "fixed", name="t1")
+    ET.SubElement(t1, "joint", joint="j1", coef="1")
+    t2 = ET.SubElement(tendon, "fixed", name="t2")
+    ET.SubElement(t2, "joint", joint="j2", coef="1")
+    equality = ET.SubElement(mjcf, "equality")
+    ET.SubElement(equality, "tendon", tendon1="t1", tendon2="t2")
+    return mjcf
+
+
+@pytest.fixture(scope="session")
+def tendon_actuated():
+    # Two hinges coupled by a fixed tendon driven by a single position actuator (as in the Shadow Hand fingers).
+    mjcf = _two_hinge_tendon_model("tendon_actuated", {})
+    actuator = ET.SubElement(mjcf, "actuator")
+    ET.SubElement(actuator, "position", name="a1", tendon="t1", kp="8")
     return mjcf
 
 
@@ -692,6 +845,130 @@ def test_equality_joint(gs_sim, mj_sim, gs_solver, tol):
     # check if the two joints are equal
     gs_qpos = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
     assert_allclose(gs_qpos[0], gs_qpos[1], tol=tol)
+
+
+@pytest.mark.parametrize("model_name", ["tendon_spring"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_tendon_spring(gs_sim, mj_sim, gs_solver, tol):
+    # There is one fixed tendon with a passive spring, and no equality constraint.
+    assert gs_sim.rigid_solver.n_tendons == 1
+    assert gs_sim.rigid_solver.n_equalities == 0
+
+    qpos = np.array((0.4, -0.9))
+    qvel = np.array((1.0, -0.3))
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos, qvel, num_steps=300, tol=tol)
+
+
+@pytest.mark.parametrize("model_name", ["tendon_damped"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_tendon_damped(gs_sim, mj_sim, gs_solver, tol):
+    # Fixed tendon with passive spring + damping. Genesis applies tendon damping explicitly, so this is checked under
+    # the Euler integrator only (exact); under implicitfast it differs from MuJoCo's implicit damping integration.
+    assert gs_sim.rigid_solver.n_tendons == 1
+
+    qpos = np.array((0.4, -0.9))
+    qvel = np.array((1.0, -0.3))
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos, qvel, num_steps=300, tol=tol)
+
+
+@pytest.mark.parametrize("model_name", ["tendon_limit"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_tendon_limit(gs_sim, mj_sim, gs_solver, tol):
+    # One fixed tendon with a length limit; the initial velocity drives the tendon length into the limit.
+    assert gs_sim.rigid_solver.n_tendons == 1
+
+    qpos = np.array((0.0, 0.0))
+    qvel = np.array((1.5, 1.5))
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos, qvel, num_steps=200, tol=tol)
+
+    # The coupled tendon length (joint1 + joint2) must respect the [-0.5, 0.5] range (within the limit softness).
+    gs_qpos = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
+    assert gs_qpos[0] + gs_qpos[1] < 0.6
+
+
+@pytest.mark.parametrize("model_name", ["tendon_spatial", "tendon_spatial_pulley"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_tendon_spatial(gs_sim, mj_sim, gs_solver, tol):
+    # Spatial tendon (site-routed path, optionally with a pulley) with a passive spring; the configuration-dependent
+    # length and moment arms must track MuJoCo. Damping is checked under Euler only (applied explicitly).
+    assert gs_sim.rigid_solver.n_tendons == 1
+
+    qpos = np.array((0.5, -0.3))
+    qvel = np.array((0.4, -0.2))
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos, qvel, num_steps=300, tol=tol)
+
+
+@pytest.mark.parametrize("model_name", ["tendon_wrap_sphere", "tendon_wrap_cylinder"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.Newton])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_tendon_wrap(gs_sim, mj_sim, gs_solver, tol):
+    # Spatial tendon wrapping over a sphere/cylinder geom. The wrap points, arc length, and moment arms must track
+    # MuJoCo's mju_wrap. The initial angle bends the straight path into the obstacle to force a wrap.
+    assert gs_sim.rigid_solver.n_tendons == 1
+
+    qpos = np.array((1.2,))
+    qvel = np.array((0.0,))
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos, qvel, num_steps=250, tol=tol)
+
+
+@pytest.mark.parametrize("model_name", ["tendon_equality"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_tendon_equality(gs_sim, mj_sim, gs_solver, tol):
+    # Two single-joint fixed tendons coupled by a tendon-tendon equality (mjEQ_TENDON): length1 == length2.
+    assert gs_sim.rigid_solver.n_tendons == 2
+    assert gs_sim.rigid_solver.n_equalities == 1
+
+    qpos = np.array((0.3, -0.2))
+    qvel = np.array((1.0, -0.5))
+    simulate_and_check_mujoco_consistency(gs_sim, mj_sim, qpos, qvel, num_steps=300, tol=tol)
+
+    # The coupled tendon lengths (== joint angles here) must track each other.
+    gs_qpos = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
+    assert_allclose(gs_qpos[0], gs_qpos[1], tol=tol)
+
+
+@pytest.mark.parametrize("model_name", ["tendon_actuated"])
+@pytest.mark.parametrize("gs_solver", [gs.constraint_solver.CG, gs.constraint_solver.Newton])
+@pytest.mark.parametrize("gs_integrator", [gs.integrator.implicitfast, gs.integrator.Euler])
+@pytest.mark.parametrize("backend", [gs.cpu])
+def test_tendon_actuator(gs_sim, mj_sim, gs_solver):
+    # A single position actuator drives a fixed tendon whose length couples the two hinges (Shadow-Hand-style).
+    # NB: check_mujoco_model_consistency is intentionally not used here - it compares per-DOF actuator gains, which do
+    # not apply to a tendon-transmission actuator (the gain lives on the tendon, not on any joint DOF).
+    assert gs_sim.rigid_solver.n_tendons == 1
+
+    _, (_, _, mj_qs_idx, mj_dofs_idx, _, _) = _get_model_mappings(gs_sim, mj_sim)
+
+    qpos = np.array((0.1, -0.2))
+    init_simulators(gs_sim, mj_sim, qpos)
+
+    # Drive the tendon length toward a target on both simulators; controls persist across steps.
+    target = 1.2
+    gs_robot = gs_sim.entities[0]
+    gs_robot.solver.control_tendons_position(np.array([target]), tendons_idx=[gs_robot.get_tendon("t1").idx])
+    mj_sim.data.ctrl[:] = target
+
+    # Tolerance is a touch looser than the passive tests: the extra actuator-force projection introduces a small
+    # float-summation-order residual, but the per-step actuated dynamics still track MuJoCo to < 1e-6.
+    for _ in range(300):
+        # Re-sync to compare per-step dynamics (including the actuator transmission) rather than accumulated drift.
+        mj_sim.data.qpos[mj_qs_idx] = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
+        mj_sim.data.qvel[mj_dofs_idx] = gs_sim.rigid_solver.dofs_state.vel.to_numpy()[:, 0]
+        mujoco.mj_step(mj_sim.model, mj_sim.data)
+        gs_sim.scene.step()
+        gs_qpos = gs_sim.rigid_solver.qpos.to_numpy()[:, 0]
+        assert_allclose(gs_qpos, mj_sim.data.qpos[mj_qs_idx], atol=1e-6, rtol=1e-6)
 
 
 @pytest.mark.required
