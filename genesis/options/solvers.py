@@ -484,10 +484,16 @@ class RigidOptions(Options):
         Upper bound on an island's rate ``r`` (its dt is ``macro_dt / r``) when ``use_adaptive_timestep`` is enabled.
         Caps the worst-case number of micro-steps per macro step. Must be a power of two so every assigned rate (also a
         power of two) evenly divides it. Defaults to 8.
-    adaptive_timestep_ref_speed : float, optional
-        Reference DOF speed (m/s or rad/s) above which an island sub-steps: an island whose maximum DOF speed is ``v``
-        is assigned rate ``clamp(next_pow2(ceil(v / ref_speed)), 1, max_rate)``, so a settled island stays at rate 1
-        and a fast one integrates more finely. Only used when ``use_adaptive_timestep`` is enabled. Defaults to 1.0.
+    adaptive_timestep_cfl : float, optional
+        Travel-fraction CFL target for the automatic rate criterion: an island sub-steps so its fastest body surface
+        point moves at most ``adaptive_timestep_cfl`` times the body's thinnest size per micro-step. Smaller is more
+        conservative (finer sub-stepping). Only used when ``use_adaptive_timestep`` is enabled and
+        ``adaptive_timestep_ref_speed`` is None. Defaults to 0.5.
+    adaptive_timestep_ref_speed : float | None, optional
+        Optional manual override of the rate criterion. If set, an island whose maximum DOF speed is ``v`` is assigned
+        rate ``clamp(next_pow2(ceil(v / ref_speed)), 1, max_rate)``. If None (default), the rate is derived
+        automatically from geometry (the travel-fraction CFL above) so no per-scene tuning is needed. Must be positive
+        when set.
     use_hibernation : bool, optional
         Whether to put bodies that have come to rest to sleep, so the solver skips them until they are disturbed. It
         quietly has no effect on a body that is differentiable, prunable, or under no-slip friction. Defaults to False.
@@ -545,7 +551,8 @@ class RigidOptions(Options):
     use_contact_island: StrictBool = True
     use_adaptive_timestep: StrictBool = False
     adaptive_timestep_max_rate: PositiveInt = 8
-    adaptive_timestep_ref_speed: PositiveFloat = 1.0
+    adaptive_timestep_cfl: PositiveFloat = 0.5
+    adaptive_timestep_ref_speed: PositiveFloat | None = None
     box_box_detection: StrictBool = False
 
     # hibernation threshold

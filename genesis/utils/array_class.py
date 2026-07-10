@@ -1578,6 +1578,11 @@ class DofsInfo:
     act_bias: qd.Tensor
     force_range: qd.Tensor
     dof_length: qd.Tensor
+    # Per-DOF adaptive-timestep travel-fraction CFL constant: dof_length / (cfl * L_body), where L_body is the thinnest
+    # local AABB extent of the DOF's link. The rate criterion uses macro_dt * |vel| * dof_cfl_inv_travel as the number
+    # of sub-steps needed to keep the body-surface displacement under cfl * L_body. Zero for DOFs whose link has no
+    # geometry (they never force geometric sub-stepping). Only populated under use_adaptive_timestep with auto criterion.
+    dof_cfl_inv_travel: qd.Tensor
 
 
 def get_dofs_info(solver):
@@ -1597,6 +1602,7 @@ def get_dofs_info(solver):
         act_bias=V(dtype=gs.qd_vec3, shape=shape),
         force_range=V(dtype=gs.qd_vec2, shape=shape),
         dof_length=V(dtype=gs.qd_float, shape=shape),
+        dof_cfl_inv_travel=V(dtype=gs.qd_float, shape=shape),
     )
 
 
@@ -2302,7 +2308,9 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # Per-island adaptive timestep: each island integrates at macro_dt / rate. Gated to require use_contact_island.
     use_adaptive_timestep: bool = False
     adaptive_timestep_max_rate: int = 1  # upper bound on an island's rate; also caps the micro-step schedule length
-    adaptive_timestep_ref_speed: float = 1.0  # DOF speed above which an island sub-steps (rate assignment criterion)
+    # Manual rate criterion: DOF speed above which an island sub-steps. 0.0 is the sentinel for "auto" (derive the rate
+    # from geometry via the per-DOF dof_cfl_inv_travel travel-fraction CFL instead).
+    adaptive_timestep_ref_speed: float = 0.0
     # Consecutive sub-tolerance steps a body's max DOF velocity must hold before it is ready to hibernate. Guards
     # against a body that is only momentarily slow (e.g. at the apex of a toss) sleeping prematurely.
     hibernation_min_steps: int = 10
