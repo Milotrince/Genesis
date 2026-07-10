@@ -284,6 +284,11 @@ class KinematicEntity(Entity):
                         if n_pad > 0:
                             qpos = np.concatenate([qpos, np.zeros(n_pad, dtype=gs.np_float)])
                         variant_init_qpos_parts.append(qpos)
+                # Trailing skeleton slots this (shorter) variant lacks contribute zero qs, so every variant
+                # fills the entity's full superset q-layout for per-environment dispatch.
+                for i_l in range(len(v_l_infos), n_links):
+                    for p_joint in self._links[i_l].joints:
+                        variant_init_qpos_parts.append(np.zeros(p_joint.n_qs, dtype=gs.np_float))
                 if variant_init_qpos_parts:
                     self._variant_init_qpos.append(np.concatenate(variant_init_qpos_parts))
                 else:
@@ -308,9 +313,12 @@ class KinematicEntity(Entity):
                         )
                     )
                 # Trailing skeleton slots this (shorter) variant does not fill are inert in its environments:
-                # record an empty geom range and a zero inertial so per-env binding treats them as massless.
+                # record an empty geom range, an empty scene-inertial entry (resolves to the near-zero
+                # empty-geometry fallback in link._build), and a zero align inertial, all kept per-variant
+                # aligned so link._build indexes them by variant without going out of range.
                 for i_link in range(len(v_l_infos), n_links):
                     self._add_heterogeneous_variant(self._links[i_link], [], [])
+                    self._on_heterogeneous_scene_variant_loaded(self._links[i_link], morph, {})
                     self._align_inertials[i_link].append(
                         self._finalize_inertial(
                             0.0, gu.zero_pos(), gu.identity_quat(), np.zeros((3, 3), dtype=gs.np_float), []
