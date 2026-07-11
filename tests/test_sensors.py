@@ -2725,10 +2725,11 @@ def test_read_sensors_bulk_api(show_viewer, n_envs):
         ),
     )
 
-    # Diverse sensor set covering multiple dtypes (float for IMU/ContactForce, bool for Contact, uint8 for the static
-    # camera) and heterogeneous per-sensor cache sizes within the float dtype (9 cells for IMU vs 3 for ContactForce).
-    # Two IMUs on box_a, one IMU on box_b. ContactForce and Contact sensors on both boxes. A static camera not attached
-    # to any entity (entity_idx defaults to -1).
+    # Diverse sensor set covering multiple dtypes (float for IMU/ContactForce, bool for Contact) and heterogeneous
+    # per-sensor cache sizes within the float dtype (9 cells for IMU vs 3 for ContactForce). Two IMUs on box_a, one IMU
+    # on box_b. ContactForce and Contact sensors on both boxes. A static camera (entity_idx defaults to -1) is added to
+    # confirm that camera sensors are excluded from `read_sensors()` (they own multi-dtype image buffers read via
+    # `sensor.read()`).
     imu_a1 = scene.add_sensor(
         gs.sensors.IMU(
             entity_idx=box_a.idx,
@@ -2774,8 +2775,9 @@ def test_read_sensors_bulk_api(show_viewer, n_envs):
     for _ in range(5):
         scene.step()
 
-    # Scene-wide read returns every sensor class. Per-entity reads restrict to classes present on that entity, so the
-    # static camera class is excluded from both box_a and box_b reads. Each call allocates a fresh tensor per class.
+    # Scene-wide read returns every manager-cached sensor class. Camera sensors are excluded (they store multi-dtype
+    # images in their own cache and are read via `sensor.read()`). Per-entity reads restrict to classes present on that
+    # entity. Each call allocates a fresh tensor per class.
     scene_data = scene.read_sensors()
     a_data = box_a.read_sensors()
     b_data = box_b.read_sensors()
@@ -2783,10 +2785,13 @@ def test_read_sensors_bulk_api(show_viewer, n_envs):
         gs.sensors.types.IMU,
         gs.sensors.types.ContactForce,
         gs.sensors.types.Contact,
-        gs.sensors.types.RasterizerCameraOptions,
     }
+    assert gs.sensors.types.RasterizerCameraOptions not in scene_data
     assert set(a_data.keys()) == {gs.sensors.types.IMU, gs.sensors.types.ContactForce, gs.sensors.types.Contact}
     assert set(b_data.keys()) == {gs.sensors.types.IMU, gs.sensors.types.ContactForce, gs.sensors.types.Contact}
+
+    # The static camera is still fully functional; it is just read through its own `read()` rather than `read_sensors()`.
+    assert static_cam.read().rgb.shape[-3:] == (32, 32, 3)
 
     # Sensors within a class are sorted by entity_idx, so per-entity reads must match contiguous slices of the
     # scene-wide read.

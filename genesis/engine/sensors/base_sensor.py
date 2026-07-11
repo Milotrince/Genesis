@@ -39,6 +39,51 @@ def _to_tuple(*values: NumArrayType, length_per_value: int = 3) -> tuple[Numeric
     return full_tuple
 
 
+def _normalize_field_dtypes(spec, n_fields: int, who: str) -> tuple[torch.dtype, ...]:
+    """
+    Normalize a ``_get_cache_dtype`` / ``_get_intermediate_dtype`` return value to one dtype per field.
+
+    A single ``torch.dtype`` broadcasts to every field (the common single-dtype case). A tuple must align 1:1 with the
+    fields of ``_get_return_format`` / ``_get_intermediate_format`` - one dtype per field, in field order.
+    """
+    if isinstance(spec, torch.dtype):
+        return (spec,) * n_fields
+    dtypes = tuple(spec)
+    if len(dtypes) != n_fields:
+        raise TypeError(f"{who} returned {len(dtypes)} dtypes for {n_fields} fields; must be one dtype per field.")
+    if not all(isinstance(dt, torch.dtype) for dt in dtypes):
+        raise TypeError(f"{who} must return a torch.dtype or a tuple of torch.dtype; got {dtypes}.")
+    return dtypes
+
+
+def _group_fields_by_dtype(format_spec, dtype_spec, who: str):
+    """
+    Partition a sensor's fields into per-dtype column groups.
+
+    ``format_spec`` is a ``_get_*_format`` value (a single ``(N,)`` shape or a tuple-of-shapes). ``dtype_spec`` is the
+    matching ``_get_*_dtype`` value (single dtype, or one per field). Fields sharing a dtype are laid out contiguously
+    within that dtype's column block; each field records its slice within its own dtype block, so a multi-dtype sensor
+    (e.g. a camera: uint8 rgb / float32 depth / int32 seg) contributes a contiguous run to each dtype buffer.
+
+    Returns ``(field_shapes, field_dtypes, size_by_dtype, field_slice_in_dtype)``:
+    - ``field_shapes``: per-field intrinsic shape tuple.
+    - ``field_dtypes``: per-field dtype.
+    - ``size_by_dtype``: dict[dtype, int] - total columns this sensor contributes to each dtype.
+    - ``field_slice_in_dtype``: per-field ``slice`` giving the field's offset within its dtype block.
+    """
+    shapes = (format_spec,) if isinstance(format_spec[0], int) else format_spec
+    shapes = tuple((s,) if isinstance(s, int) else tuple(s) for s in shapes)
+    dtypes = _normalize_field_dtypes(dtype_spec, len(shapes), who)
+    size_by_dtype: dict[torch.dtype, int] = {}
+    field_slice_in_dtype: list[slice] = []
+    for shape, dt in zip(shapes, dtypes):
+        data_size = int(np.prod(shape))
+        off = size_by_dtype.get(dt, 0)
+        field_slice_in_dtype.append(slice(off, off + data_size))
+        size_by_dtype[dt] = off + data_size
+    return shapes, dtypes, size_by_dtype, field_slice_in_dtype
+
+
 # Note: dataclass is used as opposed to pydantic.BaseModel since torch.Tensors are not supported by default
 @dataclass
 class SharedSensorMetadata:
@@ -181,10 +226,12 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
     # Cross-type shared context class declared as the second ``Sensor[...]`` parameter; ``NoneType`` (declared as
     # ``None``) means this sensor type consumes no shared context.
     _shared_context_cls: ClassVar[type] = type(None)
-    # Whether instances of this class participate in the ring-based per-step pipeline (delay sampling, transform
-    # recurrence, history snapshots). Drives allocation of the GT + measured timeline rings in `SensorManager.build`.
-    # Subclasses whose `_update_shared_cache` bypasses the rings (e.g. cameras handling rendering lazily) explicitly set
-    # this to ``False``.
+    # Whether instances of this class use the ``_apply_transform`` recurrence timeline rings (post-transform,
+    # pre-hardware-imperfection snapshots read by stateful filters). Drives allocation of the GT + measured timeline
+    # rings in `SensorManager.build`. Sensors that compute their output directly rather than via a stateful transform
+    # (e.g. cameras, which render on demand) set this to ``False``: they still get delay / jitter / history through the
+    # per-class return-space ring, but allocate no dead timeline rings. ``scene.read_sensors()`` — the eager per-step
+    # batched aggregate — likewise covers only ring-pipeline sensors; lazily-rendered ones are read via `sensor.read()`.
     uses_ring_pipeline: ClassVar[bool] = True
 
     def __init_subclass__(cls, **kwargs):
@@ -244,49 +291,50 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         self._shared_metadata: SharedSensorMetadataT = shared_metadata
         self._is_built = False
 
-        # Classes that opt out of the ring pipeline (e.g. cameras handling rendering lazily on read) cannot honor delay
-        # / jitter / history because those features depend on the per-class return-space ring. Reject the inputs at
-        # construction so the user picks a different sensor or drops the option rather than silently getting no-ops.
-        if not self.uses_ring_pipeline:
-            if options.delay > 0.0:
-                gs.raise_exception(f"{type(self).__name__} does not support `delay`; got delay={options.delay}.")
-            if options.jitter > 0.0:
-                gs.raise_exception(f"{type(self).__name__} does not support `jitter`; got jitter={options.jitter}.")
-            if options.history_length > 0:
-                gs.raise_exception(
-                    f"{type(self).__name__} does not support `history_length`; got "
-                    f"history_length={options.history_length}."
-                )
-
         self._dt = self._manager._sim.dt
         self._delay_ts = round(self._options.delay / self._dt)
 
-        self._cache_slices: list[slice] = []
-        return_format = self._get_return_format()
-        assert len(return_format) > 0
-        intrinsic_shapes: tuple[tuple[int, ...], ...] = (
-            (return_format,) if isinstance(return_format[0], int) else return_format
+        # Per-field grouping by dtype. `_get_return_format` is already multi-field (e.g. IMU's (lin_acc, ang_vel, mag));
+        # `_get_cache_dtype` may now return one dtype per field so a single sensor can span several dtype buffers (a
+        # camera emits uint8 rgb / float32 depth+normal / int32 segmentation). Single-dtype sensors keep exactly their
+        # old single-block layout (`_normalize_field_dtypes` broadcasts the lone dtype to every field).
+        (
+            self._field_shapes,
+            self._field_dtypes,
+            self._return_size_by_dtype,
+            self._field_return_slice,
+        ) = _group_fields_by_dtype(self._get_return_format(), self._get_cache_dtype(), "_get_cache_dtype")
+        assert len(self._field_shapes) > 0
+        (
+            self._intermediate_field_shapes,
+            self._intermediate_field_dtypes,
+            self._intermediate_size_by_dtype,
+            self._field_intermediate_slice,
+        ) = _group_fields_by_dtype(
+            self._get_intermediate_format(), self._get_intermediate_dtype(), "_get_intermediate_dtype"
         )
 
         history_length = self._options.history_length
-        self._cache_size = 0
-        self._read_flat_slices: list[slice] = []
-        read_off = 0
-        for shape in intrinsic_shapes:
-            data_size = np.prod(shape)
-            self._cache_slices.append(slice(self._cache_size, self._cache_size + data_size))
-            self._cache_size += data_size
-
-            span = data_size * history_length if history_length > 0 else data_size
-            self._read_flat_slices.append(slice(read_off, read_off + span))
-            read_off += span
-
         if history_length > 0:
-            self._return_shapes = tuple((history_length, *s) for s in intrinsic_shapes)
+            self._return_shapes = tuple((history_length, *s) for s in self._field_shapes)
         else:
-            self._return_shapes = intrinsic_shapes
+            self._return_shapes = self._field_shapes
 
-        self._cache_idx: int = -1  # initialized by SensorManager during build
+        # Start column of this sensor within each dtype's per-class cache block; filled by SensorManager.build().
+        # `_cache_idx_by_dtype` indexes the intermediate caches; `_return_idx_by_dtype` indexes the return caches (they
+        # coincide unless `_post_process` changes dtype, e.g. ContactSensor's float intermediate -> bool return).
+        self._cache_idx_by_dtype: dict[torch.dtype, int] = {}
+        self._return_idx_by_dtype: dict[torch.dtype, int] = {}
+
+    @property
+    def _cache_size(self) -> int:
+        """
+        Total intermediate columns this sensor contributes across all its dtype buffers.
+
+        For a single-dtype sensor this equals the old ``prod``-summed cache size exactly, so single-dtype callers
+        (metadata field sizing, per-sensor kernel offsets in temperature/raycaster/probe) are unaffected.
+        """
+        return sum(self._intermediate_size_by_dtype.values())
 
     # =============================== methods to implement ===============================
 
@@ -334,17 +382,18 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         """
         raise NotImplementedError(f"{type(self).__name__} has not implemented `_get_return_format()`.")
 
-    @classmethod
-    def _get_cache_dtype(cls) -> torch.dtype:
+    def _get_cache_dtype(self):
         """
-        Dtype of what ``read()`` returns; classmethod because the dtype is class-uniform across all instances.
+        Dtype(s) of what ``read()`` returns. Return a single ``torch.dtype`` (the common case - broadcast to every
+        field), or a tuple of dtypes aligned 1:1 with the fields of ``_get_return_format`` for a multi-dtype sensor
+        (e.g. a camera: ``(torch.uint8, torch.float32, torch.int32, torch.float32)`` for rgb/depth/seg/normal).
 
-        The manager allocates one per-dtype intermediate cache buffer and uses a per-class slice within it; if instances
-        of the same class returned different dtypes, the per-class slice would no longer be a single contiguous range,
-        breaking the per-class batched ``_update_shared_cache`` and ``_apply_transform`` contract. Dtype is therefore
-        class-uniform by design.
+        The manager allocates one intermediate cache buffer per dtype; a sensor's fields are grouped by dtype, and each
+        dtype group occupies its own contiguous per-class slice within that dtype's buffer. Instances of a class may
+        vary which fields/dtypes they enable (a camera's modality set is per-instance) as long as the field->dtype
+        mapping is consistent, which is why this is an instance method.
         """
-        raise NotImplementedError(f"{cls.__name__} has not implemented `_get_cache_dtype()`.")
+        raise NotImplementedError(f"{type(self).__name__} has not implemented `_get_cache_dtype()`.")
 
     def _get_intermediate_format(self) -> tuple[int | tuple[int, ...], ...]:
         """
@@ -355,43 +404,48 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         """
         return self._get_return_format()
 
-    @classmethod
-    def _get_intermediate_dtype(cls) -> torch.dtype:
+    def _get_intermediate_dtype(self):
         """
-        Dtype of the pipeline-internal cache; defaults to ``_get_cache_dtype()``.
+        Dtype(s) of the pipeline-internal cache; defaults to ``_get_cache_dtype()``.
 
         Override together with ``_post_process`` when the projection changes dtype (e.g. ContactSensor's float
-        intermediate vs. bool return). Same class-uniform semantics as ``_get_cache_dtype``.
+        intermediate vs. bool return). Single dtype or per-field tuple, same semantics as ``_get_cache_dtype``.
         """
-        return cls._get_cache_dtype()
+        return self._get_cache_dtype()
 
     @classmethod
     def _update_shared_cache(
         cls,
         shared_context: SharedSensorContextT,
         shared_metadata: SharedSensorMetadataT,
-        current_ground_truth_data_T: torch.Tensor,
-        ground_truth_data_timeline: "TensorRingBuffer | None",
-        measured_data_timeline: "TensorRingBuffer | None",
-        intermediate_cache: torch.Tensor,
+        ground_truth_slices: dict,
+        ground_truth_data_timelines: dict,
+        measured_data_timelines: dict,
+        intermediates: dict,
     ):
         """
         Compute one step of sensor data into the shared caches up to the per-step working buffer.
 
-        Updates the shared ground-truth cache slice (shape ``(cols, B)``, C-contiguous rows), the GT timeline ring
-        (``ground_truth_data_timeline.at(0)`` is the current GT write slot, post-transform), the measured timeline ring
-        (``measured_data_timeline.at(0)`` is the current measured write slot, post-physics-imperfections /
-        post-transform / PRE-hardware-imperfections), and the per-dtype ``intermediate_cache`` (shape ``(B, cols)``, the
-        per-step measured working buffer in intermediate space: post-HW-imperfections, pre-``_post_process``,
-        pre-delay-sample). When the sensor opts out of the ring pipeline (e.g. Camera), both timeline rings are ``None``
-        and the implementation writes directly to ``intermediate_cache``. The manager handles ``_post_process``
-        projection, return-space ring writes, and delay sampling after this hook returns.
+        The four data arguments are dicts keyed by this class's intermediate dtype(s) - one entry per dtype the class
+        spans (a single entry for the common single-dtype sensor; several for a multi-dtype camera). For each dtype:
+        ``ground_truth_slices[dt]`` is the GT cache slice (shape ``(cols, B)``, C-contiguous rows);
+        ``ground_truth_data_timelines[dt]`` / ``measured_data_timelines[dt]`` are the paired timeline rings whose
+        ``.at(0)`` is the current write slot (post-transform, PRE-hardware-imperfections), or ``None`` when the dtype
+        has no ring pipeline; ``intermediates[dt]`` is the per-step measured working buffer (shape ``(B, cols)``,
+        post-HW-imperfections, pre-``_post_process``, pre-delay-sample). Sensors that opt out of the ring pipeline (e.g.
+        Camera) get ``None`` timelines and write their rendered data directly into ``intermediates[dt]`` (and, for GT,
+        ``ground_truth_slices[dt]``). The manager handles ``_post_process`` projection, return-space ring writes, and
+        delay sampling after this hook returns.
         """
         raise NotImplementedError(f"{cls.__name__} has not implemented `update_shared_cache()`.")
 
     @classmethod
     def _apply_delay(
-        cls, shared_metadata: SharedSensorMetadataT, return_ring: "TensorRingBuffer", return_cache: torch.Tensor
+        cls,
+        shared_metadata: SharedSensorMetadataT,
+        return_ring: "TensorRingBuffer",
+        return_cache: torch.Tensor,
+        sensor_layout: list[tuple[int, int]],
     ):
         """
         Sample stale slots of the measured return-space ring into the user-visible measured return cache.
@@ -402,9 +456,11 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         is appropriate (e.g. linear interpolation between adjacent slots for a continuous-valued sensor whose return
         dtype is float).
 
-        ``return_ring`` is the per-class measured return-space ring (slot 0 = current step's post-everything value;
-        slots 1.. are previous steps in increasing age). ``return_cache`` is the per-class measured return cache to
-        populate; it is in return space (same shape and dtype as the ring).
+        ``return_ring`` / ``return_cache`` are the per-(class, return-dtype) measured ring and cache: a multi-dtype
+        sensor (e.g. a camera) is delay-sampled once per dtype it spans. ``sensor_layout`` is the ordered
+        ``(global_sensor_idx, size_in_this_dtype)`` list for the sensors contributing columns to THIS dtype's cache;
+        ``global_sensor_idx`` indexes the per-sensor ``delays_ts`` / ``jitter_ts`` columns (shared across dtypes), and
+        ``size_in_this_dtype`` is how many columns that sensor occupies in this dtype's return cache.
         """
         if not shared_metadata.has_any_delay and not shared_metadata.has_any_jitter:
             # Fast path: no per-sensor delay loop, just copy the most recent slot class-wide.
@@ -419,7 +475,7 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
             cur_jitter_ts = None
 
         tensor_start = 0
-        for sensor_idx, tensor_size in enumerate(shared_metadata.cache_sizes):
+        for sensor_idx, tensor_size in sensor_layout:
             cur_delay_ts = shared_metadata.delays_ts[:, sensor_idx]
             if cur_jitter_ts is not None:
                 # Probabilistic rounding of the continuous-time delay onto integer ring slots: with `jitter < dt` (one
@@ -508,20 +564,20 @@ class Sensor(RBC, Generic[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
 
     # =============================== private shared methods ===============================
 
-    def _get_formatted_data(self, tensor: torch.Tensor, envs_idx=None) -> torch.Tensor:
+    def _get_formatted_data(self, fields: list[torch.Tensor], envs_idx=None) -> torch.Tensor:
         """
         Returns tensor(s) matching the return format.
 
-        Note that this method does not clone the data tensor, it should have been cloned by the caller.
+        ``fields`` is the per-field list produced by ``SensorManager.get_cloned_from_cache`` - one ``(B, span)`` tensor
+        per return field (``span`` folds in the history dimension when history is enabled). Each is reshaped to its
+        return shape; a single-field sensor returns the bare tensor, a multi-field sensor its NamedTuple. Note that this
+        method does not clone the data, it should have been cloned by the caller.
         """
         envs_idx = self._sanitize_envs_idx(envs_idx)
 
         return_values = []
-        tensor_chunk = tensor[envs_idx].reshape((len(envs_idx), -1))
-
-        for i, shape in enumerate(self._return_shapes):
-            sl = self._read_flat_slices[i]
-            field_data = tensor_chunk[..., sl].reshape((len(envs_idx), *shape))
+        for shape, field_tensor in zip(self._return_shapes, fields):
+            field_data = field_tensor[envs_idx].reshape((len(envs_idx), *shape))
             if self._manager._sim.n_envs == 0:
                 field_data = field_data[0]
             return_values.append(field_data)
@@ -801,11 +857,18 @@ class SimpleSensor(Sensor[OptionsT, SharedSensorContextT, SharedSensorMetadataT,
         cls,
         shared_context: SharedSensorContextT,
         shared_metadata: SharedSensorMetadata,
-        current_ground_truth_data_T: torch.Tensor,
-        ground_truth_data_timeline: "TensorRingBuffer | None",
-        measured_data_timeline: "TensorRingBuffer | None",
-        intermediate_cache: torch.Tensor,
+        ground_truth_slices: dict,
+        ground_truth_data_timelines: dict,
+        measured_data_timelines: dict,
+        intermediates: dict,
     ):
+        # SimpleSensor is single-dtype, so each per-dtype dict from the manager has exactly one entry. Unpack the sole
+        # intermediate-dtype buffers back to the scalar tensors the pipeline hooks operate on.
+        (current_ground_truth_data_T,) = ground_truth_slices.values()
+        (ground_truth_data_timeline,) = ground_truth_data_timelines.values()
+        (measured_data_timeline,) = measured_data_timelines.values()
+        (intermediate_cache,) = intermediates.values()
+
         # Both branches share the same raw signal. The GT and measured timeline rings (paired, same size, shared
         # rotation idx) store post-transform, PRE-hardware-imperfections data; `_apply_transform` reads previous ring
         # slots cleanly and hardware imperfections never write back to the ring, so transform recurrence stays clean.

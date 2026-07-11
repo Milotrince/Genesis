@@ -119,10 +119,11 @@ class Entity(RBC):
     @gs.assert_built
     def read_sensors(self, envs_idx=None) -> "dict[type[Sensor], torch.Tensor]":
         """
-        Read every sensor attached to this entity as a tensor per sensor class.
+        Read every **vector** sensor attached to this entity as a tensor per sensor class.
 
-        Always returns a fresh tensor independent of the internal sensor storage; the caller is free to mutate the
-        result.
+        Batched reader for vector-shaped sensors on this entity. Camera sensors are not included - read them via
+        ``camera.read()`` or all at once via :meth:`read_cameras`. Always returns a fresh tensor independent of the
+        internal sensor storage; the caller is free to mutate the result.
 
         Parameters
         ----------
@@ -132,10 +133,23 @@ class Entity(RBC):
         Returns
         -------
         dict[Type[Sensor], torch.Tensor]
-            For each sensor class with at least one sensor on this entity, a tensor of shape
+            For each vector sensor class with at least one sensor on this entity, a tensor of shape
             (B, [history,] entity_cache_size_for_class).
         """
         return self._sim._sensor_manager.read_sensors(entity_idx=self._idx, envs_idx=envs_idx)
+
+    def read_cameras(self, envs_idx=None) -> dict:
+        """
+        Render and read every camera sensor attached to this entity, one entry per camera.
+
+        Entity-scoped companion to :meth:`read_sensors`; see :meth:`Scene.read_cameras`.
+
+        Returns
+        -------
+        dict[Sensor, CameraReturnType]
+            Mapping from each attached camera sensor to its rendered modalities.
+        """
+        return self._sim._sensor_manager.read_cameras(entity_idx=self._idx, envs_idx=envs_idx)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------
