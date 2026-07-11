@@ -4572,7 +4572,9 @@ class RigidEntity(KinematicEntity):
         if self._enable_heterogeneous or self._solver._enable_geom_scaling:
             links_idx = slice(self.link_start, self.link_end)
             links_mass = qd_to_numpy(self._solver.links_info.inertial_mass, None, links_idx, transpose=True)
-            return links_mass.sum(axis=1)
+            # Follow the getter convention: a bare scalar for a non-batched scene, (n_envs,) when batched.
+            mass = links_mass.sum(axis=1)
+            return mass if self._solver.n_envs > 0 else mass[0]
 
         # Original behavior: sum link masses to scalar
         mass = 0.0

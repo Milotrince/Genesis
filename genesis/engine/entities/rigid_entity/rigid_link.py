@@ -1058,8 +1058,10 @@ class RigidLink(KinematicLink):
         environment (heterogeneous variants or per-env geom scaling); otherwise the scalar build-time mass.
         """
         if self.entity._enable_heterogeneous or self._solver._enable_geom_scaling:
-            # get_links_inertial_mass keeps a singleton link axis; drop it to return a per-env vector.
-            return tensor_to_array(self._solver.get_links_inertial_mass(self._idx))[..., 0]
+            # get_links_inertial_mass keeps a singleton link axis; drop it to return a per-env vector, then
+            # follow the getter convention: a bare scalar for a non-batched scene, (n_envs,) when batched.
+            mass = tensor_to_array(self._solver.get_links_inertial_mass(self._idx))[..., 0]
+            return mass if self._solver.n_envs > 0 else mass[0]
         return self._inertial_mass
 
     def set_friction(self, friction):

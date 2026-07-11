@@ -2549,9 +2549,15 @@ class RigidSolver(KinematicSolver):
 
         Scales the entity's collision geometry, AABBs and per-link inertial for the selected environments.
         'scale' is a scalar (isotropic), a length-3 vector, or a per-environment (n_envs, 3) array. Requires
-        the scene built with 'enable_geom_scaling=True'. Anisotropic scale is fully supported for sphere (an
-        ellipsoid), cylinder (an elliptic cylinder), box and mesh; only a capsule requires an isotropic radial
+        the scene built with 'enable_geom_scaling=True'. Anisotropic scale gives a sphere -> ellipsoid, a
+        cylinder -> elliptic cylinder, and stretches boxes and meshes; a capsule requires an isotropic radial
         scale (sx == sy). The joint configuration is preserved.
+
+        Each link's inertial is re-derived from the build-time geometry baseline scaled by det(S), so a prior
+        set_mass on the same link is overridden (scale is a geometry operation). Collision currently honors the
+        scale on the support-based (MPR/GJK) and plane contact paths; the analytic primitive-primitive fast
+        paths (sphere-box, sphere/capsule-capsule, box-box) do not yet, so a scaled inter-primitive contact can
+        be wrong until that lands.
         """
         if not self._enable_geom_scaling:
             gs.raise_exception("set_scale requires the scene built with RigidOptions(enable_geom_scaling=True).")
@@ -2606,26 +2612,29 @@ class RigidSolver(KinematicSolver):
         links = entity.links
         links_idx = np.array([link.idx for link in links], dtype=gs.np_int)
         n_l = len(links_idx)
-        out_mass = np.empty((n_sel, n_l), dtype=gs.np_float)
-        out_pos = np.empty((n_sel, n_l, 3), dtype=gs.np_float)
-        out_quat = np.zeros((n_sel, n_l, 4), dtype=gs.np_float)
-        out_quat[..., 0] = 1.0
-        out_i = np.empty((n_sel, n_l, 3, 3), dtype=gs.np_float)
         eye = np.eye(3, dtype=gs.np_float)
+
+        # Per-link baseline (unit-scale) inertial in the link frame: the mass, the COM, and the covariance
+        # matrix c0 = 0.5 tr(I0) Id - I0 (from the link-frame tensor I0). Only this per-link read needs a loop.
+        mass0 = np.array([link._inertial_mass for link in links], dtype=gs.np_float)  # (n_l,)
+        com0 = np.array([link._inertial_pos for link in links], dtype=gs.np_float)  # (n_l, 3)
+        c0 = np.empty((n_l, 3, 3), dtype=gs.np_float)
         for i_l_, link in enumerate(links):
             rot = gu.quat_to_R(np.array(link._inertial_quat, dtype=gs.np_float))
             i_link = rot @ np.array(link._inertial_i, dtype=gs.np_float) @ rot.T
-            com0 = np.array(link._inertial_pos, dtype=gs.np_float)
-            mass0 = float(link._inertial_mass)
-            c0 = 0.5 * np.trace(i_link) * eye - i_link
-            for i_b_ in range(n_sel):
-                s = scale[i_b_]
-                det = float(s[0] * s[1] * s[2])
-                s_mat = np.diag(s)
-                cov = det * (s_mat @ c0 @ s_mat)
-                out_i[i_b_, i_l_] = np.trace(cov) * eye - cov
-                out_pos[i_b_, i_l_] = s * com0
-                out_mass[i_b_, i_l_] = mass0 * det
+            c0[i_l_] = 0.5 * np.trace(i_link) * eye - i_link
+
+        # Vectorized covariance transform over the environment axis: mass *= det(S), com -> S com, and (for a
+        # diagonal scale S) C = det(S) S C0 S so C[b,l,i,j] = det[b] scale[b,i] scale[b,j] C0[l,i,j], then
+        # I = tr(C) Id - C. The scaled tensor is stored in the link frame (quat = identity).
+        det = scale[:, 0] * scale[:, 1] * scale[:, 2]  # (n_sel,)
+        scale_outer = scale[:, :, None] * scale[:, None, :]  # (n_sel, 3, 3)
+        cov = det[:, None, None, None] * scale_outer[:, None] * c0[None]  # (n_sel, n_l, 3, 3)
+        out_mass = mass0[None] * det[:, None]  # (n_sel, n_l)
+        out_pos = scale[:, None, :] * com0[None]  # (n_sel, n_l, 3)
+        out_i = np.trace(cov, axis1=2, axis2=3)[..., None, None] * eye - cov  # (n_sel, n_l, 3, 3)
+        out_quat = np.zeros((n_sel, n_l, 4), dtype=gs.np_float)
+        out_quat[..., 0] = 1.0
         kernel_set_links_inertial(
             out_mass, out_pos, out_quat, out_i, links_idx, envs_idx_np, self.links_info, self._static_rigid_sim_config
         )
