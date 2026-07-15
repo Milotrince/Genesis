@@ -105,7 +105,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
             if ray_hit.geom and ray_hit.geom.link is not None and not ray_hit.geom.link.is_fixed:
                 link = ray_hit.geom.link
                 hit_env_idx = self._get_last_raycast_env_idx()
-                mass = float(link.get_mass())
+                mass = float(link.get_mass(envs_idx=hit_env_idx))
 
                 # Validate mass is not too small to prevent numerical instability
                 if mass < MIN_PICKABLE_MASS:
@@ -253,7 +253,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
                 self._sim_running
                 and link is not None
                 and not link.is_fixed
-                and float(link.get_mass()) >= MIN_PICKABLE_MASS
+                and float(link.get_mass(envs_idx=self._get_last_raycast_env_idx())) >= MIN_PICKABLE_MASS
             )
             if is_pickable:
                 arrow_T = gu.trans_R_to_T(closest_hit.position, gu.z_up_to_R(closest_hit.normal))
@@ -350,7 +350,7 @@ class MouseInteractionPlugin(RaycasterViewerPlugin):
         inv_inertia_world = np.linalg.inv(inertia_world)
 
         pos_err_v = control_point_env_local - held_point_env_local
-        inv_mass = 1.0 / float(self._held_link.get_mass())
+        inv_mass = 1.0 / float(self._held_link.get_mass(envs_idx=self._interact_env_idx))
 
         total_impulse = np.zeros(3, dtype=gs.np_float)
         total_torque_impulse = np.zeros(3, dtype=gs.np_float)

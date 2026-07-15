@@ -770,6 +770,34 @@ def test_mass_setters(tol):
         link.set_mass((1.0, 2.0, 3.0, 4.0))
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_mass_shape_follows_n_envs(n_envs, tol):
+    # get_mass mirrors get_pos: the shape is a scalar when non-batched and (n_envs,) when batched, decided by
+    # n_envs alone. batch_links_info sets whether the value can differ per env, never the shape.
+    for batch_links_info in (False, True):
+        scene = gs.Scene(
+            show_viewer=False,
+            rigid_options=gs.options.RigidOptions(
+                batch_links_info=batch_links_info,
+            ),
+        )
+        box = scene.add_entity(
+            gs.morphs.Box(
+                size=(0.1, 0.1, 0.1),
+            ),
+        )
+        scene.build(n_envs=n_envs)
+        link = next(link for link in box.links if not link.is_fixed)
+        for mass in (box.get_mass(), link.get_mass()):
+            if n_envs == 0:
+                assert np.ndim(mass) == 0
+            else:
+                assert mass.shape == (n_envs,)
+        box.set_mass(3.0)
+        assert_allclose(box.get_mass(), 3.0, tol=tol)
+
+
 @pytest.mark.slow  # ~250s
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 3])

@@ -4288,16 +4288,13 @@ class RigidEntity(KinematicEntity):
         """
         gravity = self._solver.get_gravity(envs_idx=envs_idx)  # (3,) or (n_envs, 3)
         links_pos = self.get_links_pos(envs_idx=envs_idx, ref="link_com")  # (..., n_links, 3)
-        # Link masses are batched per environment for heterogeneous or per-env-scaled entities (the runtime
-        # inertial differs per env); otherwise they are a static per-link vector. When batched, fetch all envs
-        # (the solver forbids envs_idx for batched links) and index down to the requested envs so the mass axis
-        # aligns with links_pos.
-        if (self._enable_heterogeneous or self._solver._enable_geom_scaling) and self._solver.n_envs > 0:
-            links_mass = self.get_links_inertial_mass()  # (n_envs, n_links)
-            if envs_idx is not None:
-                links_mass = links_mass[self._scene._sanitize_envs_idx(envs_idx)]
+        # Per-env link masses (n_sel, n_links) when links info is batched; otherwise a static (n_links,) that
+        # broadcasts against g_dot_p. Either way the mass axis aligns with links_pos. envs_idx is only accepted
+        # by the getter when links info is batched.
+        if self._solver._options.batch_links_info:
+            links_mass = self.get_links_inertial_mass(envs_idx=envs_idx)
         else:
-            links_mass = self.get_links_inertial_mass()  # (n_links,)
+            links_mass = self.get_links_inertial_mass()
 
         # PE_i = m_i * g^T * p_i => PE = sum_i(m_i * (g . p_i))
         # g is (..., 3), links_pos is (..., n_links, 3) -> broadcast g to (..., 1, 3)
@@ -4546,43 +4543,42 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def set_mass(self, mass):
         """
-        Set the mass of the entity.
+        Set the total mass of the entity, distributed across its links in proportion to their current masses.
 
         Parameters
         ----------
         mass : float
-            The mass to set.
+            The target total mass in kg.
         """
-        ratio = float(mass) / self.get_mass()
-        for link in self.links:
-            link.set_mass(link.get_mass() * ratio)
+        # Reference the links' current masses in their storage-native shape (per-env only when links info is
+        # batched); each link's new absolute mass keeps the same share of the requested total per environment.
+        links_mass = self.get_links_inertial_mass()
+        new_links_mass = links_mass * (float(mass) / links_mass.sum(dim=-1, keepdim=True))
+        for i_l, link in enumerate(self.links):
+            link.set_mass(new_links_mass[..., i_l])
 
     @gs.assert_built
-    def get_mass(self):
+    def get_mass(self, envs_idx=None):
         """
         Get the total mass of the entity in kg.
 
-        For heterogeneous entities, returns an array of masses for each environment.
-        For non-heterogeneous entities, returns a scalar mass.
+        Follows the same shape convention as ``get_pos``: a scalar for a non-batched scene (``n_envs == 0``),
+        otherwise a tensor of shape ``(n_envs,)`` (or ``(len(envs_idx),)``). The value is per-environment when
+        the scene was built with ``batch_links_info=True`` (which per-env geom scaling and heterogeneous
+        entities enable automatically); otherwise the single build-time mass is broadcast across environments.
 
         Returns
         -------
-        mass : float | np.ndarray
-            The total mass of the entity in kg. For heterogeneous entities, returns
-            an array of shape (n_envs,) with per-environment masses.
+        mass : float | torch.Tensor
         """
-        if self._enable_heterogeneous or self._solver._enable_geom_scaling:
-            links_idx = slice(self.link_start, self.link_end)
-            links_mass = qd_to_numpy(self._solver.links_info.inertial_mass, None, links_idx, transpose=True)
-            # Follow the getter convention: a bare scalar for a non-batched scene, (n_envs,) when batched.
-            mass = links_mass.sum(axis=1)
-            return mass if self._solver.n_envs > 0 else mass[0]
-
-        # Original behavior: sum link masses to scalar
-        mass = 0.0
-        for link in self.links:
-            mass += link.get_mass()
-        return mass
+        if self._solver._options.batch_links_info:
+            total = self.get_links_inertial_mass(envs_idx=envs_idx).sum(dim=-1)
+            return float(total) if self._solver.n_envs == 0 else total
+        total = float(self.get_links_inertial_mass().sum(dim=-1))
+        if self._solver.n_envs == 0:
+            return total
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        return torch.full((len(envs_idx),), total, dtype=gs.tc_float, device=gs.device)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

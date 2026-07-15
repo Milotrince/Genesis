@@ -1038,31 +1038,39 @@ class RigidLink(KinematicLink):
                 f"got {mass.shape[0]}."
             )
 
-        # Use the current runtime mass so the ratio is correct even after per-env changes (scaling /
-        # heterogeneous variants), where the solver field - not the build-time Python mirror - is the truth.
-        # get_mass returns a per-env vector in that case (else the build-time scalar).
-        is_per_env = self.entity._enable_heterogeneous or self._solver._enable_geom_scaling
-        ratio = mass / self.get_mass()
-        self._solver.set_links_inertia(ratio, [self.idx])
-        if not is_per_env:
+        # Reference the current mass in its storage-native shape, so the ratio is correct regardless of
+        # get_mass's (n_envs-based) return shape: when links info is batched the solver field is the truth
+        # (per-env), otherwise the build-time Python mirror is a scalar. The Python mirror is only meaningful,
+        # and only updated, in the non-batched case.
+        if self._solver._options.batch_links_info:
+            ref = tensor_to_array(self._solver.get_links_inertial_mass(self._idx))[..., 0]
+            ratio = mass / ref
+            self._solver.set_links_inertia(ratio, [self.idx])
+        else:
+            ratio = mass / self._inertial_mass
+            self._solver.set_links_inertia(ratio, [self.idx])
             self._inertial_mass = mass
             self._inertial_i = self._inertial_i * ratio[..., None, None]
             self._invweight = self._invweight / ratio[..., None]
 
     @gs.assert_built
-    def get_mass(self):
+    def get_mass(self, envs_idx=None):
         """
         Get the mass of the link.
 
-        Returns the per-environment mass (shape ``(n_envs,)``) when the runtime inertial can differ per
-        environment (heterogeneous variants or per-env geom scaling); otherwise the scalar build-time mass.
+        Follows the same shape convention as ``get_pos``: a scalar for a non-batched scene (``n_envs == 0``),
+        otherwise a tensor of shape ``(n_envs,)`` (or ``(len(envs_idx),)``). The value is per-environment when
+        the scene was built with ``batch_links_info=True`` (which per-env geom scaling and heterogeneous
+        entities enable automatically); otherwise the single build-time mass is broadcast across environments.
         """
-        if self.entity._enable_heterogeneous or self._solver._enable_geom_scaling:
-            # get_links_inertial_mass keeps a singleton link axis; drop it to return a per-env vector, then
-            # follow the getter convention: a bare scalar for a non-batched scene, (n_envs,) when batched.
-            mass = tensor_to_array(self._solver.get_links_inertial_mass(self._idx))[..., 0]
-            return mass if self._solver.n_envs > 0 else mass[0]
-        return self._inertial_mass
+        if self._solver._options.batch_links_info:
+            # The solver getter keeps a singleton link axis for a scalar link index; drop it.
+            mass = self._solver.get_links_inertial_mass(self._idx, envs_idx=envs_idx)[..., 0]
+            return float(mass) if self._solver.n_envs == 0 else mass
+        if self._solver.n_envs == 0:
+            return self._inertial_mass
+        envs_idx = self._solver._scene._sanitize_envs_idx(envs_idx)
+        return torch.full((len(envs_idx),), float(self._inertial_mass), dtype=gs.tc_float, device=gs.device)
 
     def set_friction(self, friction):
         """
