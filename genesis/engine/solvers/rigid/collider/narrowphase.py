@@ -1721,6 +1721,32 @@ def func_recompute_perturbed_contact(
 
 
 @qd.func
+def func_pair_needs_support_path(
+    i_ga,
+    i_gb,
+    i_b,
+    geoms_state: array_class.GeomsState,
+    static_rigid_sim_config: qd.template(),
+):
+    # An analytic primitive-primitive contact reads unscaled geom dimensions, so a pair with a non-unit per-env
+    # scale must instead take the general support-based path (MPR/GJK), whose support functions bake the scale
+    # in. Statically False - zero overhead, analytic path unchanged - when per-env geom scaling is disabled.
+    needs_support = False
+    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+        scale_a = geoms_state.scale[i_ga, i_b]
+        scale_b = geoms_state.scale[i_gb, i_b]
+        needs_support = (
+            scale_a[0] != 1.0
+            or scale_a[1] != 1.0
+            or scale_a[2] != 1.0
+            or scale_b[0] != 1.0
+            or scale_b[1] != 1.0
+            or scale_b[2] != 1.0
+        )
+    return needs_support
+
+
+@qd.func
 def func_convex_convex_contact(
     i_ga,
     i_gb,
@@ -1835,7 +1861,12 @@ def func_convex_convex_contact(
                 )
 
             if (multi_contact and is_col_0) or (i_detection == 0):
-                if geoms_info.type[i_ga] == gs.GEOM_TYPE.CAPSULE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
+                use_analytic = not func_pair_needs_support_path(i_ga, i_gb, i_b, geoms_state, static_rigid_sim_config)
+                if (
+                    geoms_info.type[i_ga] == gs.GEOM_TYPE.CAPSULE
+                    and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE
+                    and use_analytic
+                ):
                     is_col, normal, contact_pos, penetration = capsule_contact.func_capsule_capsule_contact(
                         i_ga,
                         i_gb,
@@ -1846,7 +1877,11 @@ def func_convex_convex_contact(
                         geoms_info,
                         rigid_global_info,
                     )
-                elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
+                elif (
+                    geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE
+                    and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE
+                    and use_analytic
+                ):
                     is_col, normal, contact_pos, penetration = capsule_contact.func_sphere_capsule_contact(
                         i_ga,
                         i_gb,
@@ -1857,7 +1892,11 @@ def func_convex_convex_contact(
                         geoms_info,
                         rigid_global_info,
                     )
-                elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.BOX:
+                elif (
+                    geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE
+                    and geoms_info.type[i_gb] == gs.GEOM_TYPE.BOX
+                    and use_analytic
+                ):
                     is_col, normal, contact_pos, penetration = func_sphere_box_contact(
                         i_ga,
                         i_gb,
@@ -2262,7 +2301,8 @@ def _func_multicontact_run_detection(
     used_gjk = False
     tolerance = collider_info.mc_tolerance[None] * func_compute_geom_pair_scale(i_ga, i_gb, geoms_info, geoms_init_AABB)
 
-    if geoms_info.type[i_ga] == gs.GEOM_TYPE.CAPSULE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
+    use_analytic = not func_pair_needs_support_path(i_ga, i_gb, i_b, geoms_state, static_rigid_sim_config)
+    if geoms_info.type[i_ga] == gs.GEOM_TYPE.CAPSULE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE and use_analytic:
         is_col, normal, contact_pos, penetration = capsule_contact.func_capsule_capsule_contact(
             i_ga,
             i_gb,
@@ -2273,7 +2313,9 @@ def _func_multicontact_run_detection(
             geoms_info,
             rigid_global_info,
         )
-    elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
+    elif (
+        geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE and use_analytic
+    ):
         is_col, normal, contact_pos, penetration = capsule_contact.func_sphere_capsule_contact(
             i_ga,
             i_gb,
@@ -2284,7 +2326,7 @@ def _func_multicontact_run_detection(
             geoms_info,
             rigid_global_info,
         )
-    elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.BOX:
+    elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.BOX and use_analytic:
         is_col, normal, contact_pos, penetration = func_sphere_box_contact(
             i_ga,
             i_gb,
@@ -2939,7 +2981,12 @@ def _func_narrowphase_contact0(
 
             i_pair = collider_info.collision_pair_idx[(i_gb, i_ga) if i_ga > i_gb else (i_ga, i_gb)]
 
-            if geoms_info.type[i_ga] == gs.GEOM_TYPE.CAPSULE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
+            use_analytic = not func_pair_needs_support_path(i_ga, i_gb, i_b, geoms_state, static_rigid_sim_config)
+            if (
+                geoms_info.type[i_ga] == gs.GEOM_TYPE.CAPSULE
+                and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE
+                and use_analytic
+            ):
                 is_col, normal, contact_pos, penetration = capsule_contact.func_capsule_capsule_contact(
                     i_ga,
                     i_gb,
@@ -2950,7 +2997,11 @@ def _func_narrowphase_contact0(
                     geoms_info,
                     rigid_global_info,
                 )
-            elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
+            elif (
+                geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE
+                and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE
+                and use_analytic
+            ):
                 is_col, normal, contact_pos, penetration = capsule_contact.func_sphere_capsule_contact(
                     i_ga,
                     i_gb,
@@ -2961,7 +3012,11 @@ def _func_narrowphase_contact0(
                     geoms_info,
                     rigid_global_info,
                 )
-            elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.BOX:
+            elif (
+                geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE
+                and geoms_info.type[i_gb] == gs.GEOM_TYPE.BOX
+                and use_analytic
+            ):
                 is_col, normal, contact_pos, penetration = func_sphere_box_contact(
                     i_ga,
                     i_gb,
@@ -3343,6 +3398,7 @@ def func_narrow_phase_convex_specializations(
                         collider_state,
                         collider_info,
                         rigid_global_info,
+                        static_rigid_sim_config,
                         collider_static_config,
                         errno,
                     )

@@ -2554,10 +2554,12 @@ class RigidSolver(KinematicSolver):
         scale (sx == sy). The joint configuration is preserved.
 
         Each link's inertial is re-derived from the build-time geometry baseline scaled by det(S), so a prior
-        set_mass on the same link is overridden (scale is a geometry operation). Collision currently honors the
-        scale on the support-based (MPR/GJK) and plane contact paths; the analytic primitive-primitive fast
-        paths (sphere-box, sphere/capsule-capsule, box-box) do not yet, so a scaled inter-primitive contact can
-        be wrong until that lands.
+        set_mass on the same link is overridden (scale is a geometry operation). Collision honors the scale on
+        every convex path: support-based (MPR/GJK), plane, the box-box specialization, and the analytic
+        primitive contacts (sphere-box, sphere/capsule-capsule), which defer to the support path when either
+        geom is scaled. The one unsupported case is scaling a geom that provides the signed-distance field for
+        nonconvex (decomposed-mesh) collision: a scaled geom against an unscaled distance-field geom is exact,
+        but scaling the distance-field geom itself is not (its field is baked at unit scale).
         """
         if not self._enable_geom_scaling:
             gs.raise_exception("set_scale requires the scene built with RigidOptions(enable_geom_scaling=True).")

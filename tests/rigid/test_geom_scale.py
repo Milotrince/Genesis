@@ -338,3 +338,105 @@ def test_geom_scale_visual(tol):
 
     # Visual and collision geometry stay consistent under scale.
     assert_allclose(torch.diff(box.get_AABB(), dim=-2)[1, 0], ext1[1], tol=1e-2)
+
+
+@pytest.mark.parametrize("backend", [gs.gpu])
+def test_geom_scale_analytic_primitive_contacts(tol):
+    # Scaled sphere-box, sphere-capsule and capsule-capsule pairs previously took the analytic narrowphase,
+    # which reads unscaled geom dimensions. They now defer to the support-based path, so the scaled shape rests
+    # at the scaled height. env 0 is the unscaled control; env 1 scales each faller. Every support is a fixed
+    # geom whose top surface sits at z = 0.2, so every faller rests at 0.2 + its (possibly scaled) bottom radius.
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_geom_scaling=True,
+            gravity=(0.0, 0.0, -10.0),
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(
+        gs.morphs.Box(
+            size=(0.4, 0.4, 0.2),
+            pos=(0.0, 0.0, 0.1),
+            fixed=True,
+        ),
+    )
+    sphere_on_box = scene.add_entity(
+        gs.morphs.Sphere(
+            radius=0.1,
+            pos=(0.0, 0.0, 0.45),
+        ),
+    )
+
+    fixed_capsule_a = ET.Element("mujoco")
+    body_a = ET.SubElement(ET.SubElement(fixed_capsule_a, "worldbody"), "body", pos="2 0 0")
+    ET.SubElement(body_a, "geom", type="capsule", fromto="-0.15 0 0.1 0.15 0 0.1", size="0.1", mass="1.0")
+    scene.add_entity(morph=gs.morphs.MJCF(file=ET.tostring(fixed_capsule_a, encoding="unicode")))
+    sphere_on_capsule = scene.add_entity(
+        gs.morphs.Sphere(
+            radius=0.1,
+            pos=(2.0, 0.0, 0.45),
+        ),
+    )
+
+    fixed_capsule_b = ET.Element("mujoco")
+    body_b = ET.SubElement(ET.SubElement(fixed_capsule_b, "worldbody"), "body", pos="4 0 0")
+    ET.SubElement(body_b, "geom", type="capsule", fromto="-0.15 0 0.1 0.15 0 0.1", size="0.1", mass="1.0")
+    scene.add_entity(morph=gs.morphs.MJCF(file=ET.tostring(fixed_capsule_b, encoding="unicode")))
+    faller_capsule = ET.Element("mujoco")
+    body_c = ET.SubElement(ET.SubElement(faller_capsule, "worldbody"), "body", pos="4 0 0.45")
+    ET.SubElement(body_c, "joint", type="free")
+    ET.SubElement(body_c, "geom", type="capsule", fromto="0 -0.15 0 0 0.15 0", size="0.1", mass="0.5")
+    capsule_on_capsule = scene.add_entity(morph=gs.morphs.MJCF(file=ET.tostring(faller_capsule, encoding="unicode")))
+
+    scene.build(n_envs=2)
+
+    # env 1: anisotropic sphere (-> ellipsoid, vertical semi-axis 0.2) and a radius-doubled capsule (radial
+    # scale stays isotropic). Both have a 0.2 bottom radius, matching the scaled spheres.
+    sphere_on_box.set_scale((1.0, 1.0, 2.0), envs_idx=[1])
+    sphere_on_capsule.set_scale((1.0, 1.0, 2.0), envs_idx=[1])
+    capsule_on_capsule.set_scale((2.0, 2.0, 1.0), envs_idx=[1])
+    for _ in range(100):
+        scene.step()
+
+    for faller in (sphere_on_box, sphere_on_capsule, capsule_on_capsule):
+        z = faller.get_pos()[..., 2]
+        assert torch.isfinite(z).all()
+        assert_allclose(z[0], 0.30, tol=1.5e-2)  # unscaled: support top 0.2 + 0.1 radius
+        assert_allclose(z[1], 0.40, tol=1.5e-2)  # scaled: support top 0.2 + 0.2 scaled radius / semi-axis
+
+
+@pytest.mark.parametrize("backend", [gs.gpu])
+def test_geom_scale_box_box_detection(tol):
+    # The analytic box-box specialization (box_box_detection=True) reads box half-extents directly; per-env
+    # scale must scale them so a scaled box rests at the scaled height. env 0 unscaled control, env 1 z-scaled.
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            enable_geom_scaling=True,
+            box_box_detection=True,
+            gravity=(0.0, 0.0, -10.0),
+        ),
+        show_viewer=False,
+    )
+    scene.add_entity(
+        gs.morphs.Box(
+            size=(0.6, 0.6, 0.2),
+            pos=(0.0, 0.0, 0.1),
+            fixed=True,
+        ),
+    )
+    faller = scene.add_entity(
+        gs.morphs.Box(
+            size=(0.1, 0.1, 0.1),
+            pos=(0.0, 0.0, 0.45),
+        ),
+    )
+    scene.build(n_envs=2)
+
+    faller.set_scale((1.0, 1.0, 3.0), envs_idx=[1])
+    for _ in range(80):
+        scene.step()
+
+    z = faller.get_pos()[..., 2]
+    assert torch.isfinite(z).all()
+    assert_allclose(z[0], 0.25, tol=1e-2)  # rests on platform top 0.2 + half-height 0.05
+    assert_allclose(z[1], 0.35, tol=1e-2)  # z-scale 3 -> half-height 0.15

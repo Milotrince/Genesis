@@ -208,6 +208,7 @@ def func_box_box_contact(
     collider_state: array_class.ColliderState,
     collider_info: array_class.ColliderInfo,
     rigid_global_info: array_class.RigidGlobalInfo,
+    static_rigid_sim_config: qd.template(),
     collider_static_config: qd.template(),
     errno: qd.Tensor,
 ):
@@ -243,6 +244,11 @@ def func_box_box_contact(
     size2 = (
         qd.Vector([geoms_info.data[i_gb][0], geoms_info.data[i_gb][1], geoms_info.data[i_gb][2]], dt=gs.qd_float) / 2
     )
+    # A box stays a box under a diagonal scale, so scaling its half-extents is exact: the whole algorithm is
+    # parametrized by size1/size2 and the box poses, and every downstream vertex/face derives from these.
+    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+        size1 = geoms_state.scale[i_ga, i_b] * size1
+        size2 = geoms_state.scale[i_gb, i_b] * size2
 
     pos1, pos2 = ga_pos, gb_pos
     mat1, mat2 = gu.qd_quat_to_R(ga_quat, EPS), gu.qd_quat_to_R(gb_quat, EPS)

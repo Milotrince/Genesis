@@ -2154,6 +2154,8 @@ class KinematicEntity(Entity):
         the entity's collision geometry, AABBs and inertial about each geom's frame origin; the joint
         configuration is preserved. Anisotropic scale is supported for sphere (-> ellipsoid), cylinder
         (-> elliptic cylinder), box and mesh; only a capsule requires an isotropic radial scale (sx == sy).
+        Collision responds to the scale for primitives and convex meshes; a nonconvex (decomposed) mesh whose
+        contacts come from a precomputed distance field is the one shape whose collision does not rescale.
         """
         if not self._solver.is_built:
             gs.raise_exception("set_scale can only be called after the scene is built.")
