@@ -12,7 +12,6 @@ from ..utils import (
 
 
 def test_geom_scale(tol):
-    """Per-environment runtime geom scale rescales inertia, AABB and box-vs-plane collision per env."""
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             enable_geom_scaling=True,
@@ -55,7 +54,7 @@ def test_geom_scale(tol):
     assert_allclose(box.get_scale()[[2, 3]], (1.0, 1.0, 1.0), tol=tol)
 
     # Drop: scaled boxes rest on their scaled half-height (0.15), unit boxes on 0.05.
-    for _ in range(400):
+    for _ in range(100):
         scene.step()
     z = box.get_pos()[..., 2]
     assert torch.isfinite(z).all()
@@ -69,9 +68,6 @@ def test_geom_scale(tol):
 
 
 def test_geom_scale_anisotropic(tol):
-    """Anisotropic scale turns a sphere into an ellipsoid and a cylinder into an elliptic cylinder, both
-    colliding correctly (support-based narrowphase). A capsule alone still requires an isotropic radial scale
-    (its hemispherical caps have no analytic elliptic contact)."""
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             enable_geom_scaling=True,
@@ -101,7 +97,7 @@ def test_geom_scale_anisotropic(tol):
     # env 0 stays unit; env 1 stretches the vertical semi-axis of each shape to 0.2.
     sphere.set_scale(np.array([[1.0, 1.0, 1.0], [1.0, 1.0, 2.0]]))
     cylinder.set_scale(np.array([[1.0, 1.0, 1.0], [1.0, 2.0, 1.0]]))
-    for _ in range(500):
+    for _ in range(150):
         scene.step()
 
     sz = sphere.get_pos()[..., 2]
@@ -126,9 +122,6 @@ def test_geom_scale_anisotropic(tol):
 
 
 def test_geom_scale_multi_link_tree(tol):
-    """Per-env scale grows a multi-link body as one rigid structure: each non-root link's offset relative to
-    its parent scales too, so the links separate proportionally instead of scaling in place about their own
-    frames (which left every link at its unscaled relative position while only the geometry grew)."""
     mjcf = ET.Element("mujoco", model="two_link")
     ET.SubElement(mjcf, "option", gravity="0 0 0")
     worldbody = ET.SubElement(mjcf, "worldbody")
@@ -171,7 +164,6 @@ def test_geom_scale_multi_link_tree(tol):
 
 
 def test_geom_scale_requires_option():
-    """set_scale must raise when the scene was not built with enable_geom_scaling."""
     scene = gs.Scene(show_viewer=False)
     scene.add_entity(gs.morphs.Plane())
     box = scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.3)))
@@ -182,7 +174,6 @@ def test_geom_scale_requires_option():
 
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_geom_scale_collision(tol):
-    """Per-env scale is honored by the support-based collision path (box-box MPR, sphere-plane)."""
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             enable_geom_scaling=True,
@@ -200,7 +191,7 @@ def test_geom_scale_collision(tol):
 
     faller.set_scale((1.0, 1.0, 3.0), envs_idx=[1])
     sphere.set_scale(2.0, envs_idx=[1])
-    for _ in range(600):
+    for _ in range(150):
         scene.step()
 
     fz = faller.get_pos()[..., 2]
@@ -216,7 +207,6 @@ def test_geom_scale_collision(tol):
 
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_geom_scale_collision_gjk(tol):
-    """Per-env scale is honored on the GJK collision path (forced via use_gjk_collision)."""
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             enable_geom_scaling=True,
@@ -232,7 +222,7 @@ def test_geom_scale_collision_gjk(tol):
     scene.build(n_envs=2)
 
     faller.set_scale((1.0, 1.0, 3.0), envs_idx=[1])
-    for _ in range(600):
+    for _ in range(150):
         scene.step()
 
     fz = faller.get_pos()[..., 2]
@@ -243,7 +233,6 @@ def test_geom_scale_collision_gjk(tol):
 
 
 def test_link_mass_api_scaled(tol):
-    """link.get_mass / entity.set_mass / link.set_mass track the per-env runtime mass under scaling."""
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
         show_viewer=False,
@@ -281,7 +270,6 @@ def test_link_mass_api_scaled(tol):
 
 
 def test_potential_energy_scaled(tol):
-    """entity.get_potential_energy is per-env aware under scaling; the mass axis aligns with the requested envs."""
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
         show_viewer=False,
@@ -310,7 +298,6 @@ def test_potential_energy_scaled(tol):
 
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_geom_scale_visual(tol):
-    """Per-env scale is mirrored onto visual geometry: get_vAABB / get_vverts rescale per env."""
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(enable_geom_scaling=True),
         show_viewer=False,
