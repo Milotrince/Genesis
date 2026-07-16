@@ -1296,6 +1296,10 @@ def get_witness(_B, max_contacts_per_pair, is_active):
 @dataclasses.dataclass(eq=True, kw_only=False, frozen=True)
 class GJKState:
     support_mesh_prev_vertex_id: qd.Tensor
+    # Per-environment scale of the two geoms of the current pair ([i_b, i_o], i_o in {0, 1}), stashed by the
+    # narrowphase before a GJK/EPA run so the support driver can scale geometry without threading scale
+    # through the GJK stack. Only read when static config 'enable_geom_scaling' is set.
+    geom_scale: qd.Tensor
     simplex_vertex: MDVertex
     simplex_buffer: GJKSimplexBuffer
     simplex: GJKSimplex
@@ -1341,6 +1345,7 @@ def get_gjk_state(_B, static_rigid_sim_config, gjk_info, is_active, requires_gra
     return GJKState(
         # GJK simplex
         support_mesh_prev_vertex_id=V(dtype=gs.qd_int, shape=(_B, 2)),
+        geom_scale=V(dtype=gs.qd_vec3, shape=(_B, 2)),
         simplex_vertex=get_gjk_simplex_vertex(_B, is_active),
         simplex_buffer=get_gjk_simplex_buffer(_B, is_active),
         simplex=get_gjk_simplex(_B, is_active),
@@ -1388,6 +1393,7 @@ def get_gjk_state_contact_only(_B):
 
     return GJKState(
         support_mesh_prev_vertex_id=V(dtype=gs.qd_int, shape=(_B, 2)),
+        geom_scale=V(dtype=gs.qd_vec3, shape=(_B, 2)),
         simplex_vertex=get_gjk_simplex_vertex(_B, is_active=True),
         simplex_buffer=get_gjk_simplex_buffer(_B, is_active=True),
         simplex=get_gjk_simplex(_B, is_active=True),
@@ -2000,6 +2006,9 @@ class GeomsState:
     max_buffer_idx: qd.Tensor
     is_hibernated: qd.Tensor
     friction_ratio: qd.Tensor
+    # Per-environment geometry scale (diagonal, about the geom frame origin), default (1, 1, 1). Read at
+    # geometry-consumption sites only when static config 'enable_geom_scaling' is set (see set_geoms_scale).
+    scale: qd.Tensor
 
 
 def get_geoms_state(solver):
@@ -2016,6 +2025,7 @@ def get_geoms_state(solver):
         max_buffer_idx=V(dtype=gs.qd_int, shape=shape),
         is_hibernated=V(dtype=gs.qd_int, shape=shape),
         friction_ratio=V(dtype=gs.qd_float, shape=shape),
+        scale=V(dtype=gs.qd_vec3, shape=shape),
     )
 
 
@@ -2203,6 +2213,9 @@ def get_vgeoms_info(solver):
 class VGeomsState:
     pos: qd.Tensor
     quat: qd.Tensor
+    # Per-environment visual-geometry scale (diagonal, about the vgeom frame origin), default (1, 1, 1).
+    # Mirrors GeomsState.scale; read only when static config 'enable_geom_scaling' is set (see set_vgeoms_scale).
+    scale: qd.Tensor
 
 
 def get_vgeoms_state(solver):
@@ -2211,6 +2224,7 @@ def get_vgeoms_state(solver):
     return VGeomsState(
         pos=V(dtype=gs.qd_vec3, shape=shape),
         quat=V(dtype=gs.qd_vec4, shape=shape),
+        scale=V(dtype=gs.qd_vec3, shape=shape),
     )
 
 
@@ -2342,6 +2356,9 @@ class RigidSimStaticConfig(metaclass=AutoInitMeta):
     # Whether the cone-free assembled Hessian is persisted in nt_H's mirror slots (diagonal in nt_H_cone_free_diag);
     # see the nt_H declaration for the packed-storage mechanics and the rigid solver's resolution for the gating.
     enable_cone_free_hessian_reuse: bool = False
+    # Per-environment runtime geom scale (entity.set_scale). Gates the scale reads in the verts/AABB/
+    # collision kernels so scenes that don't opt in compile identical, scale-free kernels.
+    enable_geom_scaling: bool = False
     # Consecutive sub-tolerance steps a body's max DOF velocity must hold before it is ready to hibernate. Guards
     # against a body that is only momentarily slow (e.g. at the apex of a toss) sleeping prematurely.
     hibernation_min_steps: int = 10

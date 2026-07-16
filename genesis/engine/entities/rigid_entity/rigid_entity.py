@@ -2146,6 +2146,26 @@ class KinematicEntity(Entity):
             return f"{len(self.morphs)} morph variants"
         return f"{self.main_morph}"
 
+    def set_scale(self, scale, envs_idx=None):
+        """Set a per-environment geometry scale for this entity at runtime.
+
+        `scale` is a scalar (isotropic; `set_scale(s)` == `set_scale(s, s, s)`), a length-3 vector
+        `(sx, sy, sz)`, or a per-environment `(n_envs, 3)` array. Requires the scene built with
+        `RigidOptions(enable_geom_scaling=True)`. Scales the entity's collision geometry, AABBs and inertial
+        about each geom's frame origin; the joint configuration is preserved. A scalar scales any entity; a
+        per-axis (anisotropic) scale requires a single-link entity (sphere -> ellipsoid, capsule -> elliptic
+        capsule, cylinder -> elliptic cylinder, box and mesh stretch per axis) and raises for a jointed body.
+        Scaling raises while the scene holds a nonconvex collision mesh, whose distance-field contacts do not
+        rescale yet; build such colliders with `convexify=True` to enable scaling.
+        """
+        if not self._solver.is_built:
+            gs.raise_exception("set_scale can only be called after the scene is built.")
+        self._solver.set_entity_scale(self, scale, envs_idx)
+
+    def get_scale(self, envs_idx=None):
+        """Return this entity's per-environment geometry scale as `(n_envs, 3)` (or `(3,)` for a single env)."""
+        return qd_to_numpy(self._solver.geoms_state.scale, envs_idx, self._geom_start, transpose=True)
+
     @property
     def n_joints(self):
         """The number of `RigidJoint` in the entity."""
@@ -2277,6 +2297,9 @@ class KinematicEntity(Entity):
             init = torch.as_tensor(vgeom.init_vverts, dtype=gs.tc_float, device=gs.device)
             pos = vgeoms_pos[..., vgeom.idx, :].unsqueeze(-2)
             quat = vgeoms_quat[..., vgeom.idx, :].unsqueeze(-2)
+            vscale = vgeom._vscale(envs_idx)
+            if vscale is not None:
+                init = vscale * init
             parts.append(gu.transform_by_trans_quat(init, pos, quat))
         tensor = torch.cat(parts, dim=-2)
         return tensor[0] if self._solver.n_envs == 0 else tensor
@@ -3527,8 +3550,10 @@ class RigidEntity(KinematicEntity):
         if self.n_geoms == 0:
             gs.raise_exception("Entity has no collision geometries.")
 
-        # Already computed internally by the solver. Let's access it directly for efficiency.
-        if allow_fast_approx and isinstance(self.sim.coupler, LegacyCoupler):
+        # Already computed internally by the solver. Let's access it directly for efficiency. Not usable for
+        # heterogeneous entities: the solver aggregates the full contiguous geom range, which includes variant
+        # geoms inactive in a given env, over-sizing that env's AABB. Fall through to the active-masked branch.
+        if allow_fast_approx and isinstance(self.sim.coupler, LegacyCoupler) and not self._enable_heterogeneous:
             return self._solver.get_AABB(entities_idx=[self._idx_in_solver], envs_idx=envs_idx)[..., 0, :]
 
         # For heterogeneous entities, compute AABB per-environment respecting active_envs_idx.
@@ -4264,9 +4289,13 @@ class RigidEntity(KinematicEntity):
         """
         gravity = self._solver.get_gravity(envs_idx=envs_idx)  # (3,) or (n_envs, 3)
         links_pos = self.get_links_pos(envs_idx=envs_idx, ref="link_com")  # (..., n_links, 3)
-        # Link masses are static properties (not batched per environment),
-        # so always fetch without envs_idx to avoid indexing conflicts.
-        links_mass = self.get_links_inertial_mass()  # (n_links,)
+        # Per-env link masses (n_sel, n_links) when links info is batched; otherwise a static (n_links,) that
+        # broadcasts against g_dot_p. Either way the mass axis aligns with links_pos. envs_idx is only accepted
+        # by the getter when links info is batched.
+        if self._solver._options.batch_links_info:
+            links_mass = self.get_links_inertial_mass(envs_idx=envs_idx)
+        else:
+            links_mass = self.get_links_inertial_mass()
 
         # PE_i = m_i * g^T * p_i => PE = sum_i(m_i * (g . p_i))
         # g is (..., 3), links_pos is (..., n_links, 3) -> broadcast g to (..., 1, 3)
@@ -4515,41 +4544,42 @@ class RigidEntity(KinematicEntity):
     @gs.assert_built
     def set_mass(self, mass):
         """
-        Set the mass of the entity.
+        Set the total mass of the entity, distributed across its links in proportion to their current masses.
 
         Parameters
         ----------
         mass : float
-            The mass to set.
+            The target total mass in kg.
         """
-        ratio = float(mass) / self.get_mass()
-        for link in self.links:
-            link.set_mass(link.get_mass() * ratio)
+        # Reference the links' current masses in their storage-native shape (per-env only when links info is
+        # batched); each link's new absolute mass keeps the same share of the requested total per environment.
+        links_mass = self.get_links_inertial_mass()
+        new_links_mass = links_mass * (float(mass) / links_mass.sum(dim=-1, keepdim=True))
+        for i_l, link in enumerate(self.links):
+            link.set_mass(new_links_mass[..., i_l])
 
     @gs.assert_built
-    def get_mass(self):
+    def get_mass(self, envs_idx=None):
         """
         Get the total mass of the entity in kg.
 
-        For heterogeneous entities, returns an array of masses for each environment.
-        For non-heterogeneous entities, returns a scalar mass.
+        Follows the same shape convention as ``get_pos``: a scalar for a non-batched scene (``n_envs == 0``),
+        otherwise a tensor of shape ``(n_envs,)`` (or ``(len(envs_idx),)``). The value is per-environment when
+        the scene was built with ``batch_links_info=True`` (which per-env geom scaling and heterogeneous
+        entities enable automatically); otherwise the single build-time mass is broadcast across environments.
 
         Returns
         -------
-        mass : float | np.ndarray
-            The total mass of the entity in kg. For heterogeneous entities, returns
-            an array of shape (n_envs,) with per-environment masses.
+        mass : float | torch.Tensor
         """
-        if self._enable_heterogeneous:
-            links_idx = slice(self.link_start, self.link_end)
-            links_mass = qd_to_numpy(self._solver.links_info.inertial_mass, None, links_idx, transpose=True)
-            return links_mass.sum(axis=1)
-
-        # Original behavior: sum link masses to scalar
-        mass = 0.0
-        for link in self.links:
-            mass += link.get_mass()
-        return mass
+        if self._solver._options.batch_links_info:
+            total = self.get_links_inertial_mass(envs_idx=envs_idx).sum(dim=-1)
+            return float(total) if self._solver.n_envs == 0 else total
+        total = float(self.get_links_inertial_mass().sum(dim=-1))
+        if self._solver.n_envs == 0:
+            return total
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        return torch.full((len(envs_idx),), total, dtype=gs.tc_float, device=gs.device)
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

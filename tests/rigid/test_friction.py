@@ -302,7 +302,7 @@ def test_elliptic_cone_coulomb_isotropy(sparse_solve, use_contact_island, show_v
         ),
     )
     scene.build(n_envs=N_ENVS)
-    mass = box.get_mass()
+    mass = float(box.get_mass()[0])  # mass is uniform across envs
     normal_force = MU * mass * (-GRAVITY)
 
     yaw = 2.0 * torch.pi * torch.rand(N_ENVS, device=gs.device)
@@ -408,10 +408,9 @@ def test_elliptic_cone_push_isotropy(show_viewer):
     push_start = gu.transform_by_quat(torch.tensor(PUSH_START_LOCAL, device=gs.device).repeat(N_ENVS, 1), box_quat)
     push_end = gu.transform_by_quat(torch.tensor(PUSH_END_LOCAL, device=gs.device).repeat(N_ENVS, 1), box_quat)
     pusher.set_pos(push_start)
-    pusher.set_dofs_kp(
-        pusher.get_mass() * torch.tensor((2000.0, 2000.0, 2000.0, 500.0, 500.0, 500.0), device=gs.device)
-    )
-    pusher.set_dofs_kv(pusher.get_mass() * torch.tensor((200.0, 200.0, 200.0, 50.0, 50.0, 50.0), device=gs.device))
+    pusher_mass = pusher.get_mass()[0]  # mass is uniform across envs
+    pusher.set_dofs_kp(pusher_mass * torch.tensor((2000.0, 2000.0, 2000.0, 500.0, 500.0, 500.0), device=gs.device))
+    pusher.set_dofs_kv(pusher_mass * torch.tensor((200.0, 200.0, 200.0, 50.0, 50.0, 50.0), device=gs.device))
 
     # Let the box resolve its initial ground contact before the push starts, so the two transients do not couple.
     scene.step()

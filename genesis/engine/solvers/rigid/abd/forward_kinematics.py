@@ -783,11 +783,17 @@ def func_update_geoms_entity(
                 continue
         if func_check_index_range(i_g, entities_info.geom_start[i_e], entities_info.geom_end[i_e], BW):
             if force_update_fixed_geoms or not geoms_info.is_fixed[i_g]:
+                # A per-env geom scale grows the geom's shape about its own frame; the frame's offset within the
+                # link must scale by the same factor so the whole link (offset geoms included) scales uniformly
+                # about the link origin, rather than each geom swelling in place at its unscaled offset.
+                geom_offset = geoms_info.pos[i_g]
+                if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                    geom_offset = geoms_state.scale[i_g, i_b] * geom_offset
                 (
                     geoms_state.pos[i_g, i_b],
                     geoms_state.quat[i_g, i_b],
                 ) = gu.qd_transform_pos_quat_by_trans_quat(
-                    geoms_info.pos[i_g],
+                    geom_offset,
                     geoms_info.quat[i_g],
                     links_state.pos[geoms_info.link_idx[i_g], i_b],
                     links_state.quat[geoms_info.link_idx[i_g], i_b],
@@ -1122,7 +1128,9 @@ def kernel_update_verts_for_geoms(
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g_, i_b in qd.ndrange(n_geoms, _B):
         i_g = geoms_idx[i_g_]
-        func_update_verts_for_geom(i_g, i_b, geoms_state, geoms_info, verts_info, free_verts_state, fixed_verts_state)
+        func_update_verts_for_geom(
+            i_g, i_b, geoms_state, geoms_info, verts_info, free_verts_state, fixed_verts_state, static_rigid_sim_config
+        )
 
 
 @qd.func
@@ -1134,12 +1142,15 @@ def func_update_verts_for_geom(
     verts_info: array_class.VertsInfo,
     free_verts_state: array_class.VertsState,
     fixed_verts_state: array_class.VertsState,
+    static_rigid_sim_config: qd.template(),
 ):
     _B = geoms_state.verts_updated.shape[1]
 
     if not geoms_state.verts_updated[i_g, i_b]:
         i_v_start = geoms_info.vert_start[i_g]
         if verts_info.is_fixed[i_v_start]:
+            # Fixed-vert geoms live in a shared (no batch axis) buffer, so they cannot carry a per-env
+            # scale; set_scale rejects them, so init_pos is always at unit scale here.
             for i_v in range(i_v_start, geoms_info.vert_end[i_g]):
                 verts_state_idx = verts_info.verts_state_idx[i_v]
                 fixed_verts_state.pos[verts_state_idx] = gu.qd_transform_by_trans_quat(
@@ -1150,8 +1161,11 @@ def func_update_verts_for_geom(
         else:
             for i_v in range(i_v_start, geoms_info.vert_end[i_g]):
                 verts_state_idx = verts_info.verts_state_idx[i_v]
+                init_pos = verts_info.init_pos[i_v]
+                if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                    init_pos = geoms_state.scale[i_g, i_b] * init_pos
                 free_verts_state.pos[verts_state_idx, i_b] = gu.qd_transform_by_trans_quat(
-                    verts_info.init_pos[i_v], geoms_state.pos[i_g, i_b], geoms_state.quat[i_g, i_b]
+                    init_pos, geoms_state.pos[i_g, i_b], geoms_state.quat[i_g, i_b]
                 )
             geoms_state.verts_updated[i_g, i_b] = True
 
@@ -1169,7 +1183,9 @@ def func_update_all_verts(
 
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g, i_b in qd.ndrange(n_geoms, _B):
-        func_update_verts_for_geom(i_g, i_b, geoms_state, geoms_info, verts_info, free_verts_state, fixed_verts_state)
+        func_update_verts_for_geom(
+            i_g, i_b, geoms_state, geoms_info, verts_info, free_verts_state, fixed_verts_state, static_rigid_sim_config
+        )
 
 
 @qd.kernel(fastcache=True)
@@ -1203,7 +1219,10 @@ def kernel_update_geom_aabbs(
         lower = gu.qd_vec3(qd.math.inf)
         upper = gu.qd_vec3(-qd.math.inf)
         for i_corner in qd.static(range(8)):
-            corner_pos = gu.qd_transform_by_trans_quat(geoms_init_AABB[i_g, i_corner], g_pos, g_quat)
+            corner = geoms_init_AABB[i_g, i_corner]
+            if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                corner = geoms_state.scale[i_g, i_b] * corner
+            corner_pos = gu.qd_transform_by_trans_quat(corner, g_pos, g_quat)
             lower = qd.min(lower, corner_pos)
             upper = qd.max(upper, corner_pos)
 
@@ -1227,8 +1246,13 @@ def kernel_update_vgeoms(
     qd.loop_config(serialize=qd.static(static_rigid_sim_config.para_level < gs.PARA_LEVEL.PARTIAL))
     for i_g, i_b in qd.ndrange(n_vgeoms, _B):
         i_l = vgeoms_info.link_idx[i_g]
+        # Scale the visual geom's link-frame offset with its per-env scale so it tracks the scaled collision
+        # geometry (which scales its own offset in forward kinematics); keeps rendering aligned with physics.
+        vgeom_offset = vgeoms_info.pos[i_g]
+        if qd.static(static_rigid_sim_config.enable_geom_scaling):
+            vgeom_offset = vgeoms_state.scale[i_g, i_b] * vgeom_offset
         vgeoms_state.pos[i_g, i_b], vgeoms_state.quat[i_g, i_b] = gu.qd_transform_pos_quat_by_trans_quat(
-            vgeoms_info.pos[i_g], vgeoms_info.quat[i_g], links_state.pos[i_l, i_b], links_state.quat[i_l, i_b]
+            vgeom_offset, vgeoms_info.quat[i_g], links_state.pos[i_l, i_b], links_state.quat[i_l, i_b]
         )
 
 
@@ -1257,8 +1281,11 @@ def kernel_update_vverts_for_vgeoms(
         for i_vv in range(v_start, v_end):
             i_state = vverts_info.vverts_state_idx[i_vv]
             if i_state >= 0:
+                init_pos = vverts_info.init_pos[i_vv]
+                if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                    init_pos = vgeoms_state.scale[i_vg, i_b] * init_pos
                 vverts_state.pos[i_state, i_b] = gu.qd_transform_by_trans_quat(
-                    vverts_info.init_pos[i_vv], vgeoms_state.pos[i_vg, i_b], vgeoms_state.quat[i_vg, i_b]
+                    init_pos, vgeoms_state.pos[i_vg, i_b], vgeoms_state.quat[i_vg, i_b]
                 )
 
 

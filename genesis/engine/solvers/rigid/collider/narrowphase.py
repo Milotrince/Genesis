@@ -120,6 +120,13 @@ def func_add_polytope_vertex_contacts_sdf(
     margin = qd.min(qd.min(gb_cell[0], gb_cell[1]), gb_cell[2])
     synthetic_pen_max = 1e-4
 
+    # Per-env scale of geom A (the vertex provider). B is the SDF provider (baked at unit scale), so this path
+    # is correct for a scaled A against an unscaled B (plane/terrain/static); scaling the SDF provider is not
+    # supported. Identity when scale == 1.
+    scale_a = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+        scale_a = geoms_state.scale[i_ga, i_b]
+
     # Bounding-sphere-vs-SDF coarse reject at A's centre. Every point of A lies within rbound_a of
     # geoms_info.center[i_ga], so when B's SDF at A's centre exceeds rbound_a no point of A can reach B's surface and
     # the O(n_verts) scan is skipped. rbound_a is the tight sphere around A's AABB centred at geoms_info.center[i_ga]
@@ -129,10 +136,10 @@ def func_add_polytope_vertex_contacts_sdf(
     # distance and silently miss a contact. A directional/SAT bound that uses the SDF gradient at A's centre would be
     # tighter but is unsafe on nonconvex B: the centre gradient is a local linearisation, so an A vertex on the
     # opposite side can still reach a different feature of B that the centre points away from.
-    center_local = geoms_info.center[i_ga]
+    center_local = scale_a * geoms_info.center[i_ga]
     rbound_a_sq = gs.qd_float(0.0)
     for k in qd.static(range(8)):
-        delta = geoms_init_AABB[i_ga, k] - center_local
+        delta = scale_a * geoms_init_AABB[i_ga, k] - center_local
         d_sq = delta.dot(delta)
         if d_sq > rbound_a_sq:
             rbound_a_sq = d_sq
@@ -166,7 +173,7 @@ def func_add_polytope_vertex_contacts_sdf(
         # picking up rim verts whose grad is tilted relative to the surface and would inject torque; a 1:1:16 rod
         # recovers a radius near rbound_a/n_max so the buffer spreads along the long axis instead of collapsing onto
         # the deepest tip and letting the body pivot about a single contact patch.
-        ext = geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0]
+        ext = scale_a * (geoms_init_AABB[i_ga, 7] - geoms_init_AABB[i_ga, 0])
         ext_max = qd.max(qd.max(ext[0], ext[1]), ext[2])
         ext_sum_other = ext[0] + ext[1] + ext[2] - ext_max
         needle_extent = ext_max - gs.qd_float(2.0) * ext_sum_other
@@ -465,7 +472,7 @@ def func_add_polytope_vertex_contacts_sdf(
         for k in range(n_max):
             if top_iv[k] >= 0:
                 i_v = top_iv[k]
-                vertex_pos = gu.qd_transform_by_trans_quat(verts_info.init_pos[i_v], ga_pos, ga_quat)
+                vertex_pos = gu.qd_transform_by_trans_quat(scale_a * verts_info.init_pos[i_v], ga_pos, ga_quat)
                 pen_v = top_pen[k]
                 grad_v = sdf.sdf_func_grad_world_local(
                     geoms_info,
@@ -509,7 +516,10 @@ def func_add_polytope_vertex_contacts_sdf(
                     # but fix its sign from A's normal (the grad's sign inverts once the vertex tunnels past B's thin
                     # wall). When the grad is smoothed (coarse grid across the thin wall), use A's vertex normal
                     # directly rather than the vertical reference, which is what was leaving the side walls unsupported.
-                    a_vnormal = gu.qd_normalize(gu.qd_transform_by_quat(verts_info.init_normal[i_v], ga_quat), EPS)
+                    # A surface normal transforms by the inverse-transpose of the scale (1 / scale for a diagonal S).
+                    a_vnormal = gu.qd_normalize(
+                        gu.qd_transform_by_quat(verts_info.init_normal[i_v] / scale_a, ga_quat), EPS
+                    )
                     if grad_norm > 0.5:
                         normal_v = gu.qd_normalize(grad_v, EPS)
                         if normal_v.dot(a_vnormal) > 0.0:
@@ -1346,6 +1356,7 @@ def func_contact_mpr_terrain(
                 i_b,
                 ga_pos_terrain_frame,
                 ga_quat_terrain_frame,
+                geoms_state.scale[i_ga, i_b],
             )
             collider_state.xyz_max_min[3 * i_m + i_axis, i_b] = v1[i_axis]
 
@@ -1443,6 +1454,8 @@ def func_contact_mpr_terrain(
                                         ga_quat_tf,
                                         gb_pos_terrain_frame,
                                         gb_quat_terrain_frame,
+                                        geoms_state.scale[i_ga, i_b],
+                                        geoms_state.scale[i_gb, i_b],
                                     )
                                     if is_col:
                                         snap_fired = False
@@ -1708,6 +1721,32 @@ def func_recompute_perturbed_contact(
 
 
 @qd.func
+def func_pair_needs_support_path(
+    i_ga,
+    i_gb,
+    i_b,
+    geoms_state: array_class.GeomsState,
+    static_rigid_sim_config: qd.template(),
+):
+    # An analytic primitive-primitive contact reads unscaled geom dimensions, so a pair with a non-unit per-env
+    # scale must instead take the general support-based path (MPR/GJK), whose support functions bake the scale
+    # in. Statically False - zero overhead, analytic path unchanged - when per-env geom scaling is disabled.
+    needs_support = False
+    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+        scale_a = geoms_state.scale[i_ga, i_b]
+        scale_b = geoms_state.scale[i_gb, i_b]
+        needs_support = (
+            scale_a[0] != 1.0
+            or scale_a[1] != 1.0
+            or scale_a[2] != 1.0
+            or scale_b[0] != 1.0
+            or scale_b[1] != 1.0
+            or scale_b[2] != 1.0
+        )
+    return needs_support
+
+
+@qd.func
 def func_convex_convex_contact(
     i_ga,
     i_gb,
@@ -1822,7 +1861,12 @@ def func_convex_convex_contact(
                 )
 
             if (multi_contact and is_col_0) or (i_detection == 0):
-                if geoms_info.type[i_ga] == gs.GEOM_TYPE.CAPSULE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
+                use_analytic = not func_pair_needs_support_path(i_ga, i_gb, i_b, geoms_state, static_rigid_sim_config)
+                if (
+                    geoms_info.type[i_ga] == gs.GEOM_TYPE.CAPSULE
+                    and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE
+                    and use_analytic
+                ):
                     is_col, normal, contact_pos, penetration = capsule_contact.func_capsule_capsule_contact(
                         i_ga,
                         i_gb,
@@ -1833,7 +1877,11 @@ def func_convex_convex_contact(
                         geoms_info,
                         rigid_global_info,
                     )
-                elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
+                elif (
+                    geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE
+                    and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE
+                    and use_analytic
+                ):
                     is_col, normal, contact_pos, penetration = capsule_contact.func_sphere_capsule_contact(
                         i_ga,
                         i_gb,
@@ -1844,7 +1892,11 @@ def func_convex_convex_contact(
                         geoms_info,
                         rigid_global_info,
                     )
-                elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.BOX:
+                elif (
+                    geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE
+                    and geoms_info.type[i_gb] == gs.GEOM_TYPE.BOX
+                    and use_analytic
+                ):
                     is_col, normal, contact_pos, penetration = func_sphere_box_contact(
                         i_ga,
                         i_gb,
@@ -1872,6 +1924,7 @@ def func_convex_convex_contact(
                         i_b,
                         gb_pos_current,
                         gb_quat_current,
+                        geoms_state.scale[i_gb, i_b],
                     )
                     penetration = normal.dot(v1 - ga_pos_current)
                     contact_pos = v1 - 0.5 * penetration * normal
@@ -1917,6 +1970,8 @@ def func_convex_convex_contact(
                                     ga_quat_current,
                                     gb_pos_current,
                                     gb_quat_current,
+                                    geoms_state.scale[i_ga, i_b],
+                                    geoms_state.scale[i_gb, i_b],
                                 )
                                 is_mpr_updated = True
 
@@ -1946,6 +2001,11 @@ def func_convex_convex_contact(
                     # TODO: Add support of smooth refinement to differentiable contact.
                     if qd.static(collider_static_config.ccd_algorithm != CCD_ALGORITHM_CODE.MJ_MPR):
                         if prefer_gjk:
+                            # Stash the pair's per-env geom scales for the GJK support driver (i_ga/i_gb are
+                            # already in sorted order here; identity when unused).
+                            if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                                gjk_state.geom_scale[i_b, 0] = geoms_state.scale[i_ga, i_b]
+                                gjk_state.geom_scale[i_b, 1] = geoms_state.scale[i_gb, i_b]
                             if qd.static(static_rigid_sim_config.requires_grad):
                                 diff_gjk.func_gjk_contact(
                                     links_state,
@@ -2241,7 +2301,8 @@ def _func_multicontact_run_detection(
     used_gjk = False
     tolerance = collider_info.mc_tolerance[None] * func_compute_geom_pair_scale(i_ga, i_gb, geoms_info, geoms_init_AABB)
 
-    if geoms_info.type[i_ga] == gs.GEOM_TYPE.CAPSULE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
+    use_analytic = not func_pair_needs_support_path(i_ga, i_gb, i_b, geoms_state, static_rigid_sim_config)
+    if geoms_info.type[i_ga] == gs.GEOM_TYPE.CAPSULE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE and use_analytic:
         is_col, normal, contact_pos, penetration = capsule_contact.func_capsule_capsule_contact(
             i_ga,
             i_gb,
@@ -2252,7 +2313,9 @@ def _func_multicontact_run_detection(
             geoms_info,
             rigid_global_info,
         )
-    elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
+    elif (
+        geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE and use_analytic
+    ):
         is_col, normal, contact_pos, penetration = capsule_contact.func_sphere_capsule_contact(
             i_ga,
             i_gb,
@@ -2263,7 +2326,7 @@ def _func_multicontact_run_detection(
             geoms_info,
             rigid_global_info,
         )
-    elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.BOX:
+    elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.BOX and use_analytic:
         is_col, normal, contact_pos, penetration = func_sphere_box_contact(
             i_ga,
             i_gb,
@@ -2290,6 +2353,7 @@ def _func_multicontact_run_detection(
             i_b,
             gb_pos,
             gb_quat,
+            geoms_state.scale[i_gb, i_b],
         )
         penetration = normal.dot(v1 - ga_pos)
         contact_pos = v1 - 0.5 * penetration * normal
@@ -2327,11 +2391,18 @@ def _func_multicontact_run_detection(
                             ga_quat,
                             gb_pos,
                             gb_quat,
+                            geoms_state.scale[i_ga, i_b],
+                            geoms_state.scale[i_gb, i_b],
                         )
                         is_mpr_updated = True
 
         if qd.static(collider_static_config.ccd_algorithm != CCD_ALGORITHM_CODE.MJ_MPR):
             if use_gjk:
+                # Stash the pair's per-env geom scales on the multicontact GJK state slot (i_scratch) for the
+                # support driver; value from the true env i_b. Identity when unused.
+                if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                    gjk_state.geom_scale[i_scratch, 0] = geoms_state.scale[i_ga, i_b]
+                    gjk_state.geom_scale[i_scratch, 1] = geoms_state.scale[i_gb, i_b]
                 if qd.static(not static_rigid_sim_config.requires_grad):
                     gjk.func_gjk_contact(
                         geoms_state,
@@ -2910,7 +2981,12 @@ def _func_narrowphase_contact0(
 
             i_pair = collider_info.collision_pair_idx[(i_gb, i_ga) if i_ga > i_gb else (i_ga, i_gb)]
 
-            if geoms_info.type[i_ga] == gs.GEOM_TYPE.CAPSULE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
+            use_analytic = not func_pair_needs_support_path(i_ga, i_gb, i_b, geoms_state, static_rigid_sim_config)
+            if (
+                geoms_info.type[i_ga] == gs.GEOM_TYPE.CAPSULE
+                and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE
+                and use_analytic
+            ):
                 is_col, normal, contact_pos, penetration = capsule_contact.func_capsule_capsule_contact(
                     i_ga,
                     i_gb,
@@ -2921,7 +2997,11 @@ def _func_narrowphase_contact0(
                     geoms_info,
                     rigid_global_info,
                 )
-            elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE:
+            elif (
+                geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE
+                and geoms_info.type[i_gb] == gs.GEOM_TYPE.CAPSULE
+                and use_analytic
+            ):
                 is_col, normal, contact_pos, penetration = capsule_contact.func_sphere_capsule_contact(
                     i_ga,
                     i_gb,
@@ -2932,7 +3012,11 @@ def _func_narrowphase_contact0(
                     geoms_info,
                     rigid_global_info,
                 )
-            elif geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE and geoms_info.type[i_gb] == gs.GEOM_TYPE.BOX:
+            elif (
+                geoms_info.type[i_ga] == gs.GEOM_TYPE.SPHERE
+                and geoms_info.type[i_gb] == gs.GEOM_TYPE.BOX
+                and use_analytic
+            ):
                 is_col, normal, contact_pos, penetration = func_sphere_box_contact(
                     i_ga,
                     i_gb,
@@ -2959,6 +3043,7 @@ def _func_narrowphase_contact0(
                     i_b,
                     gb_pos,
                     gb_quat,
+                    geoms_state.scale[i_gb, i_b],
                 )
                 penetration = normal.dot(v1 - ga_pos)
                 contact_pos = v1 - 0.5 * penetration * normal
@@ -2968,6 +3053,11 @@ def _func_narrowphase_contact0(
                     collider_static_config.ccd_algorithm in (CCD_ALGORITHM_CODE.GJK, CCD_ALGORITHM_CODE.MJ_GJK)
                 ):
                     gjk.clear_cache(gjk_state, flat_idx)
+                    # Stash the pair's per-env geom scales on the contact0 GJK state slot (flat_idx) for the
+                    # support driver; value from the true env i_b. i_ga/i_gb are already swapped above.
+                    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                        gjk_state.geom_scale[flat_idx, 0] = geoms_state.scale[i_ga, i_b]
+                        gjk_state.geom_scale[flat_idx, 1] = geoms_state.scale[i_gb, i_b]
                     distance = gjk.func_gjk(
                         geoms_info,
                         verts_info,
@@ -3027,6 +3117,8 @@ def _func_narrowphase_contact0(
                                 ga_quat,
                                 gb_pos,
                                 gb_quat,
+                                geoms_state.scale[i_ga, i_b],
+                                geoms_state.scale[i_gb, i_b],
                             )
                             is_mpr_updated = True
 
@@ -3306,6 +3398,7 @@ def func_narrow_phase_convex_specializations(
                         collider_state,
                         collider_info,
                         rigid_global_info,
+                        static_rigid_sim_config,
                         collider_static_config,
                         errno,
                     )

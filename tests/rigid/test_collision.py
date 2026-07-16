@@ -486,7 +486,7 @@ def test_contact_forces(show_viewer):
     )
     scene.build(n_envs=5)
 
-    cube_weight = scene.rigid_solver._gravity[0] * cube.get_mass()
+    cube_weight = scene.rigid_solver._gravity[0] * float(cube.get_mass()[0])  # mass is uniform across envs
     motors_dof = np.arange(7)
     fingers_dof = np.arange(7, 9)
     qpos = np.array([-1.0124, 1.5559, 1.3662, -1.6878, -1.5799, 1.7757, 1.4602, 0.04, 0.04])

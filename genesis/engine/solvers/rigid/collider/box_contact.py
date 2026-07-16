@@ -138,7 +138,11 @@ def func_plane_box_contact(
     plane_dir = gu.qd_transform_by_quat(plane_dir, ga_quat)
     normal = -plane_dir.normalized()
 
-    v1, _, _ = support_field._func_support_box(geoms_info, normal, i_gb, gb_pos, gb_quat)
+    box_scale = qd.Vector([1.0, 1.0, 1.0], dt=gs.qd_float)
+    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+        box_scale = geoms_state.scale[i_gb, i_b]
+
+    v1, _, _ = support_field._func_support_box(geoms_info, normal, i_gb, gb_pos, gb_quat, box_scale)
     penetration = normal.dot(v1 - ga_pos)
 
     if penetration > 0.0:
@@ -168,7 +172,10 @@ def func_plane_box_contact(
                 # Plane-box pairs are sized with the convex cap (they are not in the large-contact mask), so the
                 # emission must stay within it to avoid overflowing a buffer allocated as a convex pair.
                 if n_con < qd.static(collider_static_config.n_contacts_per_convex_pair):
-                    pos_corner = gu.qd_transform_by_trans_quat(verts_info.init_pos[i_v], gb_pos, gb_quat)
+                    corner = verts_info.init_pos[i_v]
+                    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+                        corner = box_scale * corner
+                    pos_corner = gu.qd_transform_by_trans_quat(corner, gb_pos, gb_quat)
                     penetration = normal.dot(pos_corner - ga_pos)
                     if penetration > 0.0:
                         contact_pos = pos_corner - 0.5 * penetration * normal
@@ -201,6 +208,7 @@ def func_box_box_contact(
     collider_state: array_class.ColliderState,
     collider_info: array_class.ColliderInfo,
     rigid_global_info: array_class.RigidGlobalInfo,
+    static_rigid_sim_config: qd.template(),
     collider_static_config: qd.template(),
     errno: qd.Tensor,
 ):
@@ -236,6 +244,11 @@ def func_box_box_contact(
     size2 = (
         qd.Vector([geoms_info.data[i_gb][0], geoms_info.data[i_gb][1], geoms_info.data[i_gb][2]], dt=gs.qd_float) / 2
     )
+    # A box stays a box under a diagonal scale, so scaling its half-extents is exact: the whole algorithm is
+    # parametrized by size1/size2 and the box poses, and every downstream vertex/face derives from these.
+    if qd.static(static_rigid_sim_config.enable_geom_scaling):
+        size1 = geoms_state.scale[i_ga, i_b] * size1
+        size2 = geoms_state.scale[i_gb, i_b] * size2
 
     pos1, pos2 = ga_pos, gb_pos
     mat1, mat2 = gu.qd_quat_to_R(ga_quat, EPS), gu.qd_quat_to_R(gb_quat, EPS)

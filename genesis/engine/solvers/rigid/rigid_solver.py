@@ -16,6 +16,7 @@ from genesis.engine.states import QueriedStates, RigidSolverState
 from genesis.options.solvers import RigidOptions
 from genesis.utils.misc import (
     DeprecationError,
+    tensor_to_array,
     qd_to_torch,
     qd_to_numpy,
     qd_zero_grad,
@@ -132,6 +133,10 @@ from .abd.accessor import (
     kernel_wake_up_entities_by_qs,
     kernel_wake_up_entities_on_new_contact,
     kernel_set_geoms_friction_ratio,
+    kernel_set_geoms_scale,
+    kernel_set_vgeoms_scale,
+    kernel_set_links_inertial,
+    kernel_set_links_local_pos,
     kernel_set_qpos,
     kernel_set_global_sol_params,
     kernel_set_sol_params,
@@ -250,6 +255,7 @@ class RigidSolver(KinematicSolver):
         self._box_box_detection = options.box_box_detection
         self._requires_grad = self._sim.options.requires_grad
         self._enable_heterogeneous = False  # Set to True when any entity has heterogeneous morphs
+        self._enable_geom_scaling = options.enable_geom_scaling  # per-env runtime geom scale (set_scale)
 
         # Contact islands are off by default (opt in explicitly). The gate further below still disables them under
         # requires_grad (the differentiable adjoint reads the dense global Hessian) and for single-island scenes
@@ -560,6 +566,7 @@ class RigidSolver(KinematicSolver):
             ),
             enable_cooperative_constraint_kernels=enable_cooperative_constraint_kernels,
             constraint_layout_batch_first=constraint_layout_batch_first,
+            enable_geom_scaling=self._enable_geom_scaling,
         )
 
         # Prefer the monolith solver on CPU (always faster there, perf dispatch is a waste of effort)
@@ -2536,6 +2543,169 @@ class RigidSolver(KinematicSolver):
             self._is_forward_pos_updated = False
             self._is_forward_vel_updated = False
 
+    @mutates(StateChange.GEOMETRY)
+    def set_entity_scale(self, entity, scale, envs_idx=None):
+        """Set a per-environment geometry scale (diagonal, about each geom's frame origin) for an entity.
+
+        Scales the entity's collision geometry, AABBs and per-link inertial for the selected environments.
+        'scale' is a scalar (isotropic; set_scale(s) == set_scale(s, s, s)), a length-3 vector, or a
+        per-environment (n_envs, 3) array. Requires the scene built with 'enable_geom_scaling=True'. A scalar
+        scales any entity; a per-axis (anisotropic) scale requires a single-link entity (sphere -> ellipsoid,
+        capsule -> elliptic capsule, cylinder -> elliptic cylinder, box and mesh stretch per axis) and raises
+        for a jointed body. The joint configuration is preserved.
+
+        Each link's inertial is re-derived from the build-time geometry baseline scaled by det(S), so a prior
+        set_mass on the same link is overridden (scale is a geometry operation). Collision honors the scale on
+        every convex path: support-based (MPR/GJK), plane, the box-box specialization, and the analytic
+        primitive contacts (sphere-box, sphere/capsule-capsule), which defer to the support path when either
+        geom is scaled. Nonconvex (distance-field) contacts do not rescale yet, so scaling raises while the
+        scene holds any nonconvex collision mesh; build such colliders with convexify=True to enable scaling.
+        """
+        if not self._enable_geom_scaling:
+            gs.raise_exception("set_scale requires the scene built with RigidOptions(enable_geom_scaling=True).")
+        if self._requires_grad:
+            gs.raise_exception("set_scale is not supported under requires_grad.")
+
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        n_sel = len(envs_idx)
+
+        # Resolve scale to a per-selected-environment (n_sel, 3) array. A scalar is an isotropic scale, a
+        # length-3 vector one anisotropic scale for every selected env, a 2D array must match them row-for-row.
+        # tensor_to_array accepts a torch tensor (incl. GPU), numpy array, list or scalar uniformly.
+        scale = tensor_to_array(scale, dtype=gs.np_float)
+        if scale.ndim == 0:
+            scale = np.broadcast_to(scale.reshape(1, 1), (n_sel, 3))
+        elif scale.shape == (3,):
+            scale = np.broadcast_to(scale.reshape(1, 3), (n_sel, 3))
+        elif scale.shape != (n_sel, 3):
+            gs.raise_exception(
+                f"scale must be a scalar, a length-3 vector, or a ({n_sel}, 3) array for the selected "
+                f"environments; got shape {tuple(scale.shape)}."
+            )
+        scale = np.ascontiguousarray(np.broadcast_to(scale, (n_sel, 3)))
+        if (scale <= 0.0).any():
+            gs.raise_exception("scale must be strictly positive.")
+
+        # A scaled geom colliding with a nonconvex mesh would query that mesh's unit-scale distance field at
+        # scaled positions, which does not rescale yet. Reject scaling while the scene holds any nonconvex
+        # collision mesh (anywhere, since the scaled geom may be its contact partner) rather than emit wrong
+        # contacts. Only genuine nonconvex meshes are non-convex; primitives and convex meshes pass.
+        for scene_geom in self.geoms:
+            if (
+                scene_geom.type == gs.GEOM_TYPE.MESH
+                and not scene_geom.is_convex
+                and (scene_geom.contype or scene_geom.conaffinity)
+            ):
+                gs.raise_exception(
+                    "set_scale is not supported while the scene contains a nonconvex collision mesh (its "
+                    "distance-field contacts do not rescale yet); build such colliders with convexify=True."
+                )
+
+        # Anisotropic scale stays exact only when the scaling axes stay aligned with each geom frame and each
+        # link offset, i.e. a single-link entity. A jointed body uses an isotropic scale (set_scale(s) ==
+        # set_scale(s, s, s)), which commutes with the link rotations.
+        is_isotropic = bool(np.allclose(scale[:, 0], scale[:, 1]) and np.allclose(scale[:, 1], scale[:, 2]))
+        if not is_isotropic and entity.n_links > 1:
+            gs.raise_exception(
+                "Anisotropic scale is only supported for a single-link entity; scale a jointed body isotropically "
+                "with set_scale(s), which keeps its link offsets consistent."
+            )
+
+        geoms = entity.geoms
+        for geom in geoms:
+            if geom.is_fixed and not entity._batch_fixed_verts:
+                gs.raise_exception(
+                    "set_scale is not supported for fixed-vertex geoms; build the entity with batch_fixed_verts=True."
+                )
+
+        envs_idx_np = tensor_to_array(envs_idx)
+
+        # 1. Write the per-env geom scale field (the same scale for every geom of the entity).
+        geoms_idx = np.array([geom.idx for geom in geoms], dtype=gs.np_int)
+        geoms_scale = np.ascontiguousarray(np.broadcast_to(scale[:, None, :], (n_sel, len(geoms_idx), 3)))
+        kernel_set_geoms_scale(geoms_scale, geoms_idx, envs_idx_np, self.geoms_state, self._static_rigid_sim_config)
+
+        # 1b. Mirror the scale onto the entity's visual geometry so vverts/vAABB and rendering rescale too.
+        vgeoms = entity.vgeoms
+        if vgeoms:
+            vgeoms_idx = np.array([vgeom.idx for vgeom in vgeoms], dtype=gs.np_int)
+            vgeoms_scale = np.ascontiguousarray(np.broadcast_to(scale[:, None, :], (n_sel, len(vgeoms_idx), 3)))
+            kernel_set_vgeoms_scale(
+                vgeoms_scale, vgeoms_idx, envs_idx_np, self.vgeoms_state, self._static_rigid_sim_config
+            )
+
+        # 2. Recompute per-link inertial from the baseline (unit-scale) inertial via the covariance transform:
+        #    mass *= det(S), com -> S com, and (with the link-frame tensor I0) C0 = 0.5 tr(I0) Id - I0,
+        #    C = det(S) S C0 S, I = tr(C) Id - C. The scaled tensor is stored in the link frame (quat = identity).
+        links = entity.links
+        links_idx = np.array([link.idx for link in links], dtype=gs.np_int)
+        n_l = len(links_idx)
+        eye = np.eye(3, dtype=gs.np_float)
+
+        # Per-link baseline (unit-scale) inertial in the link frame: the mass, the COM, and the covariance
+        # matrix c0 = 0.5 tr(I0) Id - I0 (from the link-frame tensor I0). Only this per-link read needs a loop.
+        mass0 = np.array([link._inertial_mass for link in links], dtype=gs.np_float)  # (n_l,)
+        com0 = np.array([link._inertial_pos for link in links], dtype=gs.np_float)  # (n_l, 3)
+        c0 = np.empty((n_l, 3, 3), dtype=gs.np_float)
+        for i_l_, link in enumerate(links):
+            rot = gu.quat_to_R(np.array(link._inertial_quat, dtype=gs.np_float))
+            i_link = rot @ np.array(link._inertial_i, dtype=gs.np_float) @ rot.T
+            c0[i_l_] = 0.5 * np.trace(i_link) * eye - i_link
+
+        # Vectorized covariance transform over the environment axis: mass *= det(S), com -> S com, and (for a
+        # diagonal scale S) C = det(S) S C0 S so C[b,l,i,j] = det[b] scale[b,i] scale[b,j] C0[l,i,j], then
+        # I = tr(C) Id - C. The scaled tensor is stored in the link frame (quat = identity).
+        det = scale[:, 0] * scale[:, 1] * scale[:, 2]  # (n_sel,)
+        scale_outer = scale[:, :, None] * scale[:, None, :]  # (n_sel, 3, 3)
+        cov = det[:, None, None, None] * scale_outer[:, None] * c0[None]  # (n_sel, n_l, 3, 3)
+        out_mass = mass0[None] * det[:, None]  # (n_sel, n_l)
+        out_pos = scale[:, None, :] * com0[None]  # (n_sel, n_l, 3)
+        out_i = np.trace(cov, axis1=2, axis2=3)[..., None, None] * eye - cov  # (n_sel, n_l, 3, 3)
+        out_quat = np.zeros((n_sel, n_l, 4), dtype=gs.np_float)
+        out_quat[..., 0] = 1.0
+        kernel_set_links_inertial(
+            out_mass, out_pos, out_quat, out_i, links_idx, envs_idx_np, self.links_info, self._static_rigid_sim_config
+        )
+
+        # 2b. Scale the kinematic tree itself: each non-root link's offset relative to its parent scales with the
+        #     entity, so a multi-link body grows/shrinks as one rigid structure instead of each link scaling in
+        #     place about its own frame (which left the links overlapping at their unscaled relative positions).
+        #     The root link keeps its pose (the entity stays put and its children scale outward from the base).
+        #     Offsets are expressed in the parent frame, so componentwise scaling is exact for an isotropic scale;
+        #     an anisotropic scale of a rotated joint is approximate. Intra-link geom offsets are scaled by the same
+        #     per-env factor in forward kinematics (func_update_geoms_entity / kernel_update_vgeoms), so an offset
+        #     geom tracks its link. Joint anchors (joints_info.pos) are env-shared and not per-env scaled here; a
+        #     body whose links are framed at their joint (the common case, e.g. every URDF) is unaffected - a large
+        #     intra-link joint anchor is the one remaining known limitation.
+        out_link_pos = np.empty((n_sel, n_l, 3), dtype=gs.np_float)
+        for i_l_, link in enumerate(links):
+            base_pos = np.array(link.pos, dtype=gs.np_float)
+            if link.parent_idx < 0:
+                out_link_pos[:, i_l_] = base_pos  # root: unscaled, keeps the entity in place
+            else:
+                out_link_pos[:, i_l_] = scale * base_pos
+        kernel_set_links_local_pos(out_link_pos, links_idx, envs_idx_np, self.links_info, self._static_rigid_sim_config)
+
+        # 3. Refresh neutral-rest invweight/meaninertia (preserving the current joint configuration; the restoring
+        #    set_qpos also drops stale contact caches and re-runs forward kinematics so geom poses/AABBs rescale).
+        if self._n_dofs > 0:
+            restore_envs = envs_idx if self.n_envs > 0 else None
+            qpos_saved = qd_to_torch(self.qpos, envs_idx, transpose=True, copy=True)
+            if self.n_envs == 0:
+                qpos_saved = qpos_saved[0]
+            self._init_invweight_and_meaninertia(envs_idx=restore_envs)
+            self.set_qpos(qpos_saved, envs_idx=restore_envs)
+        else:
+            if self.collider is not None:
+                self.collider.reset(envs_idx)
+            if self.constraint_solver is not None:
+                self.constraint_solver.reset(envs_idx)
+
+        # A fixed geom's world pose is only recomputed on a forced update, so a fixed base link's offset geoms
+        # would otherwise keep their unscaled position while their shape scaled. Force one update here so their
+        # scaled link-frame offset (applied in forward kinematics) takes effect.
+        self._func_update_geoms(envs_idx, force_update_fixed_geoms=True)
+
     def set_global_sol_params(self, sol_params):
         """
         Set constraint solver parameters.
@@ -3018,13 +3188,13 @@ class RigidSolver(KinematicSolver):
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_links_inertial_mass(self, links_idx=None, envs_idx=None):
-        if self._options.batch_links_info and envs_idx is not None:
+        if not self._options.batch_links_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched links info.")
         tensor = qd_to_torch(self.links_info.inertial_mass, envs_idx, links_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor
 
     def get_links_invweight(self, links_idx=None, envs_idx=None):
-        if self._options.batch_links_info and envs_idx is not None:
+        if not self._options.batch_links_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched links info.")
         tensor = qd_to_torch(self.links_info.invweight, envs_idx, links_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor

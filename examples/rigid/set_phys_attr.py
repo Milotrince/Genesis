@@ -141,8 +141,7 @@ def main():
     )
     print("=== set mass ===\n", franka.get_dofs_damping())
     original_mass = franka.get_mass()
-    new_mass = original_mass * 2
-    franka.set_mass(new_mass)
+    franka.set_mass(2.0 * float(original_mass[0]))  # mass is uniform across envs
 
     print("=== invweight ===\n", franka.get_dofs_invweight())
     links_inertial_mass = np.array(
