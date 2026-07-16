@@ -91,34 +91,33 @@ def test_geom_scale_anisotropic(tol):
             euler=(90.0, 0.0, 0.0),
         ),
     )
+    # Capsule axis along world X, so a non-uniform radial scale is anisotropic and takes the elliptic-capsule
+    # support (no analytic path). scale[0] stretches the vertical (world Z) radial semi-axis.
+    mjcf = ET.Element("mujoco", model="capsule")
+    body = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", pos="2 0 0.5")
+    ET.SubElement(body, "joint", type="free")
+    ET.SubElement(body, "geom", type="capsule", fromto="-0.15 0 0 0.15 0 0", size="0.1", mass="0.1")
+    capsule = scene.add_entity(morph=gs.morphs.MJCF(file=ET.tostring(mjcf, encoding="unicode")))
     scene.build(n_envs=2)
     scene.step()
 
     # env 0 stays unit; env 1 stretches the vertical semi-axis of each shape to 0.2.
     sphere.set_scale(np.array([[1.0, 1.0, 1.0], [1.0, 1.0, 2.0]]))
     cylinder.set_scale(np.array([[1.0, 1.0, 1.0], [1.0, 2.0, 1.0]]))
+    capsule.set_scale(np.array([[1.0, 1.0, 1.0], [2.0, 1.0, 1.0]]))
     for _ in range(150):
         scene.step()
 
     sz = sphere.get_pos()[..., 2]
     cz = cylinder.get_pos()[..., 2]
-    assert torch.isfinite(sz).all() and torch.isfinite(cz).all()
+    pz = capsule.get_pos()[..., 2]
+    assert torch.isfinite(sz).all() and torch.isfinite(cz).all() and torch.isfinite(pz).all()
     assert_allclose(sz[0], 0.1, tol=5e-3)  # unit sphere rests on its radius
     assert_allclose(sz[1], 0.2, tol=5e-3)  # z-stretched ellipsoid rests on its 2x semi-axis
     assert_allclose(cz[0], 0.1, tol=5e-3)  # unit cylinder on its side rests on its radius
     assert_allclose(cz[1], 0.2, tol=5e-3)  # elliptic cylinder rests on its 2x vertical semi-axis
-
-    # A capsule's caps have no analytic elliptic contact, so a non-uniform radial scale must still raise.
-    mjcf = ET.Element("mujoco", model="capsule")
-    body = ET.SubElement(ET.SubElement(mjcf, "worldbody"), "body", name="c", pos="0 0 0.5")
-    ET.SubElement(body, "joint", name="f", type="free")
-    ET.SubElement(body, "geom", type="capsule", fromto="0 0 0 0 0 0.2", size="0.05", mass="0.1")
-    cap_scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
-    capsule = cap_scene.add_entity(morph=gs.morphs.MJCF(file=ET.tostring(mjcf, encoding="unicode")))
-    cap_scene.build(n_envs=2)
-    with pytest.raises(gs.GenesisException):
-        capsule.set_scale((2.0, 1.0, 1.0))
-    capsule.set_scale((2.0, 2.0, 3.0))  # isotropic radial is fine
+    assert_allclose(pz[0], 0.1, tol=5e-3)  # unit capsule on its side rests on its radius
+    assert_allclose(pz[1], 0.2, tol=5e-3)  # elliptic capsule rests on its 2x vertical radial semi-axis
 
 
 def test_geom_scale_multi_link_tree(tol):
@@ -170,6 +169,33 @@ def test_geom_scale_requires_option():
     scene.build(n_envs=2)
     with pytest.raises(gs.GenesisException):
         box.set_scale((2.0, 2.0, 2.0))
+
+
+def test_geom_scale_guards():
+    # Anisotropic scale is rejected for a jointed (multi-link) body; an isotropic scale is accepted.
+    mjcf = ET.Element("mujoco", model="two_link")
+    worldbody = ET.SubElement(mjcf, "worldbody")
+    link1 = ET.SubElement(worldbody, "body", name="l1", pos="0 0 1.0")
+    ET.SubElement(link1, "joint", name="j1", type="hinge", axis="0 1 0")
+    ET.SubElement(link1, "geom", type="capsule", fromto="0 0 0 0.4 0 0", size="0.03", mass="0.2")
+    link2 = ET.SubElement(link1, "body", name="l2", pos="0.4 0 0")
+    ET.SubElement(link2, "joint", name="j2", type="hinge", axis="0 1 0")
+    ET.SubElement(link2, "geom", type="capsule", fromto="0 0 0 0.4 0 0", size="0.03", mass="0.2")
+    scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
+    arm = scene.add_entity(morph=gs.morphs.MJCF(file=ET.tostring(mjcf, encoding="unicode")))
+    scene.build(n_envs=2)
+    with pytest.raises(gs.GenesisException):
+        arm.set_scale((2.0, 1.0, 1.0))
+    arm.set_scale(2.0)
+
+    # A nonconvex collision mesh in the scene blocks scaling (its distance-field contacts do not rescale yet),
+    # even for a convex entity that might collide with it.
+    nonconvex_scene = gs.Scene(rigid_options=gs.options.RigidOptions(enable_geom_scaling=True), show_viewer=False)
+    box = nonconvex_scene.add_entity(gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5)))
+    nonconvex_scene.add_entity(gs.morphs.Mesh(file="meshes/duck.obj", scale=0.1, pos=(1.0, 0.0, 0.5), convexify=False))
+    nonconvex_scene.build(n_envs=2)
+    with pytest.raises(gs.GenesisException):
+        box.set_scale(2.0)
 
 
 @pytest.mark.parametrize("backend", [gs.gpu])

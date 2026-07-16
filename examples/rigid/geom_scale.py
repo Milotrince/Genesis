@@ -88,36 +88,42 @@ def main():
 
     rng = np.random.default_rng(args.seed)
 
-    def apply_randomize_size():
-        """Give every object a fresh per-environment anisotropic (x, y, z) scale."""
+    def randomize_size():
         for obj in objects:
-            obj.set_scale(rng.uniform(0.5, 1.6, size=(n_envs, 3)).astype(np.float32))
+            obj.set_scale(rng.uniform(0.5, 1.6, size=(n_envs, 3)))
         gs.logger.info("Randomized per-environment object sizes.")
 
     # Keybind callbacks fire on the viewer thread, which must not launch GPU kernels concurrently with the main
-    # loop's scene.step(); the callback only raises a request flag that the loop drains between steps.
-    requested = {"size": False}
-    is_running = [True]
+    # loop's scene.step(); the callback only flips a flag that the loop drains between steps.
+    is_running = True
+    is_resize_requested = False
+
+    def request_resize():
+        nonlocal is_resize_requested
+        is_resize_requested = True
+
+    def stop():
+        nonlocal is_running
+        is_running = False
 
     scene.viewer.register_keybinds(
-        Keybind("randomize_size", Key.R, KeyAction.PRESS, callback=lambda: requested.__setitem__("size", True)),
-        Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=lambda: is_running.__setitem__(0, False)),
+        Keybind("randomize_size", Key.R, KeyAction.PRESS, callback=request_resize),
+        Keybind("quit", Key.ESCAPE, KeyAction.RELEASE, callback=stop),
         overwrite=True,
     )
 
-    # Start with a varied scene interactively; skip the resize under pytest so the example test just builds and
-    # steps quickly.
+    # Start with a varied scene interactively; skip the resize under pytest so the example test just builds and steps.
     if "PYTEST_VERSION" not in os.environ:
-        apply_randomize_size()
+        randomize_size()
 
     print("\nGeometry-scale controls:")
     print("R   - randomize each environment's object sizes")
     print("ESC - quit\n")
 
-    while is_running[0] and scene.viewer.is_alive():
-        if requested["size"]:
-            requested["size"] = False
-            apply_randomize_size()
+    while is_running and scene.viewer.is_alive():
+        if is_resize_requested:
+            is_resize_requested = False
+            randomize_size()
         scene.step()
         if "PYTEST_VERSION" in os.environ:
             break

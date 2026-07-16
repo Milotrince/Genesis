@@ -2149,13 +2149,14 @@ class KinematicEntity(Entity):
     def set_scale(self, scale, envs_idx=None):
         """Set a per-environment geometry scale for this entity at runtime.
 
-        `scale` is a scalar (isotropic), a length-3 vector `(sx, sy, sz)`, or a per-environment
-        `(n_envs, 3)` array. Requires the scene built with `RigidOptions(enable_geom_scaling=True)`. Scales
-        the entity's collision geometry, AABBs and inertial about each geom's frame origin; the joint
-        configuration is preserved. Anisotropic scale is supported for sphere (-> ellipsoid), cylinder
-        (-> elliptic cylinder), box and mesh; only a capsule requires an isotropic radial scale (sx == sy).
-        Collision responds to the scale for primitives and convex meshes; a nonconvex (decomposed) mesh whose
-        contacts come from a precomputed distance field is the one shape whose collision does not rescale.
+        `scale` is a scalar (isotropic; `set_scale(s)` == `set_scale(s, s, s)`), a length-3 vector
+        `(sx, sy, sz)`, or a per-environment `(n_envs, 3)` array. Requires the scene built with
+        `RigidOptions(enable_geom_scaling=True)`. Scales the entity's collision geometry, AABBs and inertial
+        about each geom's frame origin; the joint configuration is preserved. A scalar scales any entity; a
+        per-axis (anisotropic) scale requires a single-link entity (sphere -> ellipsoid, capsule -> elliptic
+        capsule, cylinder -> elliptic cylinder, box and mesh stretch per axis) and raises for a jointed body.
+        Scaling raises while the scene holds a nonconvex collision mesh, whose distance-field contacts do not
+        rescale yet; build such colliders with `convexify=True` to enable scaling.
         """
         if not self._solver.is_built:
             gs.raise_exception("set_scale can only be called after the scene is built.")

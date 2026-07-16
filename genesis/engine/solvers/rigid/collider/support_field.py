@@ -188,6 +188,17 @@ def _func_support_mesh(support_field_info: array_class.SupportFieldInfo, d_mesh,
 
 
 @qd.func
+def _func_ellipsoid_support_offset(a, b, c, d_local: qd.types.vector(3)):
+    """
+    Support point of an axis-aligned ellipsoid with semi-axes (a, b, c), relative to its center, for the
+    local-frame direction d_local: diag(a*a, b*b, c*c) d_local / ||diag(a, b, c) d_local||. Shared by the
+    sphere (anisotropic scale), ellipsoid and capsule-cap supports.
+    """
+    norm = qd.sqrt((a * d_local[0]) ** 2 + (b * d_local[1]) ** 2 + (c * d_local[2]) ** 2)
+    return qd.Vector([a * a * d_local[0] / norm, b * b * d_local[1] / norm, c * c * d_local[2] / norm], dt=gs.qd_float)
+
+
+@qd.func
 def _func_support_sphere(
     geoms_info: array_class.GeomsInfo,
     d,
@@ -212,13 +223,9 @@ def _func_support_sphere(
             v_ = gu.qd_inv_transform_by_quat(d, quat) * radius
         else:
             # A non-uniformly scaled sphere is an ellipsoid with semi-axes radius * scale.
-            a = sphere_radius * scale[0]
-            b = sphere_radius * scale[1]
-            c = sphere_radius * scale[2]
             d_local = gu.qd_inv_transform_by_quat(d, quat)
-            denom = qd.sqrt((a * d_local[0]) ** 2 + (b * d_local[1]) ** 2 + (c * d_local[2]) ** 2)
-            v_ = qd.Vector(
-                [a * a * d_local[0] / denom, b * b * d_local[1] / denom, c * c * d_local[2] / denom], dt=gs.qd_float
+            v_ = _func_ellipsoid_support_offset(
+                sphere_radius * scale[0], sphere_radius * scale[1], sphere_radius * scale[2], d_local
             )
             v = sphere_center + gu.qd_transform_by_quat(v_, quat)
 
@@ -237,17 +244,8 @@ def _func_support_ellipsoid(
     a = geoms_info.data[i_g][0] * scale[0]
     b = geoms_info.data[i_g][1] * scale[1]
     c = geoms_info.data[i_g][2] * scale[2]
-
-    # Transform direction to ellipsoid local frame
     d_local = gu.qd_inv_transform_by_quat(d, quat)
-
-    # Support point in local frame: diag(a², b², c²) · d_local / ‖diag(a, b, c) · d_local‖
-    sx = a * a * d_local[0]
-    sy = b * b * d_local[1]
-    sz = c * c * d_local[2]
-    norm = qd.sqrt(a * a * d_local[0] ** 2 + b * b * d_local[1] ** 2 + c * c * d_local[2] ** 2)
-    s_local = qd.Vector([sx / norm, sy / norm, sz / norm], dt=gs.qd_float)
-
+    s_local = _func_ellipsoid_support_offset(a, b, c, d_local)
     return pos + gu.qd_transform_by_quat(s_local, quat)
 
 
@@ -264,14 +262,17 @@ def _func_support_capsule(
     """
     Support function for capsule geometry.
 
-    Thread-safety note: Fully migrated to use explicit pos/quat parameters.
-    The i_g parameter is only used for read-only metadata access (radius, halflength)
-    from geoms_info, which is thread-safe. Does not access geoms_state. 'scale' applies a per-env geom
-    scale (radial 'scale[0]'==scale[1]' is enforced at set_scale; the axis is local Z, scaled by scale[2]).
+    A capsule is a segment along local Z (half-length 0.5 * data[1]) Minkowski-summed with a ball of the
+    capsule radius (data[0]). A per-env scale scales the segment axially by scale[2] and turns the ball into
+    an ellipsoid with semi-axes radius * scale, so the support is the (scaled) segment endpoint plus the cap
+    ellipsoid support. Reduces to the circular capsule when scale == 1, and supports anisotropic radial scale.
+
+    Thread-safety note: reads only read-only metadata (radius, half-length) from geoms_info; does not access
+    geoms_state.
     """
     res = gs.qd_vec3(0, 0, 0)
     capsule_center = pos
-    capsule_radius = geoms_info.data[i_g][0] * scale[0]
+    radius = geoms_info.data[i_g][0]
     capsule_halflength = 0.5 * geoms_info.data[i_g][1] * scale[2]
 
     if shrink:
@@ -282,7 +283,9 @@ def _func_support_capsule(
         capsule_axis = gu.qd_transform_by_quat(qd.Vector([0.0, 0.0, 1.0], dt=gs.qd_float), quat)
         capsule_endpoint_side = -1.0 if d.dot(capsule_axis) < 0.0 else 1.0
         capsule_endpoint = capsule_center + capsule_halflength * capsule_endpoint_side * capsule_axis
-        res = capsule_endpoint + d * capsule_radius
+        d_local = gu.qd_inv_transform_by_quat(d, quat)
+        cap_local = _func_ellipsoid_support_offset(radius * scale[0], radius * scale[1], radius * scale[2], d_local)
+        res = capsule_endpoint + gu.qd_transform_by_quat(cap_local, quat)
     return res
 
 

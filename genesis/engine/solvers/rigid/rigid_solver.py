@@ -2548,18 +2548,18 @@ class RigidSolver(KinematicSolver):
         """Set a per-environment geometry scale (diagonal, about each geom's frame origin) for an entity.
 
         Scales the entity's collision geometry, AABBs and per-link inertial for the selected environments.
-        'scale' is a scalar (isotropic), a length-3 vector, or a per-environment (n_envs, 3) array. Requires
-        the scene built with 'enable_geom_scaling=True'. Anisotropic scale gives a sphere -> ellipsoid, a
-        cylinder -> elliptic cylinder, and stretches boxes and meshes; a capsule requires an isotropic radial
-        scale (sx == sy). The joint configuration is preserved.
+        'scale' is a scalar (isotropic; set_scale(s) == set_scale(s, s, s)), a length-3 vector, or a
+        per-environment (n_envs, 3) array. Requires the scene built with 'enable_geom_scaling=True'. A scalar
+        scales any entity; a per-axis (anisotropic) scale requires a single-link entity (sphere -> ellipsoid,
+        capsule -> elliptic capsule, cylinder -> elliptic cylinder, box and mesh stretch per axis) and raises
+        for a jointed body. The joint configuration is preserved.
 
         Each link's inertial is re-derived from the build-time geometry baseline scaled by det(S), so a prior
         set_mass on the same link is overridden (scale is a geometry operation). Collision honors the scale on
         every convex path: support-based (MPR/GJK), plane, the box-box specialization, and the analytic
         primitive contacts (sphere-box, sphere/capsule-capsule), which defer to the support path when either
-        geom is scaled. The one unsupported case is scaling a geom that provides the signed-distance field for
-        nonconvex (decomposed-mesh) collision: a scaled geom against an unscaled distance-field geom is exact,
-        but scaling the distance-field geom itself is not (its field is baked at unit scale).
+        geom is scaled. Nonconvex (distance-field) contacts do not rescale yet, so scaling raises while the
+        scene holds any nonconvex collision mesh; build such colliders with convexify=True to enable scaling.
         """
         if not self._enable_geom_scaling:
             gs.raise_exception("set_scale requires the scene built with RigidOptions(enable_geom_scaling=True).")
@@ -2569,27 +2569,53 @@ class RigidSolver(KinematicSolver):
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         n_sel = len(envs_idx)
 
-        # Resolve scale to a per-selected-environment (n_sel, 3) array.
-        scale = np.asarray(scale, dtype=gs.np_float)
+        # Resolve scale to a per-selected-environment (n_sel, 3) array. A scalar is an isotropic scale, a
+        # length-3 vector one anisotropic scale for every selected env, a 2D array must match them row-for-row.
+        # tensor_to_array accepts a torch tensor (incl. GPU), numpy array, list or scalar uniformly.
+        scale = tensor_to_array(scale, dtype=gs.np_float)
         if scale.ndim == 0:
             scale = np.broadcast_to(scale.reshape(1, 1), (n_sel, 3))
         elif scale.shape == (3,):
             scale = np.broadcast_to(scale.reshape(1, 3), (n_sel, 3))
+        elif scale.shape != (n_sel, 3):
+            gs.raise_exception(
+                f"scale must be a scalar, a length-3 vector, or a ({n_sel}, 3) array for the selected "
+                f"environments; got shape {tuple(scale.shape)}."
+            )
         scale = np.ascontiguousarray(np.broadcast_to(scale, (n_sel, 3)))
         if (scale <= 0.0).any():
             gs.raise_exception("scale must be strictly positive.")
+
+        # A scaled geom colliding with a nonconvex mesh would query that mesh's unit-scale distance field at
+        # scaled positions, which does not rescale yet. Reject scaling while the scene holds any nonconvex
+        # collision mesh (anywhere, since the scaled geom may be its contact partner) rather than emit wrong
+        # contacts. Only genuine nonconvex meshes are non-convex; primitives and convex meshes pass.
+        for scene_geom in self.geoms:
+            if (
+                scene_geom.type == gs.GEOM_TYPE.MESH
+                and not scene_geom.is_convex
+                and (scene_geom.contype or scene_geom.conaffinity)
+            ):
+                gs.raise_exception(
+                    "set_scale is not supported while the scene contains a nonconvex collision mesh (its "
+                    "distance-field contacts do not rescale yet); build such colliders with convexify=True."
+                )
+
+        # Anisotropic scale stays exact only when the scaling axes stay aligned with each geom frame and each
+        # link offset, i.e. a single-link entity. A jointed body uses an isotropic scale (set_scale(s) ==
+        # set_scale(s, s, s)), which commutes with the link rotations.
+        is_isotropic = bool(np.allclose(scale[:, 0], scale[:, 1]) and np.allclose(scale[:, 1], scale[:, 2]))
+        if not is_isotropic and entity.n_links > 1:
+            gs.raise_exception(
+                "Anisotropic scale is only supported for a single-link entity; scale a jointed body isotropically "
+                "with set_scale(s), which keeps its link offsets consistent."
+            )
 
         geoms = entity.geoms
         for geom in geoms:
             if geom.is_fixed and not entity._batch_fixed_verts:
                 gs.raise_exception(
                     "set_scale is not supported for fixed-vertex geoms; build the entity with batch_fixed_verts=True."
-                )
-            if geom.type == gs.GEOM_TYPE.CAPSULE and not np.allclose(scale[:, 0], scale[:, 1]):
-                gs.raise_exception(
-                    "Capsule requires an isotropic radial scale (sx == sy): its hemispherical caps have no "
-                    "analytic elliptic contact (capsule-capsule is analytic, not support-based). Sphere, "
-                    "cylinder and box support anisotropic scale."
                 )
 
         envs_idx_np = tensor_to_array(envs_idx)
