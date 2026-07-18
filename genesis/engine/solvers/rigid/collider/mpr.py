@@ -149,6 +149,7 @@ def support_driver(
     direction,
     pos: qd.types.vector(3),
     quat: qd.types.vector(4),
+    scale,
     collider_state: array_class.ColliderState,
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
@@ -157,22 +158,22 @@ def support_driver(
     v = qd.Vector.zero(gs.qd_float, 3)
     geom_type = dyn_info.geoms.type[i_g]
     if geom_type == gs.GEOM_TYPE.SPHERE:
-        v, v_, vid = support_field._func_support_sphere(i_g, direction, pos, quat, shrink=False, dyn_info=dyn_info)
+        v, v_, vid = support_field._func_support_sphere(i_g, direction, pos, quat, False, scale, dyn_info)
     elif geom_type == gs.GEOM_TYPE.ELLIPSOID:
-        v = support_field._func_support_ellipsoid(i_g, direction, pos, quat, dyn_info)
+        v = support_field._func_support_ellipsoid(i_g, direction, pos, quat, scale, dyn_info)
     elif geom_type == gs.GEOM_TYPE.CAPSULE:
-        v = support_field._func_support_capsule(i_g, direction, pos, quat, shrink=False, dyn_info=dyn_info)
+        v = support_field._func_support_capsule(i_g, direction, pos, quat, False, scale, dyn_info)
     elif geom_type == gs.GEOM_TYPE.CYLINDER:
-        v = support_field._func_support_cylinder(i_g, direction, pos, quat, shrink=False, dyn_info=dyn_info)
+        v = support_field._func_support_cylinder(i_g, direction, pos, quat, False, scale, dyn_info)
     elif geom_type == gs.GEOM_TYPE.BOX:
-        v, v_, vid = support_field._func_support_box(i_g, direction, pos, quat, dyn_info)
+        v, v_, vid = support_field._func_support_box(i_g, direction, pos, quat, scale, dyn_info)
     elif geom_type == gs.GEOM_TYPE.TERRAIN:
         if qd.static(collider_static_config.has_terrain):
             # Terrain support doesn't depend on geometry pos/quat - uses collider_state.prism
             # Terrain is global and not perturbed, so we use the global state directly
             v, _ = support_field._func_support_prism(i_b, direction, collider_state)
     else:
-        v, v_, vid = support_field._func_support_world(i_g, direction, pos, quat, collider_info)
+        v, v_, vid = support_field._func_support_world(i_g, direction, pos, quat, scale, collider_info)
 
     return v
 
@@ -187,16 +188,18 @@ def compute_support(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
+    scale_a,
+    scale_b,
     collider_state: array_class.ColliderState,
     dyn_info: array_class.DynInfo,
     collider_info: array_class.ColliderInfo,
     collider_static_config: qd.template(),
 ):
     v1 = support_driver(
-        i_ga, i_b, direction, pos_a, quat_a, collider_state, dyn_info, collider_info, collider_static_config
+        i_ga, i_b, direction, pos_a, quat_a, scale_a, collider_state, dyn_info, collider_info, collider_static_config
     )
     v2 = support_driver(
-        i_gb, i_b, -direction, pos_b, quat_b, collider_state, dyn_info, collider_info, collider_static_config
+        i_gb, i_b, -direction, pos_b, quat_b, scale_b, collider_state, dyn_info, collider_info, collider_static_config
     )
 
     v = v1 - v2
@@ -232,6 +235,8 @@ def mpr_refine_portal(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
+    scale_a,
+    scale_b,
     collider_state: array_class.ColliderState,
     mpr_state: array_class.MPRState,
     dyn_info: array_class.DynInfo,
@@ -255,6 +260,8 @@ def mpr_refine_portal(
             quat_a,
             pos_b,
             quat_b,
+            scale_a,
+            scale_b,
             collider_state,
             dyn_info,
             collider_info,
@@ -346,6 +353,8 @@ def mpr_find_penetration(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
+    scale_a,
+    scale_b,
     collider_state: array_class.ColliderState,
     mpr_state: array_class.MPRState,
     dyn_info: array_class.DynInfo,
@@ -379,6 +388,8 @@ def mpr_find_penetration(
             quat_a,
             pos_b,
             quat_b,
+            scale_a,
+            scale_b,
             collider_state,
             dyn_info,
             collider_info,
@@ -484,6 +495,8 @@ def mpr_discover_portal(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
+    scale_a,
+    scale_b,
     collider_state: array_class.ColliderState,
     mpr_state: array_class.MPRState,
     dyn_info: array_class.DynInfo,
@@ -513,6 +526,8 @@ def mpr_discover_portal(
                 quat_a,
                 pos_b,
                 quat_b,
+                scale_a,
+                scale_b,
                 collider_state,
                 dyn_info,
                 collider_info,
@@ -535,6 +550,8 @@ def mpr_discover_portal(
         quat_a,
         pos_b,
         quat_b,
+        scale_a,
+        scale_b,
         collider_state,
         dyn_info,
         collider_info,
@@ -581,6 +598,8 @@ def mpr_discover_portal(
                 quat_a,
                 pos_b,
                 quat_b,
+                scale_a,
+                scale_b,
                 collider_state,
                 dyn_info,
                 collider_info,
@@ -619,6 +638,8 @@ def mpr_discover_portal(
                         quat_a,
                         pos_b,
                         quat_b,
+                        scale_a,
+                        scale_b,
                         collider_state,
                         dyn_info,
                         collider_info,
@@ -762,6 +783,8 @@ def func_mpr_contact_from_centers(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
+    scale_a,
+    scale_b,
     collider_state: array_class.ColliderState,
     mpr_state: array_class.MPRState,
     dyn_info: array_class.DynInfo,
@@ -779,6 +802,8 @@ def func_mpr_contact_from_centers(
         quat_a,
         pos_b,
         quat_b,
+        scale_a,
+        scale_b,
         collider_state,
         mpr_state,
         dyn_info,
@@ -808,6 +833,8 @@ def func_mpr_contact_from_centers(
             quat_a,
             pos_b,
             quat_b,
+            scale_a,
+            scale_b,
             collider_state,
             mpr_state,
             dyn_info,
@@ -823,6 +850,8 @@ def func_mpr_contact_from_centers(
                 quat_a,
                 pos_b,
                 quat_b,
+                scale_a,
+                scale_b,
                 collider_state,
                 mpr_state,
                 dyn_info,
@@ -843,6 +872,8 @@ def func_mpr_contact(
     quat_a: qd.types.vector(4),
     pos_b: qd.types.vector(3),
     quat_b: qd.types.vector(4),
+    scale_a,
+    scale_b,
     geoms_init_AABB: array_class.GeomsInitAABB,
     collider_state: array_class.ColliderState,
     mpr_state: array_class.MPRState,
@@ -876,6 +907,8 @@ def func_mpr_contact(
         quat_a,
         pos_b,
         quat_b,
+        scale_a,
+        scale_b,
         collider_state,
         mpr_state,
         dyn_info,

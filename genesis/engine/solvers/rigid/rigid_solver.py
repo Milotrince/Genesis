@@ -16,6 +16,7 @@ from genesis.engine.states import QueriedStates, RigidSolverState
 from genesis.options.solvers import RigidOptions
 from genesis.utils.misc import (
     DeprecationError,
+    tensor_to_array,
     qd_to_torch,
     qd_to_numpy,
     qd_zero_grad,
@@ -133,6 +134,10 @@ from .abd.accessor import (
     kernel_wake_up_entities_by_qs,
     kernel_wake_up_entities_on_new_contact,
     kernel_set_geoms_friction_ratio,
+    kernel_set_geoms_scale,
+    kernel_set_vgeoms_scale,
+    kernel_set_links_inertial,
+    kernel_set_links_local_pos,
     kernel_set_qpos,
     kernel_set_global_sol_params,
     kernel_set_sol_params,
@@ -452,6 +457,13 @@ class RigidSolver(KinematicSolver):
         if self._enable_heterogeneous and self._use_hibernation:
             self._options.batch_dofs_info = True
 
+        # Per-env geom scale rescales each link's inertial per environment, which requires per-env link info.
+        if self._options.enable_geom_scaling and not self._options.batch_links_info:
+            gs.raise_exception(
+                "RigidOptions(enable_geom_scaling=True) requires batch_links_info=True: per-env geom scale rescales "
+                "each link's inertial per environment, which needs per-env link info. Please set batch_links_info=True."
+            )
+
         # sparse_solve=None resolves automatically: the skyline-envelope solver pays off on CPU only when the scene
         # has block structure, whereas a single dense-coupled tree gains nothing and pays the per-step envelope tax. An
         # explicit value overrides this. On GPU the envelope factorization is dropped (the dense tiled path is faster
@@ -538,6 +550,7 @@ class RigidSolver(KinematicSolver):
             batch_links_info=self._options.batch_links_info,
             batch_dofs_info=self._options.batch_dofs_info,
             batch_joints_info=self._options.batch_joints_info,
+            enable_geom_scaling=self._options.enable_geom_scaling,
             enable_mujoco_compatibility=self._enable_mujoco_compatibility,
             enable_elliptic_friction=self._options.friction_cone == gs.friction_cone.elliptic,
             enable_torsional_friction=self._options.enable_torsional_friction,
@@ -2173,6 +2186,129 @@ class RigidSolver(KinematicSolver):
             friction_ratio = friction_ratio[None]
         kernel_set_geoms_friction_ratio(geoms_idx, envs_idx, friction_ratio, self.dyn_state, self.rigid_config)
 
+    def set_geoms_scale(self, scale, geoms_idx=None, envs_idx=None):
+        scale, geoms_idx, envs_idx = self._sanitize_io_variables(
+            scale, geoms_idx, self.n_geoms, "geoms_idx", envs_idx, skip_allocation=True
+        )
+        if self.n_envs == 0:
+            scale = scale[None]
+        kernel_set_geoms_scale(geoms_idx, envs_idx, scale, self.dyn_state, self.rigid_config)
+
+    @mutates(StateChange.GEOMETRY)
+    def set_entity_scale(self, entity, scale, envs_idx=None):
+        """Set a per-environment uniform geometry scale for an entity at runtime.
+
+        Scales the entity's collision geometry, AABBs, visual geometry and per-link inertial for the selected
+        environments, preserving the joint configuration; the entity keeps its base pose and its links grow/shrink
+        outward as one rigid structure. 'scale' is a scalar shared by every selected environment or a per-environment
+        array of length n_envs. Requires the scene built with 'enable_geom_scaling=True'.
+
+        Each link's inertial is re-derived from the build-time (unit-scale) baseline scaled uniformly: mass by s^3,
+        center of mass by s, inertia tensor by s^5. Re-deriving from the baseline (rather than the current value)
+        makes repeated calls set an absolute size and overrides any prior set_mass on the same link.
+        """
+        if not self._options.enable_geom_scaling:
+            gs.raise_exception("set_scale requires the scene built with RigidOptions(enable_geom_scaling=True).")
+        if self._requires_grad:
+            gs.raise_exception("set_scale is not supported under requires_grad.")
+
+        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
+        n_sel = len(envs_idx)
+
+        # Resolve scale to a per-selected-environment (n_sel,) array of uniform factors. A scalar is shared by every
+        # selected environment; an array must match them one-for-one.
+        scale = tensor_to_array(scale, dtype=gs.np_float)
+        if scale.ndim == 0:
+            scale = np.broadcast_to(scale.reshape(1), (n_sel,))
+        elif scale.shape != (n_sel,):
+            gs.raise_exception(
+                f"scale must be a scalar or a length-{n_sel} array for the selected environments; got shape "
+                f"{tuple(scale.shape)}. Per-axis (anisotropic) scale is not supported yet."
+            )
+        scale = np.ascontiguousarray(scale)
+        if (scale <= 0.0).any():
+            gs.raise_exception("scale must be strictly positive.")
+
+        # A scaled geom colliding with a nonconvex mesh would query that mesh's distance field at scaled positions,
+        # which the collision path does not rescale yet. Reject scaling while the scene holds any nonconvex collision
+        # mesh (anywhere, since the scaled geom may be its contact partner); build such colliders with convexify=True.
+        for scene_geom in self.geoms:
+            if (
+                scene_geom.type == gs.GEOM_TYPE.MESH
+                and not scene_geom.is_convex
+                and (scene_geom.contype or scene_geom.conaffinity)
+            ):
+                gs.raise_exception(
+                    "set_scale is not supported while the scene contains a nonconvex collision mesh; build such "
+                    "colliders with convexify=True."
+                )
+
+        envs_idx_np = tensor_to_array(envs_idx)
+
+        # 1. Write the per-env geom scale field (the same factor for every geom of the entity).
+        geoms_idx = np.array([geom.idx for geom in entity.geoms], dtype=gs.np_int)
+        geoms_scale = np.ascontiguousarray(np.broadcast_to(scale[:, None], (n_sel, len(geoms_idx))))
+        kernel_set_geoms_scale(geoms_idx, envs_idx_np, geoms_scale, self.dyn_state, self.rigid_config)
+
+        # 1b. Mirror the scale onto the entity's visual geometry so rendering tracks the scaled collision shape.
+        vgeoms = entity.vgeoms
+        if vgeoms:
+            vgeoms_idx = np.array([vgeom.idx for vgeom in vgeoms], dtype=gs.np_int)
+            vgeoms_scale = np.ascontiguousarray(np.broadcast_to(scale[:, None], (n_sel, len(vgeoms_idx))))
+            kernel_set_vgeoms_scale(vgeoms_idx, envs_idx_np, vgeoms_scale, self.dyn_state, self.rigid_config)
+
+        # 2. Re-derive each link's inertial from its unit-scale baseline. A uniform scale s is a similarity transform,
+        #    so mass *= s^3, com -> s com, and the inertia tensor -> s^5 I in the same (link) frame, with the
+        #    principal-axis orientation preserved.
+        links = entity.links
+        links_idx = np.array([link.idx for link in links], dtype=gs.np_int)
+        mass0 = np.array([link._inertial_mass for link in links], dtype=gs.np_float)  # (n_l,)
+        com0 = np.array([link._inertial_pos for link in links], dtype=gs.np_float)  # (n_l, 3)
+        inertia0 = np.array([link._inertial_i for link in links], dtype=gs.np_float)  # (n_l, 3, 3)
+        quat0 = np.array([link._inertial_quat for link in links], dtype=gs.np_float)  # (n_l, 4)
+        s3 = scale**3
+        s5 = scale**5
+        out_mass = mass0[None] * s3[:, None]  # (n_sel, n_l)
+        out_pos = com0[None] * scale[:, None, None]  # (n_sel, n_l, 3)
+        out_i = inertia0[None] * s5[:, None, None, None]  # (n_sel, n_l, 3, 3)
+        out_quat = np.ascontiguousarray(np.broadcast_to(quat0[None], (n_sel, len(links_idx), 4)))
+        kernel_set_links_inertial(
+            links_idx, envs_idx_np, out_mass, out_pos, out_quat, out_i, self.dyn_info, self.rigid_config
+        )
+
+        # 3. Scale the kinematic tree: each non-root link's offset relative to its parent scales with the entity so a
+        #    multi-link body grows as one structure. The root keeps its offset, so the entity stays put and its
+        #    children scale outward from the base. Intra-link geom offsets scale per-env in forward kinematics.
+        out_link_pos = np.empty((n_sel, len(links_idx), 3), dtype=gs.np_float)
+        for i_l_, link in enumerate(links):
+            base_pos = np.array(link.pos, dtype=gs.np_float)
+            if link.parent_idx == -1:
+                out_link_pos[:, i_l_] = base_pos
+            else:
+                out_link_pos[:, i_l_] = scale[:, None] * base_pos
+        kernel_set_links_local_pos(links_idx, envs_idx_np, out_link_pos, self.dyn_info, self.rigid_config)
+
+        # 4. Refresh the neutral-rest invweight/meaninertia from the rescaled inertials, then restore the joint
+        #    configuration. The restoring set_qpos also drops stale contact caches and re-runs forward kinematics so
+        #    geom poses and AABBs pick up the new scale.
+        if self._n_dofs > 0:
+            restore_envs = envs_idx if self.n_envs > 0 else None
+            qpos_saved = qd_to_torch(self.qpos, envs_idx, transpose=True, copy=True)
+            if self.n_envs == 0:
+                qpos_saved = qpos_saved[0]
+            self._init_invweight_and_meaninertia(envs_idx=restore_envs)
+            self.set_qpos(qpos_saved, envs_idx=restore_envs)
+        else:
+            if self.collider is not None:
+                self.collider.reset(envs_idx)
+            if self.constraint_solver is not None:
+                self.constraint_solver.reset(envs_idx)
+
+        # A fixed geom's world pose is only recomputed on a forced update, so a fixed base link's offset geoms would
+        # otherwise keep their unscaled position while their shape scaled. Force one update so their scaled link-frame
+        # offset takes effect.
+        self._func_update_geoms(envs_idx, force_update_fixed_geoms=True)
+
     @mutates(StateChange.GEOMETRY, links=MutatedLinks.ARTICULATED)
     def set_qpos(self, qpos, qs_idx=None, envs_idx=None, *, skip_forward=False):
         if self.collider is not None:
@@ -2688,13 +2824,13 @@ class RigidSolver(KinematicSolver):
         return tensor[0] if self.n_envs == 0 else tensor
 
     def get_links_inertial_mass(self, links_idx=None, envs_idx=None):
-        if self._options.batch_links_info and envs_idx is not None:
+        if not self._options.batch_links_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched links info.")
         tensor = qd_to_torch(self.dyn_info.links.inertial_mass, envs_idx, links_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor
 
     def get_links_invweight(self, links_idx=None, envs_idx=None):
-        if self._options.batch_links_info and envs_idx is not None:
+        if not self._options.batch_links_info and envs_idx is not None:
             gs.raise_exception("`envs_idx` cannot be specified for non-batched links info.")
         tensor = qd_to_torch(self.dyn_info.links.invweight, envs_idx, links_idx, transpose=True, copy=True)
         return tensor[0] if self.n_envs == 0 and self._options.batch_links_info else tensor
