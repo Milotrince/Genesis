@@ -2098,6 +2098,16 @@ class KinematicEntity(Entity):
         """
         if not self._enable_heterogeneous:
             gs.raise_exception("`set_entity_variant` requires a heterogeneous entity built with a list of morphs.")
+        if self._scene.requires_grad:
+            gs.raise_exception(
+                "`set_entity_variant` is not supported in a differentiable simulation (`requires_grad=True`): the "
+                "variant change is not checkpointed, so backward replay would use the wrong dynamics."
+            )
+        if self._scene.visualizer.batch_renderer is not None:
+            gs.raise_exception(
+                "`set_entity_variant` is not supported with the batch renderer, whose per-variant visibility is "
+                "fixed at build time. Use the interactive viewer or a rasterizer camera for runtime switching."
+            )
         n_variants = len(self._morph_heterogeneous) + 1
         variant_idx = np.atleast_1d(np.asarray(variant, dtype=gs.np_int))
         if ((variant_idx < 0) | (variant_idx >= n_variants)).any():

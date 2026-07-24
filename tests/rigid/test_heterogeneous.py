@@ -298,6 +298,63 @@ def test_runtime_variant_rebind(n_envs, show_viewer, tol):
         het_box.set_entity_variant(2)
 
 
+@pytest.mark.required
+def test_variant_switch_rejected_when_differentiable(show_viewer):
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+        sim_options=gs.options.SimOptions(requires_grad=True),
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    het = scene.add_entity(
+        morph=[
+            gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3)),
+            gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3)),
+        ],
+    )
+    scene.build(n_envs=2)
+    # The variant change is not checkpointed, so it must be rejected rather than silently corrupt backward replay.
+    with pytest.raises(gs.GenesisException):
+        het.set_entity_variant(1)
+
+
+@pytest.mark.required
+def test_variant_switch_creates_nodes_for_inactive_variants(show_viewer):
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, 2.0, 1.5),
+            camera_lookat=(0.0, 0.0, 0.2),
+        ),
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    het = scene.add_entity(
+        morph=[
+            gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3)),
+            gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3)),
+        ],
+    )
+    camera = scene.add_camera(
+        res=(64, 64),
+        pos=(2.0, 2.0, 1.5),
+        lookat=(0.0, 0.0, 0.2),
+    )
+    # A single env shows only one variant at build; the other starts inactive in every rendered env.
+    scene.build(n_envs=1)
+
+    rigid_nodes = scene.visualizer.context.rigid_nodes
+    # Every declared variant gets a render node even when inactive at build, so switching to it makes it visible.
+    assert all(vgeom.uid in rigid_nodes for vgeom in het.vgeoms)
+
+    inactive_variant = int(het.get_entity_variant()[0]) ^ 1
+    het.set_entity_variant(inactive_variant)
+    camera.render()
+    assert (het.get_entity_variant() == inactive_variant).all()
+
+
 # 30s
 @pytest.mark.slow  # ~250s
 @pytest.mark.parametrize("backend", [gs.gpu])  # Grasping physics requires GPU

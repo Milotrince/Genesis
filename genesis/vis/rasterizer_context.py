@@ -422,7 +422,10 @@ class RasterizerContext:
                 for geom in geoms:
                     # For heterogeneous simulation, filter envs based on geom's assigned environments
                     geom_envs_idx = self._get_geom_active_envs_idx(geom, self.rendered_envs_idx)
-                    if len(geom_envs_idx) == 0:
+                    # A heterogeneous variant inactive in every rendered env at build still gets a node (masked to no
+                    # env, via the branch below) so a later set_entity_variant can reveal it. A non-heterogeneous
+                    # geom with no rendered env is genuinely absent and skipped.
+                    if len(geom_envs_idx) == 0 and (geom.active_envs_idx is None or len(self.rendered_envs_idx) == 0):
                         continue
 
                     if "sdf" in entity.surface.vis_mode:
