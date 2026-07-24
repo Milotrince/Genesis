@@ -1,11 +1,10 @@
-import xml.etree.ElementTree as ET
-
 import numpy as np
 import pytest
 import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.assets.procedural import build_articulated_chain
 from genesis.utils.misc import tensor_to_array
 
 from ..utils import (
@@ -175,18 +174,6 @@ def test_aabb(tol):
 def test_runtime_variant_rebind(n_envs, show_viewer, tol):
     BIG, SMALL = 0.10, 0.04
 
-    # Two-link arm; the lower capsule radius sets the variant, so switching rebinds every link (same tree).
-    def two_link_arm(lower_radius):
-        mjcf = ET.Element("mujoco", model="arm")
-        worldbody = ET.SubElement(mjcf, "worldbody")
-        upper = ET.SubElement(worldbody, "body", name="upper", pos="1.0 0.0 0.6")
-        ET.SubElement(upper, "joint", name="j1", type="hinge", axis="0 1 0")
-        ET.SubElement(upper, "geom", type="capsule", fromto="0 0 0 0 0 -0.2", size="0.03")
-        lower = ET.SubElement(upper, "body", name="lower", pos="0.0 0.0 -0.2")
-        ET.SubElement(lower, "joint", name="j2", type="hinge", axis="0 1 0")
-        ET.SubElement(lower, "geom", type="capsule", fromto="0 0 0 0 0 -0.2", size=str(lower_radius))
-        return ET.tostring(mjcf, encoding="unicode")
-
     scene = gs.Scene(
         show_viewer=show_viewer,
         viewer_options=gs.options.ViewerOptions(
@@ -205,8 +192,14 @@ def test_runtime_variant_rebind(n_envs, show_viewer, tol):
     )
     het_arm = scene.add_entity(
         morph=[
-            gs.morphs.MJCF(file=two_link_arm(0.03)),
-            gs.morphs.MJCF(file=two_link_arm(0.06)),
+            gs.morphs.MJCF(
+                file=build_articulated_chain(n_links=2, link_radius=0.03, link_length=0.2),
+                pos=(1.0, 0.0, 0.6),
+            ),
+            gs.morphs.MJCF(
+                file=build_articulated_chain(n_links=2, link_radius=0.06, link_length=0.2),
+                pos=(1.0, 0.0, 0.6),
+            ),
         ],
     )
     box = scene.add_entity(

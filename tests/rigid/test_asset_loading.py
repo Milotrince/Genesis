@@ -8,6 +8,7 @@ import torch
 
 import genesis as gs
 import genesis.utils.geom as gu
+from genesis.assets.procedural import build_articulated_chain
 from genesis.ext import urdfpy
 from genesis.utils import urdf as uu
 from genesis.utils.misc import get_assets_dir, qd_to_numpy, tensor_to_array
@@ -44,6 +45,33 @@ def test_depth_first_link_ordering(xml_path, model_name, show_viewer):
             subtree.append(link)
             stack.extend(children[link])
         assert sorted(subtree) == list(range(i, i + len(subtree))), f"subtree at link {i} is not contiguous"
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("format", ["mjcf", "urdf"])
+def test_build_articulated_chain(format):
+    N_LINKS = 3
+    thin = build_articulated_chain(n_links=N_LINKS, link_radius=0.03, link_length=0.2, format=format)
+    thick = build_articulated_chain(n_links=N_LINKS, link_radius=0.06, link_length=0.2, format=format)
+
+    scene = gs.Scene(show_viewer=False)
+    if format == "mjcf":
+        entity_thin = scene.add_entity(gs.morphs.MJCF(file=thin))
+        entity_thick = scene.add_entity(gs.morphs.MJCF(file=thick))
+    else:
+        entity_thin = scene.add_entity(gs.morphs.URDF(file=thin, fixed=True))
+        entity_thick = scene.add_entity(gs.morphs.URDF(file=thick, fixed=True))
+    scene.build(n_envs=0)
+
+    # A fixed-base chain has exactly one hinge DOF per link in either format, and a thicker link is heavier.
+    assert entity_thin.n_dofs == N_LINKS
+    assert entity_thick.n_dofs == N_LINKS
+    assert tensor_to_array(entity_thick.get_mass()) > tensor_to_array(entity_thin.get_mass())
+
+    # The generated model is a valid dynamic system: it swings under gravity without diverging.
+    for _ in range(20):
+        scene.step()
+    assert np.isfinite(tensor_to_array(entity_thin.get_dofs_position())).all()
 
 
 @pytest.mark.slow  # ~250s
