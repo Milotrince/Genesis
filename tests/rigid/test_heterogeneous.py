@@ -206,12 +206,12 @@ def test_runtime_variant_rebind(n_envs, show_viewer, tol):
     box = scene.add_entity(
         gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(2.0, 0.0, SMALL / 2)),
     )
-    het_kinematic = scene.add_entity(
-        morph=[
+    het_kinematic = scene.add_heterogeneous_entity(
+        morphs=[
             gs.morphs.Box(size=(BIG, BIG, BIG), pos=(3.0, 0.0, 1.0)),
             gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(3.0, 0.0, 1.0)),
         ],
-        material=gs.materials.Kinematic(),
+        materials=gs.materials.Kinematic(),
     )
     scene.build(n_envs=n_envs)
 
@@ -312,8 +312,8 @@ def test_variant_switch_rebinds_relative_pose_offset(n_envs, show_viewer, tol):
     scene.add_entity(
         gs.morphs.Plane(),
     )
-    het = scene.add_entity(
-        morph=[
+    het = scene.add_heterogeneous_entity(
+        morphs=[
             gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5), offset_pos=(0.0, 0.0, 0.0)),
             gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5), offset_pos=(0.2, 0.0, 0.0)),
         ],
@@ -344,8 +344,8 @@ def test_variant_switch_rejected_with_custom_vverts(show_viewer):
     scene.add_entity(
         gs.morphs.Plane(),
     )
-    het = scene.add_entity(
-        morph=[
+    het = scene.add_heterogeneous_entity(
+        morphs=[
             gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3), enable_custom_vverts=True),
             gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3), enable_custom_vverts=True),
         ],
@@ -364,8 +364,8 @@ def test_variant_switch_rejected_when_differentiable(show_viewer):
     scene.add_entity(
         gs.morphs.Plane(),
     )
-    het = scene.add_entity(
-        morph=[
+    het = scene.add_heterogeneous_entity(
+        morphs=[
             gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3)),
             gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3)),
         ],
@@ -389,8 +389,8 @@ def test_variant_switch_notifies_geometry_subscribers(n_envs, show_viewer):
     scene.add_entity(
         gs.morphs.Plane(),
     )
-    het = scene.add_entity(
-        morph=[
+    het = scene.add_heterogeneous_entity(
+        morphs=[
             gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3), fixed=True),
             gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3), fixed=True),
         ],
@@ -420,8 +420,8 @@ def test_variant_switch_creates_nodes_for_inactive_variants(show_viewer):
     scene.add_entity(
         gs.morphs.Plane(),
     )
-    het = scene.add_entity(
-        morph=[
+    het = scene.add_heterogeneous_entity(
+        morphs=[
             gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3)),
             gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3)),
         ],
@@ -442,6 +442,61 @@ def test_variant_switch_creates_nodes_for_inactive_variants(show_viewer):
     het.set_entity_variant(inactive_variant)
     camera.render()
     assert (het.get_entity_variant() == inactive_variant).all()
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_per_variant_material_and_surface(n_envs, show_viewer, tol):
+    SIZE = 0.1
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, 0.6, 0.4),
+            camera_lookat=(0.0, 0.0, 0.05),
+        ),
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    het = scene.add_heterogeneous_entity(
+        morphs=[
+            gs.morphs.Box(size=(SIZE, SIZE, SIZE), pos=(0.0, 0.0, SIZE / 2)),
+            gs.morphs.Box(size=(SIZE, SIZE, SIZE), pos=(0.0, 0.0, SIZE / 2)),
+        ],
+        materials=[
+            gs.materials.Rigid(friction=0.02),
+            gs.materials.Rigid(friction=2.0),
+        ],
+        surfaces=[
+            gs.surfaces.Default(color=(1.0, 0.0, 0.0, 1.0)),
+            gs.surfaces.Default(color=(0.0, 0.0, 1.0, 1.0)),
+        ],
+    )
+    scene.build(n_envs=n_envs)
+
+    # Each variant's collision geom carries its own friction, and its visual geom its own color.
+    geom_slippery, geom_grippy = het.links[0].geoms
+    vgeom_red, vgeom_blue = het.links[0].vgeoms
+    assert_allclose(geom_slippery.friction, 0.02, tol=tol)
+    assert_allclose(geom_grippy.friction, 2.0, tol=tol)
+    assert_allclose(vgeom_red.surface.color, (1.0, 0.0, 0.0, 1.0), tol=tol)
+    assert_allclose(vgeom_blue.surface.color, (0.0, 0.0, 1.0, 1.0), tol=tol)
+
+    # Friction is observable: given equal initial sliding speed, the low-friction env travels farther.
+    if scene.n_envs > 1:
+        het.set_dofs_velocity([2.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        x_start = tensor_to_array(het.get_pos())[..., 0]
+        for _ in range(30):
+            scene.step()
+        slid = tensor_to_array(het.get_pos())[..., 0] - x_start
+        assert slid[0] > slid[1]
+
+    # A per-variant list whose length does not match the morphs is rejected.
+    with pytest.raises(gs.GenesisException):
+        gs.Scene(show_viewer=False).add_heterogeneous_entity(
+            morphs=[gs.morphs.Box(size=(SIZE, SIZE, SIZE)), gs.morphs.Box(size=(SIZE, SIZE, SIZE))],
+            materials=[gs.materials.Rigid()],
+        )
 
 
 # 30s

@@ -382,8 +382,8 @@ class Scene(RBC):
     def add_heterogeneous_entity(
         self,
         morphs: Iterable[Morph],
-        materials: Material | None = None,
-        surfaces: Surface | None = None,
+        materials: Material | Iterable[Material] | None = None,
+        surfaces: Surface | Iterable[Surface] | None = None,
         visualize_contact: bool = False,
         vis_mode: str | None = None,
         name: str | None = None,
@@ -400,10 +400,12 @@ class Scene(RBC):
         ----------
         morphs : list[gs.morphs.Morph]
             The morph variants, one geometry per environment (assigned in a balanced block).
-        materials : gs.materials.Material | None, optional
-            The material shared by every variant. If None, use ``gs.materials.Rigid()``.
-        surfaces : gs.surfaces.Surface | None, optional
-            The surface shared by every variant. If None, use ``gs.surfaces.Default()``.
+        materials : gs.materials.Material | list[gs.materials.Material] | None, optional
+            One material applied to every variant, or a list of one material per morph (per-variant friction and
+            contact properties). If None, use ``gs.materials.Rigid()``.
+        surfaces : gs.surfaces.Surface | list[gs.surfaces.Surface] | None, optional
+            One surface applied to every variant, or a list of one surface per morph (per-variant appearance). If
+            None, use ``gs.surfaces.Default()``.
         visualize_contact : bool
             Whether to visualize contact forces on this entity as arrows in the viewer and rendered images.
         vis_mode : str | None, optional
@@ -417,7 +419,8 @@ class Scene(RBC):
             The created heterogeneous entity.
         """
         morphs = tuple(morphs)
-        if len(morphs) == 0:
+        n_variants = len(morphs)
+        if n_variants == 0:
             gs.raise_exception("`add_heterogeneous_entity` requires at least one morph in `morphs`.")
         if not all(
             isinstance(m, (gs.morphs.Primitive, gs.morphs.Mesh, gs.morphs.URDF, gs.morphs.MJCF)) for m in morphs
@@ -429,15 +432,39 @@ class Scene(RBC):
                 "basic objects (ie Primitive, Mesh)."
             )
 
+        # Resolve materials/surfaces to one per variant: None -> a fresh default per variant, a single value ->
+        # shared across variants, a list -> per-variant (its length must match `morphs`).
         if materials is None:
-            materials = gs.materials.Rigid()
+            materials = [gs.materials.Rigid() for _ in morphs]
+        elif isinstance(materials, (list, tuple)):
+            materials = list(materials)
+            if len(materials) != n_variants:
+                gs.raise_exception(f"`materials` has {len(materials)} entries but there are {n_variants} morphs.")
+        else:
+            materials = [materials] * n_variants
         if surfaces is None:
-            surfaces = gs.surfaces.Default()
-        if not isinstance(materials, (gs.materials.Rigid, gs.materials.Kinematic)):
+            surfaces = [gs.surfaces.Default() for _ in morphs]
+        elif isinstance(surfaces, (list, tuple)):
+            surfaces = list(surfaces)
+            if len(surfaces) != n_variants:
+                gs.raise_exception(f"`surfaces` has {len(surfaces)} entries but there are {n_variants} morphs.")
+        else:
+            surfaces = [surfaces] * n_variants
+        if not all(isinstance(m, (gs.materials.Rigid, gs.materials.Kinematic)) for m in materials):
             gs.raise_exception("Heterogeneous entities are only supported for Rigid and Kinematic materials.")
 
-        self._resolve_entity_options(morphs[0], morphs, materials, surfaces, vis_mode)
-        return self._sim._add_entity(morphs, materials, surfaces, visualize_contact, name)
+        for morph, material, surface in zip(morphs, materials, surfaces):
+            self._resolve_entity_options(morph, (morph,), material, surface, vis_mode)
+
+        return self._sim._add_entity(
+            morphs,
+            materials[0],
+            surfaces[0],
+            visualize_contact,
+            name,
+            materials_heterogeneous=materials[1:],
+            surfaces_heterogeneous=surfaces[1:],
+        )
 
     def _resolve_entity_options(self, morph_for_checks, morphs_to_configure, material, surface, vis_mode):
         """Apply material- and morph-dependent defaults to `material` and `surface` in place, and validate them."""

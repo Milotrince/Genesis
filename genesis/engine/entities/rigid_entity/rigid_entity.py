@@ -114,11 +114,21 @@ class KinematicEntity(Entity):
         custom_vvert_start: int,
         custom_vface_start: int,
         morph_heterogeneous: list[Morph] | None = None,
+        materials_heterogeneous: list | None = None,
+        surfaces_heterogeneous: list | None = None,
         name: str | None = None,
     ):
         # Set heterogeneous support before super().__init__() because _get_morph_identifier() needs it
         self._morph_heterogeneous = morph_heterogeneous if morph_heterogeneous is not None else []
         self._enable_heterogeneous = bool(self._morph_heterogeneous)
+        # Per-variant material/surface aligned with _morph_heterogeneous; fall back to the primary's for each.
+        n_het = len(self._morph_heterogeneous)
+        self._materials_heterogeneous = (
+            list(materials_heterogeneous) if materials_heterogeneous is not None else [material] * n_het
+        )
+        self._surfaces_heterogeneous = (
+            list(surfaces_heterogeneous) if surfaces_heterogeneous is not None else [surface] * n_het
+        )
 
         super().__init__(idx, scene, morph, solver, material, surface, name=name)
 
@@ -235,11 +245,13 @@ class KinematicEntity(Entity):
         n_links = len(self._links)
 
         # Load additional heterogeneous variants
-        for morph in self._morph_heterogeneous:
+        for i_variant, morph in enumerate(self._morph_heterogeneous):
+            variant_material = self._materials_heterogeneous[i_variant]
+            variant_surface = self._surfaces_heterogeneous[i_variant]
             if isinstance(morph, (gs.morphs.URDF, gs.morphs.MJCF)):
                 # Parse variant scene file
                 morph._enable_mujoco_compatibility = self._morph._enable_mujoco_compatibility
-                v_l_infos, v_links_j_infos, v_links_g_infos, _ = self._parse_scene(morph, self._surface)
+                v_l_infos, v_links_j_infos, v_links_g_infos, _ = self._parse_scene(morph, variant_surface)
 
                 # Validate that the variant has the same joint structure as the primary
                 if len(v_l_infos) != n_links:
@@ -310,7 +322,7 @@ class KinematicEntity(Entity):
                 for i_link, (link, v_l_info, (cg_infos, vg_infos)) in enumerate(
                     zip(self._links, v_l_infos, cg_vg_infos)
                 ):
-                    self._add_heterogeneous_variant(link, cg_infos, vg_infos)
+                    self._add_heterogeneous_variant(link, cg_infos, vg_infos, variant_material)
                     self._on_heterogeneous_scene_variant_loaded(link, morph, v_l_info)
                     self._links_inertial_info[i_link].append(
                         self._finalize_inertial(
@@ -326,9 +338,9 @@ class KinematicEntity(Entity):
 
             elif isinstance(morph, (gs.morphs.Mesh, gs.morphs.Primitive)):
                 if isinstance(morph, gs.morphs.Mesh):
-                    g_infos = self._load_mesh(morph, self._surface, load_geom_only_for_heterogeneous=True)
+                    g_infos = self._load_mesh(morph, variant_surface, load_geom_only_for_heterogeneous=True)
                 else:
-                    g_infos = self._load_primitive(morph, self._surface, load_geom_only_for_heterogeneous=True)
+                    g_infos = self._load_primitive(morph, variant_surface, load_geom_only_for_heterogeneous=True)
                 if morph.fixed != self._morph.fixed:
                     gs.raise_exception("Mixing fixed and non-fixed morphs in heterogeneous entities is not supported.")
                 cg_infos, vg_infos = self._postprocess_geoms_info(morph, g_infos, is_robot=False)
@@ -338,7 +350,7 @@ class KinematicEntity(Entity):
                 offset_pos = np.array(morph.offset_pos, dtype=gs.np_float)
                 offset_quat = np.array(morph.offset_quat, dtype=gs.np_float)
 
-                self._add_heterogeneous_variant(self._links[0], cg_infos, vg_infos)
+                self._add_heterogeneous_variant(self._links[0], cg_infos, vg_infos, variant_material)
                 # Mesh/Primitive variants have no explicit inertial; the anchor inertia comes from their geometry.
                 self._links_inertial_info[0].append(
                     self._finalize_inertial(None, None, None, None, cg_infos, vg_infos, is_robot=False)
@@ -366,10 +378,11 @@ class KinematicEntity(Entity):
         if len(self._links) > 1:
             self._reassign_heterogeneous_indices()
 
-    def _add_heterogeneous_variant(self, link, cg_infos, vg_infos):
+    def _add_heterogeneous_variant(self, link, cg_infos, vg_infos, material):
         """Add a heterogeneous variant's visual geoms to a link.
 
-        RigidEntity overrides to additionally add collision geoms.
+        Visual geoms carry their appearance in the vmesh, so `material` is unused here; RigidEntity overrides to
+        additionally add the variant's collision geoms with that material.
         """
         for g_info in vg_infos:
             link._add_vgeom(
@@ -2561,6 +2574,8 @@ class RigidEntity(KinematicEntity):
         equality_start=0,
         visualize_contact: bool = False,
         morph_heterogeneous: list[Morph] | None = None,
+        materials_heterogeneous: list | None = None,
+        surfaces_heterogeneous: list | None = None,
         name: str | None = None,
     ):
         self._geom_start = geom_start
@@ -2595,23 +2610,25 @@ class RigidEntity(KinematicEntity):
             custom_vvert_start,
             custom_vface_start,
             morph_heterogeneous,
+            materials_heterogeneous,
+            surfaces_heterogeneous,
             name,
         )
 
-    def _add_heterogeneous_variant(self, link, cg_infos, vg_infos):
-        # Add collision geometries
-        coup_links = self.material.coup_links
+    def _add_heterogeneous_variant(self, link, cg_infos, vg_infos, material):
+        # Add collision geometries with this variant's own material.
+        coup_links = material.coup_links
         for g_info in cg_infos:
-            friction = self.material.friction
+            friction = material.friction
             if friction is None:
                 friction = g_info.get("friction", gu.default_friction())
-            friction_torsional = self.material.friction_torsional
+            friction_torsional = material.friction_torsional
             if friction_torsional is None:
                 friction_torsional = g_info.get("friction_torsional", gu.default_friction_torsional())
-            friction_rolling = self.material.friction_rolling
+            friction_rolling = material.friction_rolling
             if friction_rolling is None:
                 friction_rolling = g_info.get("friction_rolling", gu.default_friction_rolling())
-            needs_coup = self.material.needs_coup and (coup_links is None or link.name in coup_links)
+            needs_coup = material.needs_coup and (coup_links is None or link.name in coup_links)
             link._add_geom(
                 mesh=g_info["mesh"],
                 init_pos=g_info.get("pos", gu.zero_pos()),
@@ -2625,10 +2642,11 @@ class RigidEntity(KinematicEntity):
                 needs_coup=needs_coup,
                 contype=g_info["contype"],
                 conaffinity=g_info["conaffinity"],
+                material=material,
             )
 
         # Add visual geoms and record vgeom range via parent
-        super()._add_heterogeneous_variant(link, cg_infos, vg_infos)
+        super()._add_heterogeneous_variant(link, cg_infos, vg_infos, material)
 
         # Record geom range on the link (vgeom range already recorded by parent)
         link._record_variant_geom_range(len(cg_infos))

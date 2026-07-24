@@ -53,10 +53,12 @@ class RigidGeom(RBC):
         conaffinity,
         center_init=None,
         data=None,
+        material=None,
     ):
         self._link: "RigidLink" = link
         self._entity: "RigidEntity" = link.entity
-        self._material: "RigidMaterial" = link.entity.material
+        # A heterogeneous variant passes its own material; other geoms take the entity's.
+        self._material: "RigidMaterial" = material if material is not None else link.entity.material
         self._solver: "RigidSolver" = link.entity.solver
         self._mesh: "Mesh" = mesh
 

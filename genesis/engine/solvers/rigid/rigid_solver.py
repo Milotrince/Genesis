@@ -317,7 +317,18 @@ class RigidSolver(KinematicSolver):
     def init_ckpt(self):
         pass
 
-    def add_entity(self, idx, material, morph, surface, visualize_contact, name: str | None = None) -> RigidEntity:
+    def add_entity(
+        self,
+        idx,
+        material,
+        morph,
+        surface,
+        visualize_contact,
+        name: str | None = None,
+        *,
+        materials_heterogeneous=None,
+        surfaces_heterogeneous=None,
+    ) -> RigidEntity:
         # Handle heterogeneous morphs (list/tuple of morphs)
         morph_heterogeneous = []
         if isinstance(morph, (tuple, list)):
@@ -357,6 +368,8 @@ class RigidSolver(KinematicSolver):
             custom_vface_start=self.n_custom_vfaces,
             visualize_contact=visualize_contact,
             morph_heterogeneous=morph_heterogeneous,
+            materials_heterogeneous=materials_heterogeneous,
+            surfaces_heterogeneous=surfaces_heterogeneous,
             name=name,
         )
         assert isinstance(entity, RigidEntity)
