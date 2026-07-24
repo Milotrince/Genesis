@@ -5,6 +5,7 @@ import torch
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.assets.procedural import build_articulated_chain
+from genesis.engine.solvers.base_solver import StateChange, Subscriber
 from genesis.utils.misc import tensor_to_array
 
 from ..utils import (
@@ -317,6 +318,86 @@ def test_variant_switch_rejected_when_differentiable(show_viewer):
     # The variant change is not checkpointed, so it must be rejected rather than silently corrupt backward replay.
     with pytest.raises(gs.GenesisException):
         het.set_entity_variant(1)
+
+
+@pytest.mark.required
+def test_variant_switch_blocked_by_tactile_sensor(show_viewer):
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, 2.0, 1.5),
+            camera_lookat=(0.3, 0.0, 0.2),
+        ),
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    sensor_body = scene.add_entity(
+        gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.05), fixed=True),
+    )
+    het_tracked = scene.add_entity(
+        morph=[
+            gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.3, 0.0, 0.3)),
+            gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.3, 0.0, 0.3)),
+        ],
+    )
+    het_free = scene.add_entity(
+        morph=[
+            gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.6, 0.0, 0.3)),
+            gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.6, 0.0, 0.3)),
+        ],
+    )
+    scene.add_sensor(
+        gs.sensors.ProximityTaxel(
+            entity_idx=sensor_body.idx,
+            probe_local_pos=[[(-0.01, -0.01, 0.05), (0.01, -0.01, 0.05)], [(-0.01, 0.01, 0.05), (0.01, 0.01, 0.05)]],
+            probe_local_normal=(0.0, 0.0, 1.0),
+            probe_radius=0.01,
+            track_link_idx=(het_tracked.base_link_idx,),
+            n_sample_points=200,
+            stiffness=100.0,
+            shear_coupling=0.0,
+        ),
+    )
+    scene.build(n_envs=0)
+
+    # The sensor sampled het_tracked's geometry at build, so switching it is rejected; an untracked entity stays free.
+    with pytest.raises(gs.GenesisException):
+        het_tracked.set_entity_variant(1)
+    het_free.set_entity_variant(1)
+    assert (het_free.get_entity_variant() == 1).all()
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_variant_switch_notifies_geometry_subscribers(n_envs, show_viewer):
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, 2.0, 1.5),
+            camera_lookat=(0.0, 0.0, 0.2),
+        ),
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    het = scene.add_entity(
+        morph=[
+            gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3), fixed=True),
+            gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3), fixed=True),
+        ],
+    )
+    scene.build(n_envs=n_envs)
+
+    # A fixed link carries no DOF, so a configuration-space setter can never announce its geometry swap; the switch
+    # must announce it directly, or a static subscriber like the raycaster's collision BVH never rebuilds.
+    subscriber = Subscriber(
+        to=frozenset({StateChange.GEOMETRY}),
+        links_filter=np.array([link.idx for link in het.links]),
+    )
+    het.solver.subscribe(subscriber)
+    het.set_entity_variant(1)
+    assert StateChange.GEOMETRY in subscriber.pending
 
 
 @pytest.mark.required

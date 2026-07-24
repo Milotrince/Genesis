@@ -161,6 +161,10 @@ class KinematicEntity(Entity):
         # Per-env active variant index (heterogeneous only), shape (B,).
         self._variant_idx_per_env: np.ndarray | None = None
 
+        # Consumers that sample this entity's geometry once at build (e.g. a point-cloud tactile sensor) and cannot
+        # follow a runtime variant switch; a non-empty list makes set_entity_variant raise. Populated from their build.
+        self._variant_switch_blockers: list = []
+
         self._load_model()
 
         # Initialize target variables and checkpoint
@@ -2107,6 +2111,12 @@ class KinematicEntity(Entity):
             gs.raise_exception(
                 "`set_entity_variant` is not supported with the batch renderer, whose per-variant visibility is "
                 "fixed at build time. Use the interactive viewer or a rasterizer camera for runtime switching."
+            )
+        if self._variant_switch_blockers:
+            blocker = type(self._variant_switch_blockers[0]).__name__
+            gs.raise_exception(
+                f"`set_entity_variant` is not supported: a {blocker} samples this entity's geometry at build and "
+                "would read stale values after a switch."
             )
         n_variants = len(self._morph_heterogeneous) + 1
         variant_idx = np.atleast_1d(np.asarray(variant, dtype=gs.np_int))

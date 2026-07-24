@@ -532,13 +532,15 @@ class KinematicSolver(Solver):
             geom.active_envs_mask[envs_idx] = active_envs
             (geom.active_envs_idx,) = np.where(tensor_to_array(geom.active_envs_mask))
 
+    @mutates(StateChange.GEOMETRY, links=MutatedLinks.ALL)
     def set_entity_variant(self, entity, variant_idx, envs_idx):
         """
         Rebind a heterogeneous entity's active morph variant for the given envs, at runtime.
 
         `variant_idx` is a 1D array of variant indices: a single entry (applied to every selected env) or one per
         selected env. Reuses the build-time per-link bind, then lets `_on_variant_rebound` refresh any solver
-        caches invalidated by the swapped geometry.
+        caches invalidated by the swapped geometry. Announces a GEOMETRY change over all links (a fixed link's
+        geometry can swap too), so subscribers such as the raycaster's static BVH rebuild for the new variant.
         """
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
         if len(variant_idx) == 1:

@@ -633,6 +633,15 @@ class PointCloudTactileSensorMixin(ProbeSensorMixin[PointCloudTactileSensorMetad
         # row into the just-grown pc_pos_link.
         self._shared_metadata.pc_bvh.append_sensor(pc_start_row=pc_start_row, idx_cat=idx_cat, pos_cat=pos_cat)
 
+        # The point cloud above is sampled from the tracked geometry as it stands now; a runtime variant switch of a
+        # tracked heterogeneous entity would silently invalidate it. Register to block that switch (see
+        # KinematicEntity.set_entity_variant).
+        solver = self._shared_metadata.solver
+        for link_idx in np.asarray(self._options.track_link_idx, dtype=gs.np_int):
+            entity = solver.links[int(link_idx)].entity
+            if entity._enable_heterogeneous and self not in entity._variant_switch_blockers:
+                entity._variant_switch_blockers.append(self)
+
     def _draw_debug_probes(
         self, context: "RasterizerContext", color_groups_fn: Callable[[list[int] | None], list[tuple]] | None = None
     ) -> tuple[list[int] | None, int, np.ndarray | None]:
