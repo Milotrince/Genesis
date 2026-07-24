@@ -738,8 +738,8 @@ def test_mass_setters(tol):
     scene = gs.Scene(
         show_viewer=False,
     )
-    het_obj = scene.add_entity(
-        morph=[
+    het_obj = scene.add_heterogeneous_entity(
+        morphs=[
             gs.morphs.Box(size=(0.01, 0.01, 0.01)),
             gs.morphs.Box(size=(0.02, 0.02, 0.02)),
             gs.morphs.Sphere(radius=0.01),

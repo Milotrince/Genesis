@@ -609,8 +609,8 @@ def test_heterogeneous_object(show_viewer, tol):
     # Without per-env geom masking an env casts against the union of all variants (they share one vertex buffer). The
     # variants are concentric obstacles of decreasing near-face distance, so each env's own variant is the farthest
     # hit. A missing mask is then observable as an env shadowing its variant with a nearer one belonging to another env.
-    het_obstacle = scene.add_entity(
-        morph=(
+    het_obstacle = scene.add_heterogeneous_entity(
+        morphs=(
             gs.morphs.Box(size=(0.2, 0.2, 0.2), pos=(1.0, 0.0, 0.5), fixed=True),
             gs.morphs.Sphere(radius=0.2, pos=(1.0, 0.0, 0.5), fixed=True),
             gs.morphs.Box(size=(0.6, 0.6, 0.6), pos=(1.0, 0.0, 0.5), fixed=True),

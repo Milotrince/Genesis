@@ -1709,8 +1709,8 @@ def test_heterogeneous_object(show_viewer, tol):
             fixed=True,
         )
     )
-    obj = scene.add_entity(
-        morph=[
+    obj = scene.add_heterogeneous_entity(
+        morphs=[
             gs.morphs.Box(
                 size=(BOX_XY_SIZE, BOX_XY_SIZE, OBJECT_Z_SIZE),
             ),
@@ -1718,7 +1718,7 @@ def test_heterogeneous_object(show_viewer, tol):
                 radius=SPHERE_RADIUS,
             ),
         ],
-        material=gs.materials.Rigid(
+        materials=gs.materials.Rigid(
             friction=0.5,
         ),
     )

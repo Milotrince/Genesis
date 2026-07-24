@@ -675,8 +675,8 @@ def test_renders_heterogeneous_entities(n_envs, show_viewer, png_snapshot, rende
             color=(0.3, 0.8, 0.3),
         ),
     )
-    heterogeneous = scene.add_entity(
-        morph=(
+    heterogeneous = scene.add_heterogeneous_entity(
+        morphs=(
             gs.morphs.Sphere(
                 radius=0.3,
             ),

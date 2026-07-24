@@ -303,8 +303,8 @@ def test_no_drift(gjk_collision, entity_kind, entity_type, ground_type, show_vie
         # envs because a full-length capsule standing on its cap is a tippy-pencil configuration that is numerically
         # unstable regardless of the bias fix) and the full-length capsule (used by "horizontal-axis" envs, barrel
         # contact). MuJoCo rejects an exact zero length so we use a tiny positive value.
-        entity = scene.add_entity(
-            morph=(
+        entity = scene.add_heterogeneous_entity(
+            morphs=(
                 gs.morphs.MJCF(
                     file=_capsule_mjcf_path(tmp_path, SMOOTH_RADIUS, gs.EPS, name="capsule_v"),
                 ),

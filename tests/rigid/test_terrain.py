@@ -239,8 +239,8 @@ def test_box_on_terrain_no_spurious_spin(show_viewer):
             color=(0.4, 0.8, 0.4),
         ),
     )
-    box = scene.add_entity(
-        morph=(
+    box = scene.add_heterogeneous_entity(
+        morphs=(
             gs.morphs.Box(size=BOX_SIZE),
             gs.morphs.MeshSet(
                 files=(trimesh.creation.box(extents=BOX_SIZE),),

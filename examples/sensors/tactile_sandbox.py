@@ -355,8 +355,8 @@ def main() -> None:
     if not os.path.exists(torus_path):
         trimesh.creation.torus(major_radius=1.0, minor_radius=0.5).export(torus_path)
 
-    obj = scene.add_entity(
-        morph=[
+    obj = scene.add_heterogeneous_entity(
+        morphs=[
             gs.morphs.Mesh(
                 file=torus_path,
                 scale=OBJECT_SIZE / 2,
@@ -376,8 +376,8 @@ def main() -> None:
                 scale=0.001,
             ),
         ],
-        surface=gs.surfaces.Default(color=(1.0, 1.0, 1.0, 1.0)),
-        material=gs.materials.Rigid(friction=0.5),
+        surfaces=gs.surfaces.Default(color=(1.0, 1.0, 1.0, 1.0)),
+        materials=gs.materials.Rigid(friction=0.5),
     )
 
     sensor = _add_tactile_sensor(
