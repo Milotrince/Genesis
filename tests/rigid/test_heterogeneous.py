@@ -1,3 +1,5 @@
+import xml.etree.ElementTree as ET
+
 import numpy as np
 import pytest
 import torch
@@ -8,6 +10,7 @@ from genesis.utils.misc import tensor_to_array
 
 from ..utils import (
     assert_allclose,
+    assert_equal,
     get_hf_dataset,
 )
 
@@ -171,80 +174,121 @@ def test_aabb(tol):
 @pytest.mark.parametrize("n_envs", [0, 2])
 def test_runtime_variant_rebind(n_envs, show_viewer, tol):
     BIG, SMALL = 0.10, 0.04
+
+    # Two-link hinge pendulum whose lower capsule radius sets the variant; identical kinematic tree, so switching
+    # variants rebinds every link and changes the whole entity's mass.
+    def two_link_arm(lower_radius):
+        mjcf = ET.Element("mujoco", model="arm")
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        upper = ET.SubElement(worldbody, "body", name="upper", pos="1.0 0.0 0.6")
+        ET.SubElement(upper, "joint", name="j1", type="hinge", axis="0 1 0")
+        ET.SubElement(upper, "geom", type="capsule", fromto="0 0 0 0 0 -0.2", size="0.03")
+        lower = ET.SubElement(upper, "body", name="lower", pos="0.0 0.0 -0.2")
+        ET.SubElement(lower, "joint", name="j2", type="hinge", axis="0 1 0")
+        ET.SubElement(lower, "geom", type="capsule", fromto="0 0 0 0 0 -0.2", size=str(lower_radius))
+        return ET.tostring(mjcf, encoding="unicode")
+
     scene = gs.Scene(
         show_viewer=show_viewer,
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.5, 0.5, 0.3),
-            camera_lookat=(0.0, 0.0, 0.05),
+            camera_pos=(2.0, 2.0, 1.5),
+            camera_lookat=(0.5, 0.0, 0.2),
         ),
     )
     scene.add_entity(
         gs.morphs.Plane(),
     )
-    het_obj = scene.add_entity(
+    het_box = scene.add_entity(
         morph=[
             gs.morphs.Box(size=(BIG, BIG, BIG), pos=(0.0, 0.0, BIG / 2)),
             gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(0.0, 0.0, SMALL / 2)),
         ],
     )
+    het_arm = scene.add_entity(
+        morph=[
+            gs.morphs.MJCF(file=two_link_arm(0.03)),
+            gs.morphs.MJCF(file=two_link_arm(0.06)),
+        ],
+    )
     box = scene.add_entity(
-        gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(1.0, 0.0, SMALL / 2)),
+        gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(2.0, 0.0, SMALL / 2)),
     )
     scene.build(n_envs=n_envs)
 
-    geom_big, geom_small = het_obj.links[0].geoms
+    geom_big, geom_small = het_box.links[0].geoms
 
-    def masses():
-        return np.atleast_1d(tensor_to_array(het_obj.get_mass()))
+    def box_masses():
+        return np.atleast_1d(tensor_to_array(het_box.get_mass()))
 
-    def rest_z():
-        return np.atleast_1d(tensor_to_array(het_obj.get_pos())[..., 2])
+    def box_aabb_size():
+        aabb = tensor_to_array(het_box.get_AABB())
+        return aabb[..., 1, :] - aabb[..., 0, :]
 
     # Inertial rebind is exact and needs no stepping: switching every env to one variant makes all masses equal to
     # that variant's mass, and the two box sizes are genuinely distinct. After an all-envs switch the active
-    # geometry is that variant everywhere and the other variant is inactive.
-    het_obj.set_morph_variant(0)
-    mass_big = masses()
+    # geometry is that variant everywhere and the other variant is inactive. The AABB is queried WITHOUT a step, so
+    # it also checks that the newly-bound geometry is re-posed immediately (not only on the next step).
+    het_box.set_morph_variant(0)
+    mass_big = box_masses()
     assert len(geom_small.active_envs_idx) == 0
     assert len(geom_big.active_envs_idx) == max(scene.n_envs, 1)
-    het_obj.set_morph_variant(1)
-    mass_small = masses()
+    # get_AABB's per-env heterogeneous path requires a parallelized scene.
+    if scene.n_envs > 0:
+        assert_allclose(box_aabb_size(), BIG, tol=tol)
+    het_box.set_morph_variant(1)
+    mass_small = box_masses()
+    if scene.n_envs > 0:
+        assert_allclose(box_aabb_size(), SMALL, tol=tol)
     assert_allclose(mass_big, mass_big[0], tol=tol)
     assert_allclose(mass_small, mass_small[0], tol=tol)
     with pytest.raises(AssertionError):
         assert_allclose(mass_big[0], mass_small[0], tol=tol)
 
-    # A subset rebind touches only its envs: from all-big, switching env 0 to the small variant leaves every other
-    # env at the big mass (a leak across the envs_idx boundary would flip them too). Only meaningful for a
-    # parallelized scene, where envs_idx selects a subset.
-    if scene.n_envs > 0:
-        het_obj.set_morph_variant(0)
-        het_obj.set_morph_variant(1, envs_idx=[0])
-        mass_mixed = masses()
+    # Per-env control (parallelized only): a subset rebind touches only its envs, and an array-valued variant sets
+    # each env independently (a broadcast bug would collapse the distinct [big, small] result).
+    if scene.n_envs > 1:
+        het_box.set_morph_variant(0)
+        het_box.set_morph_variant(1, envs_idx=[0])
+        mass_mixed = box_masses()
         assert_allclose(mass_mixed[0], mass_small[0], tol=tol)
         assert_allclose(mass_mixed[1:], mass_big[0], tol=tol)
         assert 0 in geom_small.active_envs_idx
         assert 0 not in geom_big.active_envs_idx
+        assert_equal(het_box.get_morph_variant(), [1, 0])
 
-    # Collision geometry rebind is observable in the settled height: a box rests on its own half-extent, so the
-    # entity settles lower once bound to the small variant than to the big one.
-    het_obj.set_morph_variant(1)
-    het_obj.set_pos((0.0, 0.0, SMALL))
+        het_box.set_morph_variant([0, 1])
+        assert_equal(het_box.get_morph_variant(), [0, 1])
+        assert_allclose(box_masses(), [mass_big[0], mass_small[0]], tol=tol)
+
+    # Articulated same-tree variant: switching rebinds both links, so the thicker lower capsule is the heavier
+    # entity. All environments are switched together (scalar), then stepped to confirm the swap stays stable.
+    het_arm.set_morph_variant(0)
+    arm_mass_thin = np.atleast_1d(tensor_to_array(het_arm.get_mass()))
+    het_arm.set_morph_variant(1)
+    arm_mass_thick = np.atleast_1d(tensor_to_array(het_arm.get_mass()))
+    assert (arm_mass_thick > arm_mass_thin).all()
+    assert (het_arm.get_morph_variant() == 1).all()
+    for _ in range(20):
+        scene.step()
+    assert np.isfinite(tensor_to_array(het_arm.get_dofs_position())).all()
+
+    # Collision geometry rebind is observable in the settled height: a box rests on its own half-extent, so once
+    # bound to the small variant everywhere it settles at that half-extent.
+    het_box.set_morph_variant(1)
+    het_box.set_pos((0.0, 0.0, SMALL))
+    het_box.set_dofs_velocity(np.zeros(6))
     for _ in range(40):
         scene.step()
-    assert_allclose(rest_z(), SMALL / 2, tol=2e-3)
+    rest_z = np.atleast_1d(tensor_to_array(het_box.get_pos())[..., 2])
+    assert_allclose(rest_z, SMALL / 2, tol=2e-3)
 
-    het_obj.set_morph_variant(0)
-    het_obj.set_pos((0.0, 0.0, BIG))
-    for _ in range(40):
-        scene.step()
-    assert_allclose(rest_z(), BIG / 2, tol=2e-3)
-
-    # A homogeneous entity has no variants to switch, and an out-of-range index is rejected.
+    # A homogeneous entity has no variants to switch or query, and an out-of-range index is rejected.
     with pytest.raises(gs.GenesisException):
         box.set_morph_variant(0)
     with pytest.raises(gs.GenesisException):
-        het_obj.set_morph_variant(2)
+        box.get_morph_variant()
+    with pytest.raises(gs.GenesisException):
+        het_box.set_morph_variant(2)
 
 
 # 30s

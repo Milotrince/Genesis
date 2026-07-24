@@ -158,6 +158,10 @@ class KinematicEntity(Entity):
         self._variant_offset_pos: list[np.ndarray] | None = None
         self._variant_offset_quat: list[np.ndarray] | None = None
 
+        # Per-environment active variant index (heterogeneous only), seeded by the build-time dispatch and updated
+        # by set_morph_variant; read by get_morph_variant. Shape (B,).
+        self._variant_idx_per_env: np.ndarray | None = None
+
         self._load_model()
 
         # Initialize target variables and checkpoint
@@ -2082,22 +2086,42 @@ class KinematicEntity(Entity):
         Switch which declared morph variant this heterogeneous entity shows per environment, at runtime.
 
         Only valid for an entity built from a list of morphs (`scene.add_entity(morph=[m0, m1, ...])`). All
-        variants share the same kinematic tree; only their collision/visual geometry and inertial differ. The
-        switch takes effect from the next `scene.step()`.
+        variants share the same kinematic tree; only their collision/visual geometry and inertial differ.
 
         Parameters
         ----------
-        variant : int
-            Index into the declared morph list (0 is the first/primary morph).
+        variant : int | array_like
+            Index into the declared morph list (0 is the first/primary morph). A scalar switches every selected
+            environment to that variant; an array of length `len(envs_idx)` (or `n_envs`) switches each selected
+            environment independently.
         envs_idx : None | array_like, optional
             The environments to switch. If None, all environments are switched. Defaults to None.
         """
         if not self._enable_heterogeneous:
-            gs.raise_exception("`set_morph_variant` requires a heterogeneous entity built with `morph=[...]`.")
+            gs.raise_exception("`set_morph_variant` requires a heterogeneous entity built with a list of morphs.")
         n_variants = len(self._morph_heterogeneous) + 1
-        if not 0 <= variant < n_variants:
+        variant_idx = np.atleast_1d(np.asarray(variant, dtype=gs.np_int))
+        if ((variant_idx < 0) | (variant_idx >= n_variants)).any():
             gs.raise_exception(f"`variant` must be in range [0, {n_variants}), got {variant}.")
-        self._solver.set_morph_variant(self, variant, envs_idx)
+        self._solver.set_morph_variant(self, variant_idx, envs_idx)
+
+    @gs.assert_built
+    def get_morph_variant(self, envs_idx=None):
+        """
+        Return the currently-active morph variant index for each selected environment, shape `(n_envs,)`.
+
+        Only valid for a heterogeneous entity built from a list of morphs.
+
+        Parameters
+        ----------
+        envs_idx : None | array_like, optional
+            The environments to query. If None, all environments are returned. Defaults to None.
+        """
+        if not self._enable_heterogeneous:
+            gs.raise_exception("`get_morph_variant` requires a heterogeneous entity built with a list of morphs.")
+        if envs_idx is None:
+            return self._variant_idx_per_env.copy()
+        return self._variant_idx_per_env[tensor_to_array(self._scene._sanitize_envs_idx(envs_idx))]
 
     @gs.assert_built
     @tracked

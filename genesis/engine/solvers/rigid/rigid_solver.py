@@ -996,6 +996,8 @@ class RigidSolver(KinematicSolver):
                 continue
             variant_idx = _balanced_variant_mapping(len(link._variant_vgeom_ranges), self._B)
             self._bind_heterogeneous_variant(link, variant_idx, envs_idx)
+            # Track the per-env active variant for get_morph_variant; all of an entity's links share one mapping.
+            link.entity._variant_idx_per_env = variant_idx
 
     def _bind_heterogeneous_variant(self, link, variant_idx, envs_idx):
         """
@@ -1045,19 +1047,29 @@ class RigidSolver(KinematicSolver):
             geom.active_envs_mask[envs_idx] = active_envs
             (geom.active_envs_idx,) = np.where(tensor_to_array(geom.active_envs_mask))
 
-    def set_morph_variant(self, entity, variant, envs_idx):
+    def set_morph_variant(self, entity, variant_idx, envs_idx):
         """
-        Rebind a heterogeneous entity's active morph variant to `variant` for the given envs, at runtime.
+        Rebind a heterogeneous entity's active morph variant for the given envs, at runtime.
 
-        Reuses the build-time variant bind, then forces a full collider reset: a geom-set change invalidates the
-        broadphase sort buffer, which the pose-only cache reset (used by set_qpos) would leave stale.
+        `variant_idx` is a 1D array of variant indices: a single entry (applied to every selected env) or one per
+        selected env. Reuses the build-time variant bind, then re-poses the newly-active geoms so pose/AABB
+        queries are correct before the next step, and forces a full collider reset: a geom-set change invalidates
+        the broadphase sort buffer, which the pose-only cache reset (used by set_qpos) would leave stale.
         """
         envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        variant_idx = np.full(len(envs_idx), variant, dtype=gs.np_int)
+        if len(variant_idx) == 1:
+            variant_idx = np.broadcast_to(variant_idx, (len(envs_idx),))
+        elif len(variant_idx) != len(envs_idx):
+            gs.raise_exception(
+                f"`variant` has length {len(variant_idx)}; expected a scalar or one entry per selected "
+                f"environment ({len(envs_idx)})."
+            )
         for link in entity.links:
             if link._variant_geom_ranges is None:
                 continue
             self._bind_heterogeneous_variant(link, variant_idx, envs_idx)
+        entity._variant_idx_per_env[tensor_to_array(envs_idx)] = variant_idx
+        self._func_update_geoms(envs_idx, force_update_fixed_geoms=True)
         self.collider.reset(envs_idx, cache_only=False)
 
     def _init_vert_fields(self):
