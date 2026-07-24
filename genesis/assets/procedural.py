@@ -3,18 +3,13 @@
 import math
 import xml.etree.ElementTree as ET
 
-# Default solid density the MJCF loader assigns to a geom (kg/m^3); the URDF inertial uses the same value so a
-# cylinder link has an equal mass and inertia in both formats.
-_DENSITY = 1000.0
 
-
-def build_articulated_chain(n_links, link_radius, link_length, *, format="mjcf"):
+def build_articulated_chain(n_links, link_radius, link_length, *, format="mjcf", density=1000.0):
     """Build an ``n_links`` pendulum chain of equal links joined by hinge joints, as an inline XML string.
 
     The returned string is ready to pass to ``gs.morphs.MJCF(file=...)`` / ``gs.morphs.URDF(file=...)``. Each link
     is ``link_length`` long and ``link_radius`` thick; consecutive links are connected by a revolute joint about
-    the y axis. Both forms use cylinder links at a shared density, so the URDF and MJCF chains load to the same
-    links (equal mass and inertia).
+    the y axis. Both forms use cylinder links at the given ``density`` with matching mass and inertia.
 
     The MJCF form hinges its first link to the world, so it is a fixed-base ``n_links`` pendulum. The URDF form
     keeps an explicit ``base`` root link whose fixing follows the morph: pass ``gs.morphs.URDF(file=..., fixed=True)``
@@ -30,6 +25,8 @@ def build_articulated_chain(n_links, link_radius, link_length, *, format="mjcf")
         Length of each link along its local axis.
     format : str
         Either "mjcf" or "urdf".
+    density : float
+        Solid density of each link.
     """
     if n_links < 1:
         raise ValueError(f"`n_links` must be >= 1, got {n_links}.")
@@ -41,15 +38,22 @@ def build_articulated_chain(n_links, link_radius, link_length, *, format="mjcf")
         for i in range(n_links):
             body = ET.SubElement(parent, "body", name=f"link_{i}", pos=f"0 0 {0.0 if i == 0 else -link_length}")
             ET.SubElement(body, "joint", name=f"joint_{i}", type="hinge", axis="0 1 0")
-            ET.SubElement(body, "geom", type="cylinder", fromto=f"0 0 0 0 0 {-link_length}", size=f"{link_radius}")
+            ET.SubElement(
+                body,
+                "geom",
+                type="cylinder",
+                fromto=f"0 0 0 0 0 {-link_length}",
+                size=f"{link_radius}",
+                density=f"{density}",
+            )
             parent = body
         return ET.tostring(root, encoding="unicode")
 
     if format == "urdf":
         root = ET.Element("robot", name="chain")
         ET.SubElement(root, "link", name="base")
-        # Solid-cylinder inertial so the URDF is dynamically valid and matches the MJCF loader's computed values.
-        mass = _DENSITY * math.pi * link_radius**2 * link_length
+        # Solid-cylinder inertial (URDF requires an explicit one).
+        mass = density * math.pi * link_radius**2 * link_length
         i_transverse = mass * (3.0 * link_radius**2 + link_length**2) / 12.0
         i_axial = mass * link_radius**2 / 2.0
         parent_name = "base"

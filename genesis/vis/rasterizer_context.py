@@ -559,16 +559,14 @@ class RasterizerContext:
                     node = self.rigid_nodes[geom.uid]
                     primitive = node.mesh.primitives[0]
 
-                    # Mirror on_rigid: full per-env poses for env-masked variants, compacted otherwise. A runtime
-                    # rebind can drive a geom to zero active envs, so the empty case takes the masked path to clear it.
+                    # A geom driven to zero active envs still takes the masked path here, to clear its stale mask.
                     is_env_masked = len(geom_envs_idx) < len(self.rendered_envs_idx)
                     if is_env_masked:
                         geom_T = geoms_T[geom.idx][self.rendered_envs_idx]
                     else:
                         geom_T = geoms_T[geom.idx][geom_envs_idx]
 
-                    # primitive.active_envs -> jit env_active is only rebuilt on meshes_updated. Recompute it in the
-                    # poses' representation and flag a rebuild when it changed, so set_primitive re-reads both.
+                    # active_envs feeds jit env_active only through a meshes_updated rebuild; flag one when it changes.
                     active_envs = np.isin(self.rendered_envs_idx, geom_envs_idx) if is_env_masked else None
                     if (primitive.active_envs is None) != (active_envs is None) or (
                         active_envs is not None and not np.array_equal(primitive.active_envs, active_envs)
@@ -589,8 +587,7 @@ class RasterizerContext:
 
                     node.mesh._bounds = None
                     primitive.poses = geom_T
-                    # A pending rebuild re-reads primitive.poses; skip the push, which would fight a changed
-                    # instance count on a masked<->compacted flip.
+                    # A pending rebuild re-reads primitive.poses, so skip the now-redundant push.
                     if not self._scene.meshes_updated:
                         self.jit.update_buffer(node, "model", geom_T.transpose((0, 2, 1)))
                     if isinstance(entity._morph, gs.morphs.Plane):

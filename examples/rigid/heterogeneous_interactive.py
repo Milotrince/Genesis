@@ -33,9 +33,7 @@ def main():
     variants = []
     for i in range(args.n_variants):
         if args.articulated:
-            # Fixed-base 2-link pendulum. Only the link radius varies across variants: the heterogeneous rebind
-            # swaps geometry and inertial but not the joint anchors, so a different link length would leave the
-            # second link attached at the primary variant's position.
+            # Vary only the radius: the rebind does not move joint anchors, so a different length would misplace links.
             variants.append(
                 gs.morphs.MJCF(
                     file=build_articulated_chain(
@@ -69,8 +67,7 @@ def main():
     het = scene.add_entity(
         morph=variants,
     )
-    # Mouse-drag any object to sanity-check its collision and mass. Spring force works for both the free-floating
-    # primitives and the hinge-anchored chains (whose base cannot be repositioned).
+    # Mouse-drag to sanity-check collision and mass; spring force works for free and anchored bodies alike.
     scene.viewer.add_plugin(
         gs.vis.viewer_plugins.MouseInteractionPlugin(
             use_force=True,

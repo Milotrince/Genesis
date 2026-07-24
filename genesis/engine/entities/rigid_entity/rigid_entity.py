@@ -158,8 +158,7 @@ class KinematicEntity(Entity):
         self._variant_offset_pos: list[np.ndarray] | None = None
         self._variant_offset_quat: list[np.ndarray] | None = None
 
-        # Per-environment active variant index (heterogeneous only), seeded by the build-time dispatch and updated
-        # by set_entity_variant; read by get_entity_variant. Shape (B,).
+        # Per-env active variant index (heterogeneous only), shape (B,).
         self._variant_idx_per_env: np.ndarray | None = None
 
         self._load_model()

@@ -62,8 +62,7 @@ def test_build_articulated_chain(show_viewer, tol):
         ),
     )
     arm_mjcf = scene.add_entity(gs.morphs.MJCF(file=xml_2link_mjcf))
-    # Genesis floats a URDF root and gives its joints a default rotor armature; override both so the URDF arm is
-    # the same fixed-base, armature-free system as the MJCF one.
+    # Genesis floats a URDF root and adds default joint armature; override both to match the fixed-base MJCF arm.
     arm_urdf = scene.add_entity(
         gs.morphs.URDF(file=xml_2link_urdf, pos=(1.0, 0.0, 0.0), fixed=True, default_armature=0.0)
     )
@@ -77,8 +76,7 @@ def test_build_articulated_chain(show_viewer, tol):
     # A longer chain is heavier.
     assert arm_3link.get_mass() > arm_mjcf.get_mass()
 
-    # Start the 2-link arm horizontal (first hinge at 90 deg); under gravity it swings down past the fixed base,
-    # so its lowest point drops below -1.5*L, only reachable if the second link also swings down.
+    # Start the arm horizontal; under gravity it swings below -1.5*L, only reachable if the second link swings too.
     arm_mjcf.set_dofs_position([np.pi / 2, 0.0], zero_velocity=True)
     lowest_z = tensor_to_array(arm_mjcf.get_AABB())[0, 2]
     for _ in range(60):

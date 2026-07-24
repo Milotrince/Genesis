@@ -216,8 +216,7 @@ def test_runtime_variant_rebind(n_envs, show_viewer, tol):
         aabb = tensor_to_array(het_box.get_AABB())
         return aabb[..., 1, :] - aabb[..., 0, :]
 
-    # Switching every env to one variant makes all masses that variant's mass (exact, no step), and the two box
-    # sizes are distinct. The AABB is read WITHOUT a step, so it also checks the geometry is re-posed immediately.
+    # Switching all envs to one variant makes every mass that variant's; the no-step AABB checks immediate re-posing.
     het_box.set_entity_variant(0)
     mass_big = box_masses()
     assert len(geom_small.active_envs_idx) == 0
@@ -234,8 +233,7 @@ def test_runtime_variant_rebind(n_envs, show_viewer, tol):
     with pytest.raises(AssertionError):
         assert_allclose(mass_big[0], mass_small[0], tol=tol)
 
-    # Per-env control (parallelized only): a subset rebind touches only its envs; an array-valued variant sets
-    # each env independently (a broadcast bug would collapse the distinct [big, small] result).
+    # Per-env control (parallelized only): subset rebind and array-valued variant each set envs independently.
     if scene.n_envs > 1:
         het_box.set_entity_variant(0)
         het_box.set_entity_variant(1, envs_idx=[0])
@@ -250,8 +248,7 @@ def test_runtime_variant_rebind(n_envs, show_viewer, tol):
         assert_equal(het_box.get_entity_variant(), [0, 1])
         assert_allclose(box_masses(), [mass_big[0], mass_small[0]], tol=tol)
 
-    # Articulated variant: switching rebinds both links, so the thicker lower capsule is heavier; then step to
-    # confirm the swap stays stable.
+    # Articulated variant: switching rebinds both links; the thicker chain is heavier. Step to confirm stability.
     het_arm.set_entity_variant(0)
     arm_mass_thin = np.atleast_1d(tensor_to_array(het_arm.get_mass()))
     het_arm.set_entity_variant(1)
@@ -262,8 +259,7 @@ def test_runtime_variant_rebind(n_envs, show_viewer, tol):
         scene.step()
     assert np.isfinite(tensor_to_array(het_arm.get_dofs_position())).all()
 
-    # Collision geometry rebind shows in the settled height: bound to the small variant, the box rests on its
-    # own half-extent.
+    # Collision rebind shows in the settled height: the small variant rests on its own half-extent.
     het_box.set_entity_variant(1)
     het_box.set_pos((0.0, 0.0, SMALL))
     het_box.set_dofs_velocity(np.zeros(6))
