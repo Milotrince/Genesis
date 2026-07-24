@@ -2077,6 +2077,29 @@ class KinematicEntity(Entity):
         self._solver.set_qpos(qpos, qs_idx, envs_idx, skip_forward=skip_forward)
 
     @gs.assert_built
+    def set_morph_variant(self, variant, envs_idx=None):
+        """
+        Switch which declared morph variant this heterogeneous entity shows per environment, at runtime.
+
+        Only valid for an entity built from a list of morphs (`scene.add_entity(morph=[m0, m1, ...])`). All
+        variants share the same kinematic tree; only their collision/visual geometry and inertial differ. The
+        switch takes effect from the next `scene.step()`.
+
+        Parameters
+        ----------
+        variant : int
+            Index into the declared morph list (0 is the first/primary morph).
+        envs_idx : None | array_like, optional
+            The environments to switch. If None, all environments are switched. Defaults to None.
+        """
+        if not self._enable_heterogeneous:
+            gs.raise_exception("`set_morph_variant` requires a heterogeneous entity built with `morph=[...]`.")
+        n_variants = len(self._morph_heterogeneous) + 1
+        if not 0 <= variant < n_variants:
+            gs.raise_exception(f"`variant` must be in range [0, {n_variants}), got {variant}.")
+        self._solver.set_morph_variant(self, variant, envs_idx)
+
+    @gs.assert_built
     @tracked
     def set_dofs_velocity(self, velocity=None, dofs_idx_local=None, envs_idx=None, *, skip_forward=False):
         """

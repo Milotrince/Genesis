@@ -167,6 +167,86 @@ def test_aabb(tol):
     assert_allclose(aabb_size_sphere, vaabb_size_sphere, tol=1e-3)  # Allow small tolerance for decimation
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_runtime_variant_rebind(n_envs, show_viewer, tol):
+    BIG, SMALL = 0.10, 0.04
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.5, 0.5, 0.3),
+            camera_lookat=(0.0, 0.0, 0.05),
+        ),
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    het_obj = scene.add_entity(
+        morph=[
+            gs.morphs.Box(size=(BIG, BIG, BIG), pos=(0.0, 0.0, BIG / 2)),
+            gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(0.0, 0.0, SMALL / 2)),
+        ],
+    )
+    box = scene.add_entity(
+        gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(1.0, 0.0, SMALL / 2)),
+    )
+    scene.build(n_envs=n_envs)
+
+    geom_big, geom_small = het_obj.links[0].geoms
+
+    def masses():
+        return np.atleast_1d(tensor_to_array(het_obj.get_mass()))
+
+    def rest_z():
+        return np.atleast_1d(tensor_to_array(het_obj.get_pos())[..., 2])
+
+    # Inertial rebind is exact and needs no stepping: switching every env to one variant makes all masses equal to
+    # that variant's mass, and the two box sizes are genuinely distinct. After an all-envs switch the active
+    # geometry is that variant everywhere and the other variant is inactive.
+    het_obj.set_morph_variant(0)
+    mass_big = masses()
+    assert len(geom_small.active_envs_idx) == 0
+    assert len(geom_big.active_envs_idx) == max(scene.n_envs, 1)
+    het_obj.set_morph_variant(1)
+    mass_small = masses()
+    assert_allclose(mass_big, mass_big[0], tol=tol)
+    assert_allclose(mass_small, mass_small[0], tol=tol)
+    with pytest.raises(AssertionError):
+        assert_allclose(mass_big[0], mass_small[0], tol=tol)
+
+    # A subset rebind touches only its envs: from all-big, switching env 0 to the small variant leaves every other
+    # env at the big mass (a leak across the envs_idx boundary would flip them too). Only meaningful for a
+    # parallelized scene, where envs_idx selects a subset.
+    if scene.n_envs > 0:
+        het_obj.set_morph_variant(0)
+        het_obj.set_morph_variant(1, envs_idx=[0])
+        mass_mixed = masses()
+        assert_allclose(mass_mixed[0], mass_small[0], tol=tol)
+        assert_allclose(mass_mixed[1:], mass_big[0], tol=tol)
+        assert 0 in geom_small.active_envs_idx
+        assert 0 not in geom_big.active_envs_idx
+
+    # Collision geometry rebind is observable in the settled height: a box rests on its own half-extent, so the
+    # entity settles lower once bound to the small variant than to the big one.
+    het_obj.set_morph_variant(1)
+    het_obj.set_pos((0.0, 0.0, SMALL))
+    for _ in range(40):
+        scene.step()
+    assert_allclose(rest_z(), SMALL / 2, tol=2e-3)
+
+    het_obj.set_morph_variant(0)
+    het_obj.set_pos((0.0, 0.0, BIG))
+    for _ in range(40):
+        scene.step()
+    assert_allclose(rest_z(), BIG / 2, tol=2e-3)
+
+    # A homogeneous entity has no variants to switch, and an out-of-range index is rejected.
+    with pytest.raises(gs.GenesisException):
+        box.set_morph_variant(0)
+    with pytest.raises(gs.GenesisException):
+        het_obj.set_morph_variant(2)
+
+
 # 30s
 @pytest.mark.slow  # ~250s
 @pytest.mark.parametrize("backend", [gs.gpu])  # Grasping physics requires GPU
