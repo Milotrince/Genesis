@@ -555,14 +555,29 @@ class RasterizerContext:
 
                     # For heterogeneous simulation, filter envs based on geom's assigned environments
                     geom_envs_idx = self._get_geom_active_envs_idx(geom, self.rendered_envs_idx)
-                    if len(geom_envs_idx) == 0:
-                        continue
 
-                    # Mirror on_rigid: full per-env poses for env-masked variants, compacted otherwise.
-                    if len(geom_envs_idx) < len(self.rendered_envs_idx):
+                    node = self.rigid_nodes[geom.uid]
+                    primitive = node.mesh.primitives[0]
+
+                    # Mirror on_rigid: full per-env poses for env-masked variants, compacted otherwise. A runtime
+                    # variant rebind (set_morph_variant) can drive a geom to zero active envs, which still needs its
+                    # visibility mask cleared, so the empty case takes the masked (all-False) path here rather than
+                    # being skipped.
+                    is_env_masked = len(geom_envs_idx) < len(self.rendered_envs_idx)
+                    if is_env_masked:
                         geom_T = geoms_T[geom.idx][self.rendered_envs_idx]
                     else:
                         geom_T = geoms_T[geom.idx][geom_envs_idx]
+
+                    # The baked visibility mask (primitive.active_envs -> jit env_active) is only rebuilt when
+                    # meshes_updated is set. Recompute the mask in the same representation as the poses, and flag a
+                    # rebuild when it changed so set_primitive re-reads poses and active_envs together.
+                    active_envs = np.isin(self.rendered_envs_idx, geom_envs_idx) if is_env_masked else None
+                    if (primitive.active_envs is None) != (active_envs is None) or (
+                        active_envs is not None and not np.array_equal(primitive.active_envs, active_envs)
+                    ):
+                        primitive.active_envs = active_envs
+                        self._scene._meshes_updated = True
 
                     # Keep single-instance for z-axis normal planes (see on_rigid)
                     if isinstance(entity.main_morph, gs.morphs.Plane):
@@ -575,10 +590,12 @@ class RasterizerContext:
                         ):
                             geom_T = geom_T[:1]
 
-                    node = self.rigid_nodes[geom.uid]
                     node.mesh._bounds = None
-                    node.mesh.primitives[0].poses = geom_T
-                    self.jit.update_buffer(node, "model", geom_T.transpose((0, 2, 1)))
+                    primitive.poses = geom_T
+                    # A pending mesh rebuild re-reads primitive.poses, so the direct model-buffer push is redundant
+                    # and would fight a changed instance count on a masked<->compacted representation flip.
+                    if not self._scene.meshes_updated:
+                        self.jit.update_buffer(node, "model", geom_T.transpose((0, 2, 1)))
                     if isinstance(entity._morph, gs.morphs.Plane):
                         self.set_reflection_mat(geom_T)
 
