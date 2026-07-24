@@ -17,7 +17,7 @@ from genesis.vis.keybindings import Key, KeyAction, Keybind
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-n", "--n_envs", type=int, default=4)
+    parser.add_argument("-b", "--num_envs", type=int, default=4)
     parser.add_argument("-v", "--n_variants", type=int, default=3)
     parser.add_argument("-s", "--seed", type=int, default=0)
     parser.add_argument(
@@ -74,7 +74,7 @@ def main():
         )
     )
     # Every variant needs an env at build to get a render node.
-    n_envs = max(args.n_envs, len(variants))
+    n_envs = max(args.num_envs, len(variants))
     scene.build(
         n_envs=n_envs,
         env_spacing=(1.0, 1.0),
