@@ -54,6 +54,10 @@ def main():
                 gs.morphs.Cylinder(radius=rng.uniform(0.07, 0.13), height=rng.uniform(0.15, 0.35), pos=(0.0, 0.0, 0.3))
             )
 
+    # Give each variant its own friction and color to show off per-variant materials and surfaces.
+    materials = [gs.materials.Rigid(friction=rng.uniform(0.1, 1.5)) for _ in variants]
+    surfaces = [gs.surfaces.Default(color=(*rng.uniform(0.3, 1.0, size=3).tolist(), 1.0)) for _ in variants]
+
     scene = gs.Scene(
         show_viewer=True,
         viewer_options=gs.options.ViewerOptions(
@@ -66,6 +70,8 @@ def main():
     )
     het = scene.add_heterogeneous_entity(
         morphs=variants,
+        materials=materials,
+        surfaces=surfaces,
     )
     # Mouse-drag to sanity-check collision and mass; spring force works for free and anchored bodies alike.
     scene.viewer.add_plugin(

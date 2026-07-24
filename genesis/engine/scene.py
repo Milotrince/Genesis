@@ -452,6 +452,10 @@ class Scene(RBC):
             surfaces = [surfaces] * n_variants
         if not all(isinstance(m, (gs.materials.Rigid, gs.materials.Kinematic)) for m in materials):
             gs.raise_exception("Heterogeneous entities are only supported for Rigid and Kinematic materials.")
+        if not all(type(m) is type(materials[0]) for m in materials):
+            gs.raise_exception(
+                "All variant materials must be the same type; a heterogeneous entity has one control mode."
+            )
 
         for morph, material, surface in zip(morphs, materials, surfaces):
             self._resolve_entity_options(morph, (morph,), material, surface, vis_mode)
