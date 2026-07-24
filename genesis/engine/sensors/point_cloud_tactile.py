@@ -2004,6 +2004,9 @@ class ElastomerTaxelSensor(
         self._shared_metadata.elastomer_geom_active_envs_mask = concat_with_tensor(
             self._shared_metadata.elastomer_geom_active_envs_mask, elastomer_geom_active_envs_mask
         )
+        # The elastomer geom indices and masks above are snapshot from the attached link's build-time variant, so
+        # block a runtime switch of its entity too (the tracked-link block comes from the point-cloud mixin build).
+        self._block_variant_switch_on_tracked_heterogeneous(np.asarray((self._link.idx,), dtype=gs.np_int))
         self._shared_metadata.sensor_elastomer_geom_start = concat_with_tensor(
             self._shared_metadata.sensor_elastomer_geom_start, elastomer_geom_start_row, expand=(1,)
         )

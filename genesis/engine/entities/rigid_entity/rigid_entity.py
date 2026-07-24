@@ -2107,10 +2107,11 @@ class KinematicEntity(Entity):
                 "`set_entity_variant` is not supported in a differentiable simulation (`requires_grad=True`): the "
                 "variant change is not checkpointed, so backward replay would use the wrong dynamics."
             )
-        if self._scene.visualizer.batch_renderer is not None:
+        if self._scene.visualizer.batch_renderer is not None or self._scene.visualizer.raytracer is not None:
             gs.raise_exception(
-                "`set_entity_variant` is not supported with the batch renderer, whose per-variant visibility is "
-                "fixed at build time. Use the interactive viewer or a rasterizer camera for runtime switching."
+                "`set_entity_variant` is not supported with the batch renderer or ray tracer, whose per-variant "
+                "visibility is fixed at build time. Use the interactive viewer or a rasterizer camera for runtime "
+                "switching."
             )
         if self._variant_switch_blockers:
             blocker = type(self._variant_switch_blockers[0]).__name__
