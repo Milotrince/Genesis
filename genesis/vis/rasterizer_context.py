@@ -560,7 +560,7 @@ class RasterizerContext:
                     primitive = node.mesh.primitives[0]
 
                     # Mirror on_rigid: full per-env poses for env-masked variants, compacted otherwise. A runtime
-                    # variant rebind (set_morph_variant) can drive a geom to zero active envs, which still needs its
+                    # variant rebind (set_entity_variant) can drive a geom to zero active envs, which still needs its
                     # visibility mask cleared, so the empty case takes the masked (all-False) path here rather than
                     # being skipped.
                     is_env_masked = len(geom_envs_idx) < len(self.rendered_envs_idx)

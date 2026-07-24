@@ -1,7 +1,7 @@
 """Interactive demo of runtime heterogeneous variant switching.
 
 A single entity is built from a list of morphs (randomly sized boxes, spheres and cylinders); each environment shows
-one of them. Press SPACE to randomize which variant every environment shows, live, via `entity.set_morph_variant`.
+one of them. Press SPACE to randomize which variant every environment shows, live, via `entity.set_entity_variant`.
 Both the physics and the rendered geometry follow the switch.
 """
 
@@ -91,7 +91,7 @@ def main():
         # Keybind callbacks run on the viewer thread; apply the scene mutation here on the stepping thread.
         if pending_randomize:
             pending_randomize = False
-            het.set_morph_variant(rng.integers(0, n_variants, size=n_envs))
+            het.set_entity_variant(rng.integers(0, n_variants, size=n_envs))
             # Lift and drop the fresh geometry so the switch reads clearly instead of popping out of the ground.
             het.set_pos((0.0, 0.0, 0.3))
             het.set_dofs_velocity(np.zeros(6))

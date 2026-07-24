@@ -996,7 +996,7 @@ class RigidSolver(KinematicSolver):
                 continue
             variant_idx = _balanced_variant_mapping(len(link._variant_vgeom_ranges), self._B)
             self._bind_heterogeneous_variant(link, variant_idx, envs_idx)
-            # Track the per-env active variant for get_morph_variant; all of an entity's links share one mapping.
+            # Track the per-env active variant for get_entity_variant; all of an entity's links share one mapping.
             link.entity._variant_idx_per_env = variant_idx
 
     def _bind_heterogeneous_variant(self, link, variant_idx, envs_idx):
@@ -1004,7 +1004,7 @@ class RigidSolver(KinematicSolver):
         Bind link's per-environment geom/vgeom ranges and inertial to the variants in variant_idx, for envs_idx.
 
         variant_idx is aligned with envs_idx (one target variant index per selected env). Shared by build-time
-        dispatch (envs_idx spans all envs) and runtime `set_morph_variant` (a subset). Per-variant inertial is
+        dispatch (envs_idx spans all envs) and runtime `set_entity_variant` (a subset). Per-variant inertial is
         pre-computed during link._build() from the variant's geoms.
         """
         geom_starts = np.array([link._variant_geom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
@@ -1047,7 +1047,7 @@ class RigidSolver(KinematicSolver):
             geom.active_envs_mask[envs_idx] = active_envs
             (geom.active_envs_idx,) = np.where(tensor_to_array(geom.active_envs_mask))
 
-    def set_morph_variant(self, entity, variant_idx, envs_idx):
+    def set_entity_variant(self, entity, variant_idx, envs_idx):
         """
         Rebind a heterogeneous entity's active morph variant for the given envs, at runtime.
 
