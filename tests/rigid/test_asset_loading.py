@@ -48,30 +48,43 @@ def test_depth_first_link_ordering(xml_path, model_name, show_viewer):
 
 
 @pytest.mark.required
-@pytest.mark.parametrize("format", ["mjcf", "urdf"])
-def test_build_articulated_chain(format):
-    N_LINKS = 3
-    thin = build_articulated_chain(n_links=N_LINKS, link_radius=0.03, link_length=0.2, format=format)
-    thick = build_articulated_chain(n_links=N_LINKS, link_radius=0.06, link_length=0.2, format=format)
+def test_build_articulated_chain(show_viewer, tol):
+    L, R = 0.2, 0.04
+    xml_2link_mjcf = build_articulated_chain(n_links=2, link_radius=R, link_length=L, format="mjcf")
+    xml_2link_urdf = build_articulated_chain(n_links=2, link_radius=R, link_length=L, format="urdf")
+    xml_3link_mjcf = build_articulated_chain(n_links=3, link_radius=R, link_length=L, format="mjcf")
 
-    scene = gs.Scene(show_viewer=False)
-    if format == "mjcf":
-        entity_thin = scene.add_entity(gs.morphs.MJCF(file=thin))
-        entity_thick = scene.add_entity(gs.morphs.MJCF(file=thick))
-    else:
-        entity_thin = scene.add_entity(gs.morphs.URDF(file=thin, fixed=True))
-        entity_thick = scene.add_entity(gs.morphs.URDF(file=thick, fixed=True))
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, 2.0, 0.5),
+            camera_lookat=(1.0, 0.0, -0.3),
+        ),
+    )
+    arm_mjcf = scene.add_entity(gs.morphs.MJCF(file=xml_2link_mjcf))
+    # Genesis floats a URDF root and gives its joints a default rotor armature; override both so the URDF arm is
+    # the same fixed-base, armature-free system as the MJCF one.
+    arm_urdf = scene.add_entity(
+        gs.morphs.URDF(file=xml_2link_urdf, pos=(1.0, 0.0, 0.0), fixed=True, default_armature=0.0)
+    )
+    arm_3link = scene.add_entity(gs.morphs.MJCF(file=xml_3link_mjcf, pos=(2.0, 0.0, 0.0)))
     scene.build(n_envs=0)
 
-    # A fixed-base chain has exactly one hinge DOF per link in either format, and a thicker link is heavier.
-    assert entity_thin.n_dofs == N_LINKS
-    assert entity_thick.n_dofs == N_LINKS
-    assert tensor_to_array(entity_thick.get_mass()) > tensor_to_array(entity_thin.get_mass())
+    # The URDF and MJCF forms load to the same links: one hinge DOF per link and equal total mass.
+    assert arm_mjcf.n_dofs == 2
+    assert arm_urdf.n_dofs == 2
+    assert_allclose(arm_urdf.get_mass(), arm_mjcf.get_mass(), tol=tol)
+    # A longer chain is heavier.
+    assert arm_3link.get_mass() > arm_mjcf.get_mass()
 
-    # The generated model is a valid dynamic system: it swings under gravity without diverging.
-    for _ in range(20):
+    # Start the 2-link arm horizontal (first hinge at 90 deg); under gravity it swings down past the fixed base,
+    # so its lowest point drops below -1.5*L, only reachable if the second link also swings down.
+    arm_mjcf.set_dofs_position([np.pi / 2, 0.0], zero_velocity=True)
+    lowest_z = tensor_to_array(arm_mjcf.get_AABB())[0, 2]
+    for _ in range(60):
         scene.step()
-    assert np.isfinite(tensor_to_array(entity_thin.get_dofs_position())).all()
+        lowest_z = min(lowest_z, tensor_to_array(arm_mjcf.get_AABB())[0, 2])
+    assert lowest_z < -1.5 * L
 
 
 @pytest.mark.slow  # ~250s
