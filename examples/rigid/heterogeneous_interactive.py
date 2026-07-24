@@ -17,11 +17,11 @@ from genesis.vis.keybindings import Key, KeyAction, Keybind
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-b", "--num_envs", type=int, default=4)
-    parser.add_argument("-v", "--n_variants", type=int, default=3)
-    parser.add_argument("-s", "--seed", type=int, default=0)
+    parser.add_argument("-b", "--num-envs", type=int, default=4, help="Number of parallel environments")
+    parser.add_argument("--n-variants", type=int, default=3, help="Number of morph variants to build")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument(
-        "-a", "--articulated", action="store_true", help="Use 2-link pendulum chains instead of primitive shapes"
+        "--articulated", action="store_true", help="Use 2-link pendulum chains instead of primitive shapes"
     )
     args = parser.parse_args()
 
