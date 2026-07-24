@@ -36,14 +36,15 @@ def main():
     variants = []
     for i in range(args.n_variants):
         if args.articulated:
-            # Fixed-base 2-link pendulum; each variant gets a distinct link radius and length, and the anchor is
-            # high enough that the longest sampled chain still clears the ground.
+            # Fixed-base 2-link pendulum. Only the link radius varies across variants: the heterogeneous rebind
+            # swaps geometry and inertial but not the joint anchors, so a different link length would leave the
+            # second link attached at the primary variant's position.
             variants.append(
                 gs.morphs.MJCF(
                     file=build_articulated_chain(
                         n_links=2,
-                        link_radius=rng.uniform(0.02, 0.06),
-                        link_length=rng.uniform(0.12, 0.32),
+                        link_radius=rng.uniform(0.015, 0.07),
+                        link_length=0.25,
                     ),
                     pos=(0.0, 0.0, 0.8),
                 )
