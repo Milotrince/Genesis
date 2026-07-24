@@ -2118,6 +2118,11 @@ class KinematicEntity(Entity):
                 f"`set_entity_variant` is not supported: a {blocker} samples this entity's geometry at build and "
                 "would read stale values after a switch."
             )
+        if self._morph.enable_custom_vverts:
+            gs.raise_exception(
+                "`set_entity_variant` is not supported with `enable_custom_vverts=True`: the custom visual vertex "
+                "buffer is tied to the build-time variant and cannot follow a switch."
+            )
         n_variants = len(self._morph_heterogeneous) + 1
         variant_idx = np.atleast_1d(np.asarray(variant, dtype=gs.np_int))
         if ((variant_idx < 0) | (variant_idx >= n_variants)).any():

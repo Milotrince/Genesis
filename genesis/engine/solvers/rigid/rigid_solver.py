@@ -1025,7 +1025,8 @@ class RigidSolver(KinematicSolver):
         Recomputes the rest-state constraint caches (which depend on link mass/inertia a variant can change) for
         the rebound envs, preserving the running qpos, then re-poses the newly-active geoms (including fixed ones)
         and rebuilds the broadphase sort buffer, which the pose-only cache reset done by set_qpos leaves stale
-        after a geom-set change.
+        after a geom-set change. Also refreshes the hibernation DOF lengths, whose rotational radius follows the
+        variant's body extent.
         """
         # The batched qpos/inertia caches reject an explicit envs_idx on a non-parallelized scene.
         envs_idx_batched = envs_idx if self.n_envs > 0 else None
@@ -1035,6 +1036,8 @@ class RigidSolver(KinematicSolver):
         self.set_qpos(qpos_cur, qs_idx=qs_idx, envs_idx=envs_idx_batched)
         self._func_update_geoms(envs_idx, force_update_fixed_geoms=True)
         self.collider.reset(envs_idx, cache_only=False)
+        # Reads the per-geom active-env masks the rebind just updated; a no-op unless hibernation is on.
+        self._init_dof_length()
 
     def _init_vert_fields(self):
         if self.n_verts > 0:

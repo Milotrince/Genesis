@@ -289,6 +289,20 @@ class KinematicSolver(Solver):
             np.isclose(gu.quat_to_xyz(links_offset_quat), 0.0, atol=gs.EPS), axis=2
         ).all(axis=0)
         self._links_offset_pos_is_identity = np.all(np.isclose(links_offset_pos, 0.0, atol=gs.EPS), axis=2).all(axis=0)
+        # A heterogeneous entity can switch to any variant at runtime, so its base-link offset counts as identity only
+        # when every variant's offset is; the arrays above hold just the build-assigned subset (and none when the env
+        # count is below the variant count). set_entity_variant rebinds the values; this keeps the gate conservative.
+        for entity in self._entities:
+            if entity._variant_offset_pos is None:
+                continue
+            base_link_idx = entity.base_link_idx
+            self._links_offset_pos_is_identity[base_link_idx] &= all(
+                np.allclose(offset_pos, 0.0, atol=gs.EPS) for offset_pos in entity._variant_offset_pos
+            )
+            self._links_offset_quat_is_identity[base_link_idx] &= all(
+                np.allclose(gu.quat_to_xyz(offset_quat), 0.0, atol=gs.EPS)
+                for offset_quat in entity._variant_offset_quat
+            )
         self._links_offset_pos = self._links_offset_quat = None
         if not (self._links_offset_pos_is_identity.all() and self._links_offset_quat_is_identity.all()):
             self._links_offset_pos = torch.from_numpy(links_offset_pos).to(device=gs.device, dtype=gs.tc_float)
@@ -555,6 +569,24 @@ class KinematicSolver(Solver):
                 continue
             self._bind_heterogeneous_variant(link, variant_idx, envs_idx)
         entity._variant_idx_per_env[tensor_to_array(envs_idx)] = variant_idx
+        # Rebind the base link's per-env relative-pose offset to each newly-active variant: a variant with a
+        # different morph offset or inertial-alignment frame has a different user<-world frame, and relative
+        # get/set would otherwise keep the outgoing variant's. Only divergent-offset entities have per-env storage
+        # (self._B rows); an offset-invariant entity has no per-env row to update.
+        if (
+            self._links_offset_pos is not None
+            and self._links_offset_pos.shape[0] == self._B
+            and entity._variant_offset_pos is not None
+        ):
+            base_link_idx = entity.base_link_idx
+            offset_pos = np.stack([entity._variant_offset_pos[v] for v in variant_idx])
+            offset_quat = np.stack([entity._variant_offset_quat[v] for v in variant_idx])
+            self._links_offset_pos[envs_idx, base_link_idx] = torch.as_tensor(
+                offset_pos, dtype=gs.tc_float, device=gs.device
+            )
+            self._links_offset_quat[envs_idx, base_link_idx] = torch.as_tensor(
+                offset_quat, dtype=gs.tc_float, device=gs.device
+            )
         self._on_variant_rebound(envs_idx)
 
     def _on_variant_rebound(self, envs_idx):

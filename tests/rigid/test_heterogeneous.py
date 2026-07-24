@@ -300,6 +300,62 @@ def test_runtime_variant_rebind(n_envs, show_viewer, tol):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_variant_switch_rebinds_relative_pose_offset(n_envs, show_viewer, tol):
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, 2.0, 1.5),
+            camera_lookat=(0.0, 0.0, 0.5),
+        ),
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    het = scene.add_entity(
+        morph=[
+            gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5), offset_pos=(0.0, 0.0, 0.0)),
+            gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5), offset_pos=(0.2, 0.0, 0.0)),
+        ],
+    )
+    scene.build(n_envs=n_envs)
+
+    het.set_entity_variant(0)
+    rel_v0 = np.atleast_2d(tensor_to_array(het.get_pos(relative=True)))
+    abs_v0 = np.atleast_2d(tensor_to_array(het.get_pos(relative=False)))
+    het.set_entity_variant(1)
+    rel_v1 = np.atleast_2d(tensor_to_array(het.get_pos(relative=True)))
+    abs_v1 = np.atleast_2d(tensor_to_array(het.get_pos(relative=False)))
+    # The switch preserves the world pose but rebinds the relative frame to the new variant's morph offset (0.2 in x),
+    # so the relative position shifts while the absolute one does not; a stale offset would leave both unchanged.
+    assert_allclose(abs_v0, abs_v1, tol=tol)
+    assert_allclose(np.abs(rel_v0 - rel_v1)[..., 0], 0.2, tol=tol)
+
+
+@pytest.mark.required
+def test_variant_switch_rejected_with_custom_vverts(show_viewer):
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, 2.0, 1.5),
+            camera_lookat=(0.0, 0.0, 0.2),
+        ),
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    het = scene.add_entity(
+        morph=[
+            gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3), enable_custom_vverts=True),
+            gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3), enable_custom_vverts=True),
+        ],
+    )
+    scene.build(n_envs=2)
+    with pytest.raises(gs.GenesisException):
+        het.set_entity_variant(1)
+
+
+@pytest.mark.required
 def test_variant_switch_rejected_when_differentiable(show_viewer):
     scene = gs.Scene(
         show_viewer=show_viewer,

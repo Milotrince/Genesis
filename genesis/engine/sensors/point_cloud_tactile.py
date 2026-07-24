@@ -635,13 +635,8 @@ class PointCloudTactileSensorMixin(ProbeSensorMixin[PointCloudTactileSensorMetad
 
         # TODO: Add support for tactile sensors following a runtime variant switch (subscribe and rebuild the sampled
         # point cloud). Until then, the point cloud above is sampled from the tracked geometry as it stands at build,
-        # so a switch of a tracked heterogeneous entity would silently invalidate it; register to block that switch
-        # (see KinematicEntity.set_entity_variant).
-        solver = self._shared_metadata.solver
-        for link_idx in np.asarray(self._options.track_link_idx, dtype=gs.np_int):
-            entity = solver.links[int(link_idx)].entity
-            if entity._enable_heterogeneous and self not in entity._variant_switch_blockers:
-                entity._variant_switch_blockers.append(self)
+        # so block a switch of any tracked heterogeneous entity rather than silently reading the outgoing variant.
+        self._block_variant_switch_on_tracked_heterogeneous(np.asarray(self._options.track_link_idx, dtype=gs.np_int))
 
     def _draw_debug_probes(
         self, context: "RasterizerContext", color_groups_fn: Callable[[list[int] | None], list[tuple]] | None = None
