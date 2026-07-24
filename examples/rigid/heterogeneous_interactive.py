@@ -21,9 +21,6 @@ def main():
     parser.add_argument("-v", "--n_variants", type=int, default=3)
     parser.add_argument("-s", "--seed", type=int, default=0)
     parser.add_argument(
-        "-f", "--use_force", action="store_true", help="Drag objects with a spring force instead of setting position"
-    )
-    parser.add_argument(
         "-a", "--articulated", action="store_true", help="Use 2-link pendulum chains instead of primitive shapes"
     )
     args = parser.parse_args()
@@ -72,11 +69,11 @@ def main():
     het = scene.add_entity(
         morph=variants,
     )
-    # Mouse-drag to sanity-check the switched-in geometry. A hinge-anchored articulated chain has no free base to
-    # reposition, so it must be dragged with spring force rather than by setting position.
+    # Mouse-drag any object to sanity-check its collision and mass. Spring force works for both the free-floating
+    # primitives and the hinge-anchored chains (whose base cannot be repositioned).
     scene.viewer.add_plugin(
         gs.vis.viewer_plugins.MouseInteractionPlugin(
-            use_force=args.use_force or args.articulated,
+            use_force=True,
             color=(0.1, 0.6, 0.8, 0.6),
         )
     )
