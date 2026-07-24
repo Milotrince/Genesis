@@ -633,9 +633,10 @@ class PointCloudTactileSensorMixin(ProbeSensorMixin[PointCloudTactileSensorMetad
         # row into the just-grown pc_pos_link.
         self._shared_metadata.pc_bvh.append_sensor(pc_start_row=pc_start_row, idx_cat=idx_cat, pos_cat=pos_cat)
 
-        # The point cloud above is sampled from the tracked geometry as it stands now; a runtime variant switch of a
-        # tracked heterogeneous entity would silently invalidate it. Register to block that switch (see
-        # KinematicEntity.set_entity_variant).
+        # TODO: Add support for tactile sensors following a runtime variant switch (subscribe and rebuild the sampled
+        # point cloud). Until then, the point cloud above is sampled from the tracked geometry as it stands at build,
+        # so a switch of a tracked heterogeneous entity would silently invalidate it; register to block that switch
+        # (see KinematicEntity.set_entity_variant).
         solver = self._shared_metadata.solver
         for link_idx in np.asarray(self._options.track_link_idx, dtype=gs.np_int):
             entity = solver.links[int(link_idx)].entity
