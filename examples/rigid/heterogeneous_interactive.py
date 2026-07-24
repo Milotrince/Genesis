@@ -1,8 +1,8 @@
 """Interactive demo of runtime heterogeneous variant switching.
 
-A single entity is built from a list of morphs (randomly sized boxes, spheres and cylinders); each environment shows
-one of them. Press SPACE to randomize which variant every environment shows, live, via `entity.set_entity_variant`.
-Both the physics and the rendered geometry follow the switch.
+A single entity is built from a list of morphs -- randomly sized boxes/spheres/cylinders, or (with --articulated)
+2-link pendulum chains -- and each environment shows one of them. Press SPACE to randomize which variant every
+environment shows, live, via `entity.set_entity_variant`; both the physics and the rendered geometry follow.
 """
 
 import argparse
@@ -11,6 +11,7 @@ import os
 import numpy as np
 
 import genesis as gs
+from genesis.assets.procedural import build_articulated_chain
 from genesis.vis.keybindings import Key, KeyAction, Keybind
 
 
@@ -22,16 +23,32 @@ def main():
     parser.add_argument(
         "-f", "--use_force", action="store_true", help="Drag objects with a spring force instead of setting position"
     )
+    parser.add_argument(
+        "-a", "--articulated", action="store_true", help="Use 2-link pendulum chains instead of primitive shapes"
+    )
     args = parser.parse_args()
 
     gs.init(backend=gs.gpu)
 
     rng = np.random.default_rng(args.seed)
 
-    # A box, sphere and cylinder in rotation, each at a random size.
+    # A box, sphere and cylinder in rotation (or 2-link chains under --articulated), each at a random size.
     variants = []
     for i in range(args.n_variants):
-        if i % 3 == 0:
+        if args.articulated:
+            # Fixed-base 2-link pendulum; each variant gets a distinct link radius and length, and the anchor is
+            # high enough that the longest sampled chain still clears the ground.
+            variants.append(
+                gs.morphs.MJCF(
+                    file=build_articulated_chain(
+                        n_links=2,
+                        link_radius=rng.uniform(0.02, 0.06),
+                        link_length=rng.uniform(0.12, 0.32),
+                    ),
+                    pos=(0.0, 0.0, 0.8),
+                )
+            )
+        elif i % 3 == 0:
             side = rng.uniform(0.12, 0.28)
             variants.append(gs.morphs.Box(size=(side, side, side), pos=(0.0, 0.0, 0.3)))
         elif i % 3 == 1:
@@ -45,7 +62,7 @@ def main():
         show_viewer=True,
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(4.0, 4.0, 3.0),
-            camera_lookat=(0.0, 0.0, 0.1),
+            camera_lookat=(0.0, 0.0, 0.4 if args.articulated else 0.1),
         ),
     )
     scene.add_entity(
@@ -91,9 +108,13 @@ def main():
         if pending_randomize:
             pending_randomize = False
             het.set_entity_variant(rng.integers(0, n_variants, size=n_envs))
-            # Drop the fresh geometry so the switch reads clearly.
-            het.set_pos((0.0, 0.0, 0.3))
-            het.set_dofs_velocity(np.zeros(6))
+            if args.articulated:
+                # Kick the hinges so the fresh chain swings.
+                het.set_dofs_velocity(rng.uniform(-5.0, 5.0, size=het.n_dofs))
+            else:
+                # Drop the fresh geometry so the switch reads clearly.
+                het.set_pos((0.0, 0.0, 0.3))
+                het.set_dofs_velocity(np.zeros(6))
         scene.step()
 
         if "PYTEST_VERSION" in os.environ:
