@@ -101,7 +101,6 @@ def main():
         scene.viewer.add_plugin(
             gs.vis.viewer_plugins.MouseInteractionPlugin(
                 use_force=True,
-                color=(0.1, 0.6, 0.8, 0.6),
             )
         )
 
