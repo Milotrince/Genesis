@@ -72,10 +72,11 @@ def main():
     het = scene.add_entity(
         morph=variants,
     )
-    # Mouse-drag to sanity-check the switched-in geometry's collision and mass.
+    # Mouse-drag to sanity-check the switched-in geometry. A hinge-anchored articulated chain has no free base to
+    # reposition, so it must be dragged with spring force rather than by setting position.
     scene.viewer.add_plugin(
         gs.vis.viewer_plugins.MouseInteractionPlugin(
-            use_force=args.use_force,
+            use_force=args.use_force or args.articulated,
             color=(0.1, 0.6, 0.8, 0.6),
         )
     )
