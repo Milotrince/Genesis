@@ -205,6 +205,13 @@ def test_runtime_variant_rebind(n_envs, show_viewer, tol):
     box = scene.add_entity(
         gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(2.0, 0.0, SMALL / 2)),
     )
+    het_kinematic = scene.add_entity(
+        morph=[
+            gs.morphs.Box(size=(BIG, BIG, BIG), pos=(3.0, 0.0, 1.0)),
+            gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(3.0, 0.0, 1.0)),
+        ],
+        material=gs.materials.Kinematic(),
+    )
     scene.build(n_envs=n_envs)
 
     geom_big, geom_small = het_box.links[0].geoms
@@ -219,6 +226,7 @@ def test_runtime_variant_rebind(n_envs, show_viewer, tol):
     # Switching all envs to one variant makes every mass that variant's; the no-step AABB checks immediate re-posing.
     het_box.set_entity_variant(0)
     mass_big = box_masses()
+    invweight_big = tensor_to_array(het_box.get_links_invweight())
     assert len(geom_small.active_envs_idx) == 0
     assert len(geom_big.active_envs_idx) == max(scene.n_envs, 1)
     # get_AABB's per-env heterogeneous path requires a parallelized scene.
@@ -226,12 +234,15 @@ def test_runtime_variant_rebind(n_envs, show_viewer, tol):
         assert_allclose(box_aabb_size(), BIG, tol=tol)
     het_box.set_entity_variant(1)
     mass_small = box_masses()
+    invweight_small = tensor_to_array(het_box.get_links_invweight())
     if scene.n_envs > 0:
         assert_allclose(box_aabb_size(), SMALL, tol=tol)
     assert_allclose(mass_big, mass_big[0], tol=tol)
     assert_allclose(mass_small, mass_small[0], tol=tol)
     with pytest.raises(AssertionError):
         assert_allclose(mass_big[0], mass_small[0], tol=tol)
+    # The lighter variant has larger inverse weight; a stale build-time inertia cache would leave these equal.
+    assert (invweight_small > invweight_big).all()
 
     # Per-env control (parallelized only): subset rebind and array-valued variant each set envs independently.
     if scene.n_envs > 1:
@@ -267,6 +278,16 @@ def test_runtime_variant_rebind(n_envs, show_viewer, tol):
         scene.step()
     rest_z = np.atleast_1d(tensor_to_array(het_box.get_pos())[..., 2])
     assert_allclose(rest_z, SMALL / 2, tol=2e-3)
+
+    # A Kinematic-material heterogeneous entity rebinds visually through the base solver (no collision/inertia).
+    kin_vgeom_big, kin_vgeom_small = het_kinematic.links[0].vgeoms
+    het_kinematic.set_entity_variant(1)
+    assert (het_kinematic.get_entity_variant() == 1).all()
+    assert len(kin_vgeom_big.active_envs_idx) == 0
+    assert len(kin_vgeom_small.active_envs_idx) == max(scene.n_envs, 1)
+    het_kinematic.set_entity_variant(0)
+    assert (het_kinematic.get_entity_variant() == 0).all()
+    assert len(kin_vgeom_small.active_envs_idx) == 0
 
     # A homogeneous entity has no variants to switch or query, and an out-of-range index is rejected.
     with pytest.raises(gs.GenesisException):

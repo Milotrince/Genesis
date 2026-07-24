@@ -980,33 +980,18 @@ class RigidSolver(KinematicSolver):
 
         self.rigid_info.gravity.from_numpy(self.gravity)
 
-    def _dispatch_heterogeneous_vgeoms(self):
-        """
-        Dispatch per-environment geom/vgeom ranges and inertial properties for heterogeneous links.
-
-        Extends the base class (which handles vgeom-only dispatch) to also dispatch collision geom
-        ranges and per-variant inertial properties. Per-variant inertial is pre-computed during
-        link._build() from actual geom objects, using analytic formulas for primitives.
-        """
-        from genesis.engine.solvers.kinematic_solver import _balanced_variant_mapping
-
-        envs_idx = torch.arange(self._B, device=gs.device)
-        for link in self.links:
-            if link._variant_vgeom_ranges is None:
-                continue
-            variant_idx = _balanced_variant_mapping(len(link._variant_vgeom_ranges), self._B)
-            self._bind_heterogeneous_variant(link, variant_idx, envs_idx)
-            # Track the per-env active variant for get_entity_variant; all of an entity's links share one mapping.
-            link.entity._variant_idx_per_env = variant_idx
-
     def _bind_heterogeneous_variant(self, link, variant_idx, envs_idx):
         """
-        Bind link's per-environment geom/vgeom ranges and inertial to the variants in variant_idx, for envs_idx.
+        Extend the base vgeom bind with link's per-env collision-geom ranges and per-variant inertial.
 
-        variant_idx is aligned with envs_idx (one target variant index per selected env). Shared by build-time
-        dispatch (envs_idx spans all envs) and runtime `set_entity_variant` (a subset). Per-variant inertial is
-        pre-computed during link._build() from the variant's geoms.
+        variant_idx is aligned with envs_idx (one target variant index per selected env). Per-variant inertial is
+        pre-computed during link._build() from the variant's geoms. A link with visual-only variants (no collision
+        geoms) falls back to the base vgeom-only bind.
         """
+        if link._variant_geom_ranges is None:
+            super()._bind_heterogeneous_variant(link, variant_idx, envs_idx)
+            return
+
         geom_starts = np.array([link._variant_geom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
         geom_ends = np.array([link._variant_geom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
         vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
@@ -1033,42 +1018,21 @@ class RigidSolver(KinematicSolver):
         self._set_variant_active_envs(link.geoms, geom_starts, geom_ends, envs_idx)
         self._set_variant_active_envs(link.vgeoms, vgeom_starts, vgeom_ends, envs_idx)
 
-    def _set_variant_active_envs(self, geoms, starts, ends, envs_idx):
+    def _on_variant_rebound(self, envs_idx):
         """
-        Refresh each (v)geom's per-env active mask/idx for the rebound envs; starts/ends are aligned with envs_idx.
+        Refresh the collider and inertia-dependent caches after a runtime variant rebind.
 
-        A (v)geom is active in a rebound env when its global index falls in that env's newly-bound range. Only the
-        rebound entries of the full-B mask are overwritten, so a subset rebind leaves the other envs untouched.
+        Recomputes the rest-state constraint caches (which depend on link mass/inertia a variant can change) for
+        the rebound envs, preserving the running qpos, then re-poses the newly-active geoms (including fixed ones)
+        and rebuilds the broadphase sort buffer, which the pose-only cache reset done by set_qpos leaves stale
+        after a geom-set change.
         """
-        for geom in geoms:
-            active_envs = torch.as_tensor((starts <= geom.idx) & (geom.idx < ends), device=gs.device)
-            if geom.active_envs_mask is None:
-                geom.active_envs_mask = torch.zeros(self._B, dtype=torch.bool, device=gs.device)
-            geom.active_envs_mask[envs_idx] = active_envs
-            (geom.active_envs_idx,) = np.where(tensor_to_array(geom.active_envs_mask))
-
-    def set_entity_variant(self, entity, variant_idx, envs_idx):
-        """
-        Rebind a heterogeneous entity's active morph variant for the given envs, at runtime.
-
-        `variant_idx` is a 1D array of variant indices: a single entry (applied to every selected env) or one per
-        selected env. Reuses the build-time variant bind, then re-poses the newly-active geoms so pose/AABB
-        queries are correct before the next step, and forces a full collider reset: a geom-set change invalidates
-        the broadphase sort buffer, which the pose-only cache reset (used by set_qpos) would leave stale.
-        """
-        envs_idx = self._scene._sanitize_envs_idx(envs_idx)
-        if len(variant_idx) == 1:
-            variant_idx = np.broadcast_to(variant_idx, (len(envs_idx),))
-        elif len(variant_idx) != len(envs_idx):
-            gs.raise_exception(
-                f"`variant` has length {len(variant_idx)}; expected a scalar or one entry per selected "
-                f"environment ({len(envs_idx)})."
-            )
-        for link in entity.links:
-            if link._variant_geom_ranges is None:
-                continue
-            self._bind_heterogeneous_variant(link, variant_idx, envs_idx)
-        entity._variant_idx_per_env[tensor_to_array(envs_idx)] = variant_idx
+        # The batched qpos/inertia caches reject an explicit envs_idx on a non-parallelized scene.
+        envs_idx_batched = envs_idx if self.n_envs > 0 else None
+        qs_idx = torch.arange(self.n_qs, dtype=gs.tc_int, device=gs.device)
+        qpos_cur = self.get_qpos(qs_idx=qs_idx, envs_idx=envs_idx_batched)
+        self._init_invweight_and_meaninertia(envs_idx=envs_idx_batched, force_update=True)
+        self.set_qpos(qpos_cur, qs_idx=qs_idx, envs_idx=envs_idx_batched)
         self._func_update_geoms(envs_idx, force_update_fixed_geoms=True)
         self.collider.reset(envs_idx, cache_only=False)
 
