@@ -560,18 +560,15 @@ class RasterizerContext:
                     primitive = node.mesh.primitives[0]
 
                     # Mirror on_rigid: full per-env poses for env-masked variants, compacted otherwise. A runtime
-                    # variant rebind (set_entity_variant) can drive a geom to zero active envs, which still needs its
-                    # visibility mask cleared, so the empty case takes the masked (all-False) path here rather than
-                    # being skipped.
+                    # rebind can drive a geom to zero active envs, so the empty case takes the masked path to clear it.
                     is_env_masked = len(geom_envs_idx) < len(self.rendered_envs_idx)
                     if is_env_masked:
                         geom_T = geoms_T[geom.idx][self.rendered_envs_idx]
                     else:
                         geom_T = geoms_T[geom.idx][geom_envs_idx]
 
-                    # The baked visibility mask (primitive.active_envs -> jit env_active) is only rebuilt when
-                    # meshes_updated is set. Recompute the mask in the same representation as the poses, and flag a
-                    # rebuild when it changed so set_primitive re-reads poses and active_envs together.
+                    # primitive.active_envs -> jit env_active is only rebuilt on meshes_updated. Recompute it in the
+                    # poses' representation and flag a rebuild when it changed, so set_primitive re-reads both.
                     active_envs = np.isin(self.rendered_envs_idx, geom_envs_idx) if is_env_masked else None
                     if (primitive.active_envs is None) != (active_envs is None) or (
                         active_envs is not None and not np.array_equal(primitive.active_envs, active_envs)
@@ -592,8 +589,8 @@ class RasterizerContext:
 
                     node.mesh._bounds = None
                     primitive.poses = geom_T
-                    # A pending mesh rebuild re-reads primitive.poses, so the direct model-buffer push is redundant
-                    # and would fight a changed instance count on a masked<->compacted representation flip.
+                    # A pending rebuild re-reads primitive.poses; skip the push, which would fight a changed
+                    # instance count on a masked<->compacted flip.
                     if not self._scene.meshes_updated:
                         self.jit.update_buffer(node, "model", geom_T.transpose((0, 2, 1)))
                     if isinstance(entity._morph, gs.morphs.Plane):

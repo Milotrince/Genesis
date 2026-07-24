@@ -28,7 +28,7 @@ def main():
 
     rng = np.random.default_rng(args.seed)
 
-    # A box, a sphere and a cylinder in rotation, each at a random size, so the variants are visibly distinct.
+    # A box, sphere and cylinder in rotation, each at a random size.
     variants = []
     for i in range(args.n_variants):
         if i % 3 == 0:
@@ -54,14 +54,14 @@ def main():
     het = scene.add_entity(
         morph=variants,
     )
-    # Drag objects with the mouse to check that the switched-in geometry collides and responds with the right mass.
+    # Mouse-drag to sanity-check the switched-in geometry's collision and mass.
     scene.viewer.add_plugin(
         gs.vis.viewer_plugins.MouseInteractionPlugin(
             use_force=args.use_force,
             color=(0.1, 0.6, 0.8, 0.6),
         )
     )
-    # n_envs >= n_variants so every variant is shown in (and gets a render node for) at least one environment.
+    # Every variant needs an env at build to get a render node.
     n_envs = max(args.n_envs, len(variants))
     scene.build(
         n_envs=n_envs,
@@ -70,8 +70,7 @@ def main():
 
     n_variants = len(variants)
     is_running = True
-    # Start from a random arrangement.
-    pending_randomize = True
+    pending_randomize = True  # start from a random arrangement
 
     def randomize():
         nonlocal pending_randomize
@@ -88,11 +87,11 @@ def main():
     print("\nSPACE randomizes each environment's variant, drag objects with the mouse, ESC to quit.\n")
 
     while is_running:
-        # Keybind callbacks run on the viewer thread; apply the scene mutation here on the stepping thread.
+        # Keybind callbacks fire on the viewer thread; mutate the scene here on the stepping thread.
         if pending_randomize:
             pending_randomize = False
             het.set_entity_variant(rng.integers(0, n_variants, size=n_envs))
-            # Lift and drop the fresh geometry so the switch reads clearly instead of popping out of the ground.
+            # Drop the fresh geometry so the switch reads clearly.
             het.set_pos((0.0, 0.0, 0.3))
             het.set_dofs_velocity(np.zeros(6))
         scene.step()
