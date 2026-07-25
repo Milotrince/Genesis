@@ -409,6 +409,54 @@ def test_variant_switch_notifies_geometry_subscribers(n_envs, show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_variant_switch_updates_reactive_raycaster(n_envs, show_viewer):
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, 2.0, 2.0),
+            camera_lookat=(0.0, 0.0, 0.6),
+        ),
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    ray_origin = scene.add_entity(
+        gs.morphs.Box(size=(0.05, 0.05, 0.05), pos=(0.0, 0.0, 1.5), collision=False, fixed=True),
+    )
+    het = scene.add_heterogeneous_entity(
+        morphs=[
+            gs.morphs.Box(size=(0.4, 0.4, 0.3), pos=(0.0, 0.0, 0.5), fixed=True),
+            gs.morphs.Box(size=(0.4, 0.4, 0.1), pos=(0.0, 0.0, 0.5), fixed=True),
+        ],
+    )
+    raycaster = scene.add_sensor(
+        gs.sensors.Raycaster(
+            pattern=gs.sensors.raycaster.GridPattern(
+                resolution=0.1,
+                size=(0.1, 0.1),
+            ),
+            entity_idx=ray_origin.idx,
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    def top_distance():
+        scene.step()
+        return tensor_to_array(raycaster.read().distances).reshape(max(scene.n_envs, 1), -1).min(axis=1)
+
+    # The tall variant's top is 0.1 above the short one's, so the downward ray hits it 0.1 sooner. The raycaster
+    # subscribes to the solver GEOMETRY notification, so its static collision BVH rebuilds for the switched variant
+    # instead of casting against the outgoing one; a non-reactive BVH would leave both distances equal.
+    het.set_entity_variant(0)
+    dist_tall = top_distance()
+    het.set_entity_variant(1)
+    dist_short = top_distance()
+    assert (dist_tall < 1.0).all()
+    assert_allclose(dist_short - dist_tall, 0.1, tol=1e-3)
+
+
+@pytest.mark.required
 def test_variant_switch_creates_nodes_for_inactive_variants(show_viewer):
     scene = gs.Scene(
         show_viewer=show_viewer,

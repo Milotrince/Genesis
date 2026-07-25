@@ -2096,6 +2096,40 @@ class KinematicEntity(Entity):
             self.zero_all_dofs_velocity(envs_idx=envs_idx, skip_forward=True)
         self._solver.set_qpos(qpos, qs_idx, envs_idx, skip_forward=skip_forward)
 
+    def _assert_runtime_geometry_mutable(self, operation):
+        """
+        Raise if a runtime geometry change to this entity would leave a consumer reading stale build-time geometry.
+
+        The single gate every runtime geometry-mutation API must pass (`set_entity_variant` today; a per-environment
+        rescale later), so the list of unsupported combinations lives in one place. A consumer that reacts to the
+        solver GEOMETRY notification (e.g. the raycaster's collision BVH) needs no entry here; the ones below either
+        bake geometry at build or cannot express the change: differentiable replay, the batch renderer and ray
+        tracer, custom visual vertices, and any sensor that snapshots its tracked geometry (a geometry-snapshot
+        sensor registers in `_variant_switch_blockers` from its build; see
+        RigidSensorMixin._block_variant_switch_on_tracked_heterogeneous).
+        """
+        if self._scene.requires_grad:
+            gs.raise_exception(
+                f"`{operation}` is not supported in a differentiable simulation (`requires_grad=True`): the "
+                "geometry change is not checkpointed, so backward replay would use the wrong dynamics."
+            )
+        if self._scene.visualizer.batch_renderer is not None or self._scene.visualizer.raytracer is not None:
+            gs.raise_exception(
+                f"`{operation}` is not supported with the batch renderer or ray tracer, whose per-variant geometry "
+                "is baked at build. Use the interactive viewer or a rasterizer camera for runtime geometry changes."
+            )
+        if self._variant_switch_blockers:
+            blocker = type(self._variant_switch_blockers[0]).__name__
+            gs.raise_exception(
+                f"`{operation}` is not supported: a {blocker} samples this entity's geometry at build and would "
+                "read stale values afterward."
+            )
+        if self._morph.enable_custom_vverts:
+            gs.raise_exception(
+                f"`{operation}` is not supported with `enable_custom_vverts=True`: the custom visual vertex buffer "
+                "is tied to the build-time geometry and cannot follow a runtime change."
+            )
+
     @gs.assert_built
     def set_entity_variant(self, variants_idx, envs_idx=None):
         """
@@ -2115,28 +2149,7 @@ class KinematicEntity(Entity):
         """
         if not self._enable_heterogeneous:
             gs.raise_exception("`set_entity_variant` requires a heterogeneous entity built with a list of morphs.")
-        if self._scene.requires_grad:
-            gs.raise_exception(
-                "`set_entity_variant` is not supported in a differentiable simulation (`requires_grad=True`): the "
-                "variant change is not checkpointed, so backward replay would use the wrong dynamics."
-            )
-        if self._scene.visualizer.batch_renderer is not None or self._scene.visualizer.raytracer is not None:
-            gs.raise_exception(
-                "`set_entity_variant` is not supported with the batch renderer or ray tracer, whose per-variant "
-                "visibility is fixed at build time. Use the interactive viewer or a rasterizer camera for runtime "
-                "switching."
-            )
-        if self._variant_switch_blockers:
-            blocker = type(self._variant_switch_blockers[0]).__name__
-            gs.raise_exception(
-                f"`set_entity_variant` is not supported: a {blocker} samples this entity's geometry at build and "
-                "would read stale values after a switch."
-            )
-        if self._morph.enable_custom_vverts:
-            gs.raise_exception(
-                "`set_entity_variant` is not supported with `enable_custom_vverts=True`: the custom visual vertex "
-                "buffer is tied to the build-time variant and cannot follow a switch."
-            )
+        self._assert_runtime_geometry_mutable("set_entity_variant")
         n_variants = len(self._morph_heterogeneous) + 1
         variants_idx = np.atleast_1d(np.asarray(variants_idx, dtype=gs.np_int))
         if ((variants_idx < 0) | (variants_idx >= n_variants)).any():
