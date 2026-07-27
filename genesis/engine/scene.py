@@ -1,3 +1,4 @@
+import functools
 import os
 import pickle
 import sys
@@ -33,6 +34,7 @@ from genesis.options import (
     ViewerOptions,
     VisOptions,
 )
+from genesis.options.entity import EntityOptions
 from genesis.options.morphs import Morph
 from genesis.options.surfaces import Surface
 from genesis.options.renderers import Rasterizer, RendererOptions
@@ -329,137 +331,126 @@ class Scene(RBC):
         name: str | None = ...,
     ) -> EntityT: ...
 
+    @overload
+    def add_entity(
+        self,
+        *variants: EntityOptions,
+        visualize_contact: bool = ...,
+        vis_mode: str | None = ...,
+        name: str | None = ...,
+    ) -> "Entity": ...
+
     @gs.assert_unbuilt
     def add_entity(
         self,
-        morph: Morph,
+        *args,
         material: Material | None = None,
         surface: Surface | None = None,
         visualize_contact: bool = False,
         vis_mode: str | None = None,
         name: str | None = None,
+        morph: Morph | None = None,
     ) -> "Entity":
         """
-        Add an entity to the scene. For a per-environment heterogeneous entity, use `add_heterogeneous_entity`.
+        Add an entity to the scene.
+
+        Pass a single `gs.EntityOptions` for an ordinary entity, or several for one heterogeneous entity whose
+        geometry differs per parallel environment (one variant per `EntityOptions`, assigned in a balanced block).
+        Passing a `morph` directly is the legacy form, equivalent to a single `EntityOptions`.
 
         Parameters
         ----------
-        morph : gs.morphs.Morph
-            The morph of the entity.
+        variants : gs.EntityOptions
+            One entity spec, or several variant specs for a heterogeneous entity. Each bundles a morph with its own
+            material and surface. For several variants: all must share the same kinematic tree, use only
+            Primitive/Mesh/URDF/MJCF morphs, be all articulated or all basic, and carry same-type Rigid or Kinematic
+            materials.
+        morph : gs.morphs.Morph, optional
+            Legacy single-morph form (`add_entity(morph, material=..., surface=...)`); mutually exclusive with the
+            positional `variants`.
         material : gs.materials.Material | None, optional
-            The material of the entity. If None, use ``gs.materials.Rigid()``.
+            Legacy form only; defaults to ``gs.materials.Rigid()``. With `EntityOptions`, set it inside each spec.
         surface : gs.surfaces.Surface | None, optional
-            The surface of the entity. If None, use ``gs.surfaces.Default()``.
+            Legacy form only; defaults to ``gs.surfaces.Default()``. With `EntityOptions`, set it inside each spec.
         visualize_contact : bool
-            Whether to visualize contact forces applied to this entity as arrows in the viewer and rendered images.
-            Note that this will not be displayed in images rendered by camera using the `RayTracer` renderer.
+            Whether to visualize contact forces on this entity as arrows in the viewer and rendered images.
         vis_mode : str | None, optional
-            The visualization mode of the entity. This is a handy shortcut for setting `surface.vis_mode` without
-            explicitly creating a surface object.
+            Shortcut for ``surface.vis_mode`` without explicitly creating a surface object.
         name : str | None, optional
-            User-specified name for the entity. If not provided, an auto-generated name will be assigned
-            based on the morph type and entity UID (e.g., "box_a1b2c3d4"). Must be unique within the scene.
+            User-specified name; auto-generated from the (primary) morph and UID when None. Must be unique.
 
         Returns
         -------
         entity : genesis.Entity
             The created entity.
         """
-        if not isinstance(morph, Morph):
-            gs.raise_exception("`add_entity` expects a single morph; use `add_heterogeneous_entity` for variants.")
+        if morph is not None:
+            if args:
+                gs.raise_exception("`add_entity` accepts either a positional spec or `morph=`, not both.")
+            args = (morph,)
+        if not args:
+            gs.raise_exception("`add_entity` requires a `gs.morphs.Morph` or one or more `gs.EntityOptions`.")
+        return self._add_entity_dispatch(
+            args[0],
+            *args[1:],
+            material=material,
+            surface=surface,
+            visualize_contact=visualize_contact,
+            vis_mode=vis_mode,
+            name=name,
+        )
 
+    @functools.singledispatchmethod
+    def _add_entity_dispatch(
+        self, morph, *, material=None, surface=None, visualize_contact=False, vis_mode=None, name=None
+    ) -> "Entity":
+        # Legacy single-morph form, kept isolated behind the dispatcher so it can be deprecated and removed cleanly.
+        if not isinstance(morph, Morph):
+            gs.raise_exception("`add_entity` expects a `gs.morphs.Morph` or one or more `gs.EntityOptions`.")
         if material is None:
             material = gs.materials.Rigid()
-
         if surface is None:
-            # assign a local surface, otherwise modification will apply on global default surface
+            # A local surface, so mutation does not apply to the global default surface.
             surface = gs.surfaces.Default()
-
         self._resolve_entity_options(morph, (morph,), material, surface, vis_mode)
         return self._sim._add_entity(morph, material, surface, visualize_contact, name)
 
-    @gs.assert_unbuilt
-    def add_heterogeneous_entity(
+    @_add_entity_dispatch.register
+    def _(
         self,
-        morphs: Iterable[Morph],
-        materials: Material | Iterable[Material] | None = None,
-        surfaces: Surface | Iterable[Surface] | None = None,
-        visualize_contact: bool = False,
-        vis_mode: str | None = None,
-        name: str | None = None,
-    ) -> "Entity":
-        """
-        Add a single entity whose geometry differs per parallel environment (a heterogeneous entity).
-
-        Each morph in `morphs` is a variant; parallel environments are assigned variants in a balanced block. All
-        variants must share the same kinematic tree (only the collision/visual geometry may differ). Only Rigid or
-        Kinematic materials and Primitive/Mesh/URDF/MJCF morphs are supported, and all variants must be either all
-        articulated (URDF/MJCF) or all basic (Primitive/Mesh).
-
-        Parameters
-        ----------
-        morphs : list[gs.morphs.Morph]
-            The morph variants, one geometry per environment (assigned in a balanced block).
-        materials : gs.materials.Material | list[gs.materials.Material] | None, optional
-            One material applied to every variant, or a list of one material per morph (per-variant friction and
-            contact properties). If None, use ``gs.materials.Rigid()``.
-        surfaces : gs.surfaces.Surface | list[gs.surfaces.Surface] | None, optional
-            One surface applied to every variant, or a list of one surface per morph (per-variant appearance). If
-            None, use ``gs.surfaces.Default()``.
-        visualize_contact : bool
-            Whether to visualize contact forces on this entity as arrows in the viewer and rendered images.
-        vis_mode : str | None, optional
-            Shortcut for ``surface.vis_mode`` without explicitly creating a surface object.
-        name : str | None, optional
-            User-specified name; auto-generated from the primary morph and UID when None.
-
-        Returns
-        -------
-        entity : genesis.Entity
-            The created heterogeneous entity.
-        """
-        morphs = tuple(morphs)
-        n_variants = len(morphs)
-        if n_variants == 0:
-            gs.raise_exception("`add_heterogeneous_entity` requires at least one morph in `morphs`.")
-        if not all(
-            isinstance(m, (gs.morphs.Primitive, gs.morphs.Mesh, gs.morphs.URDF, gs.morphs.MJCF)) for m in morphs
-        ):
-            gs.raise_exception("Heterogeneous morphs only support Primitive, Mesh, URDF and MJCF types.")
-        if len({isinstance(m, (gs.morphs.URDF, gs.morphs.MJCF)) for m in morphs}) > 1:
-            gs.raise_exception(
-                "Heterogeneous morphs must be consistent: either all articulated robots (ie URDF, MJCF) or all "
-                "basic objects (ie Primitive, Mesh)."
-            )
-
-        # Resolve materials/surfaces to one per variant: None -> a fresh default per variant, a single value ->
-        # shared across variants, a list -> per-variant (its length must match `morphs`).
-        if materials is None:
-            materials = [gs.materials.Rigid() for _ in morphs]
-        elif isinstance(materials, (list, tuple)):
-            materials = list(materials)
-            if len(materials) != n_variants:
-                gs.raise_exception(f"`materials` has {len(materials)} entries but there are {n_variants} morphs.")
-        else:
-            materials = [materials] * n_variants
-        if surfaces is None:
-            surfaces = [gs.surfaces.Default() for _ in morphs]
-        elif isinstance(surfaces, (list, tuple)):
-            surfaces = list(surfaces)
-            if len(surfaces) != n_variants:
-                gs.raise_exception(f"`surfaces` has {len(surfaces)} entries but there are {n_variants} morphs.")
-        else:
-            surfaces = [surfaces] * n_variants
-        if not all(isinstance(m, (gs.materials.Rigid, gs.materials.Kinematic)) for m in materials):
-            gs.raise_exception("Heterogeneous entities are only supported for Rigid and Kinematic materials.")
-        if not all(type(m) is type(materials[0]) for m in materials):
-            gs.raise_exception(
-                "All variant materials must be the same type; a heterogeneous entity has one control mode."
-            )
-
-        for morph, material, surface in zip(morphs, materials, surfaces):
-            self._resolve_entity_options(morph, (morph,), material, surface, vis_mode)
-
+        first: EntityOptions,
+        *rest: EntityOptions,
+        material=None,
+        surface=None,
+        visualize_contact=False,
+        vis_mode=None,
+        name=None,
+    ):
+        if material is not None or surface is not None:
+            gs.raise_exception("Set `material` and `surface` inside each `EntityOptions`, not on `add_entity`.")
+        variants = (first, *rest)
+        morphs = tuple(v.morph for v in variants)
+        materials = [v.material if v.material is not None else gs.materials.Rigid() for v in variants]
+        surfaces = [v.surface if v.surface is not None else gs.surfaces.Default() for v in variants]
+        # A single spec is an ordinary entity, so the heterogeneous constraints apply only to genuine variants.
+        if len(variants) > 1:
+            if not all(
+                isinstance(m, (gs.morphs.Primitive, gs.morphs.Mesh, gs.morphs.URDF, gs.morphs.MJCF)) for m in morphs
+            ):
+                gs.raise_exception("Heterogeneous variants only support Primitive, Mesh, URDF and MJCF morphs.")
+            if len({isinstance(m, (gs.morphs.URDF, gs.morphs.MJCF)) for m in morphs}) > 1:
+                gs.raise_exception(
+                    "Heterogeneous variants must be consistent: either all articulated robots (URDF, MJCF) or all "
+                    "basic objects (Primitive, Mesh)."
+                )
+            if not all(isinstance(m, (gs.materials.Rigid, gs.materials.Kinematic)) for m in materials):
+                gs.raise_exception("Heterogeneous variants only support Rigid and Kinematic materials.")
+            if not all(type(m) is type(materials[0]) for m in materials):
+                gs.raise_exception(
+                    "All variant materials must be the same type; a heterogeneous entity has one control mode."
+                )
+        for variant_morph, variant_material, variant_surface in zip(morphs, materials, surfaces):
+            self._resolve_entity_options(variant_morph, (variant_morph,), variant_material, variant_surface, vis_mode)
         return self._sim._add_entity(
             morphs,
             materials[0],

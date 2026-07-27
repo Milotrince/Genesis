@@ -1,4 +1,5 @@
 from .misc import CoacdOptions, FoamOptions
+from .entity import EntityOptions
 from .profiling import ProfilingOptions
 from .solvers import (
     KinematicOptions,
@@ -18,6 +19,7 @@ from .solvers import (
 from .vis import ViewerOptions, VisOptions
 
 __all__ = [
+    "EntityOptions",
     "KinematicOptions",
     "BaseCouplerOptions",
     "CoacdOptions",
