@@ -739,12 +739,10 @@ def test_mass_setters(tol):
         show_viewer=False,
     )
     het_obj = scene.add_entity(
-        morph=[
-            gs.morphs.Box(size=(0.01, 0.01, 0.01)),
-            gs.morphs.Box(size=(0.02, 0.02, 0.02)),
-            gs.morphs.Sphere(radius=0.01),
-            gs.morphs.Sphere(radius=0.02),
-        ],
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.01, 0.01, 0.01))),
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.02, 0.02, 0.02))),
+        gs.EntityOptions(morph=gs.morphs.Sphere(radius=0.01)),
+        gs.EntityOptions(morph=gs.morphs.Sphere(radius=0.02)),
     )
     scene.build(n_envs=4)
     link = next(link for link in het_obj.links if not link.is_fixed)

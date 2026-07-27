@@ -356,28 +356,33 @@ def main() -> None:
         trimesh.creation.torus(major_radius=1.0, minor_radius=0.5).export(torus_path)
 
     obj = scene.add_entity(
-        morph=[
-            gs.morphs.Mesh(
-                file=torus_path,
-                scale=OBJECT_SIZE / 2,
-                convexify=False,
-            ),
-            gs.morphs.Sphere(
-                radius=OBJECT_SIZE / 2,
-            ),
-            gs.morphs.Mesh(
-                file="meshes/duck.obj",
-                euler=(90.0, 0.0, 0.0),
-                scale=0.03,
-            ),
-            gs.morphs.Mesh(
-                file="meshes/dragon/dragon.obj",
-                euler=(90.0, 0.0, 90.0),
-                scale=0.001,
-            ),
+        *[
+            gs.EntityOptions(
+                morph=m,
+                material=gs.materials.Rigid(friction=0.5),
+                surface=gs.surfaces.Default(color=(1.0, 1.0, 1.0, 1.0)),
+            )
+            for m in [
+                gs.morphs.Mesh(
+                    file=torus_path,
+                    scale=OBJECT_SIZE / 2,
+                    convexify=False,
+                ),
+                gs.morphs.Sphere(
+                    radius=OBJECT_SIZE / 2,
+                ),
+                gs.morphs.Mesh(
+                    file="meshes/duck.obj",
+                    euler=(90.0, 0.0, 0.0),
+                    scale=0.03,
+                ),
+                gs.morphs.Mesh(
+                    file="meshes/dragon/dragon.obj",
+                    euler=(90.0, 0.0, 90.0),
+                    scale=0.001,
+                ),
+            ]
         ],
-        surface=gs.surfaces.Default(color=(1.0, 1.0, 1.0, 1.0)),
-        material=gs.materials.Rigid(friction=0.5),
     )
 
     sensor = _add_tactile_sensor(

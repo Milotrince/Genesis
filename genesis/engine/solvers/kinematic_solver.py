@@ -172,7 +172,18 @@ class KinematicSolver(Solver):
     # ----------------------------------- add_entity -------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def add_entity(self, idx, material, morph, surface, visualize_contact=False, name=None) -> "KinematicEntity":
+    def add_entity(
+        self,
+        idx,
+        material,
+        morph,
+        surface,
+        visualize_contact=False,
+        name=None,
+        *,
+        materials_heterogeneous=None,
+        surfaces_heterogeneous=None,
+    ) -> "KinematicEntity":
         morph_heterogeneous = []
         if isinstance(morph, (tuple, list)):
             morph, *morph_heterogeneous = morph
@@ -198,6 +209,8 @@ class KinematicSolver(Solver):
             custom_vvert_start=self.n_custom_vverts,
             custom_vface_start=self.n_custom_vfaces,
             morph_heterogeneous=morph_heterogeneous,
+            materials_heterogeneous=materials_heterogeneous,
+            surfaces_heterogeneous=surfaces_heterogeneous,
             name=name,
         )
         self._entities.append(entity)

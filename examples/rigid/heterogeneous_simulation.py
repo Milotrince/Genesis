@@ -69,7 +69,7 @@ def main():
         gs.morphs.Sphere(radius=0.025, pos=(0.65, 0.0, 0.02)),  # Variant 3
     ]
     grasping_object = scene.add_entity(
-        morph=morphs_heterogeneous,
+        *[gs.EntityOptions(morph=m) for m in morphs_heterogeneous],
     )
     ########################## build ##########################
     scene.build(n_envs=args.n_envs, env_spacing=(1, 1))

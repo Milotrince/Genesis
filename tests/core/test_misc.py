@@ -27,17 +27,22 @@ def test_repr_does_not_crash():
     panda = scene.add_entity(morph=gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"))
     inline = scene.add_entity(morph=gs.morphs.MJCF(file=inline_mjcf))
     het = scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2)),
-            gs.morphs.Cylinder(radius=0.05, height=0.2),
+        gs.EntityOptions(
+            morph=gs.morphs.Box(size=(0.2, 0.2, 0.2)),
+        ),
+        gs.EntityOptions(
+            morph=gs.morphs.Cylinder(radius=0.05, height=0.2),
         ),
     )
     scene.add_entity(
-        morph=(
-            gs.morphs.Box(size=(0.2, 0.2, 0.2)),
-            gs.morphs.Sphere(radius=0.1),
+        gs.EntityOptions(
+            morph=gs.morphs.Box(size=(0.2, 0.2, 0.2)),
+            material=gs.materials.Kinematic(),
         ),
-        material=gs.materials.Kinematic(),
+        gs.EntityOptions(
+            morph=gs.morphs.Sphere(radius=0.1),
+            material=gs.materials.Kinematic(),
+        ),
     )
     cam = scene.add_camera(
         res=(64, 64),

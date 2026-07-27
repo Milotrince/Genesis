@@ -159,16 +159,40 @@ class Simulator(RBC):
         # sensors
         self._sensor_manager = SensorManager(self)
 
-    def _add_entity(self, morph: Morph, material, surface, visualize_contact=False, name: str | None = None):
+    def _add_entity(
+        self,
+        morph: Morph,
+        material,
+        surface,
+        visualize_contact=False,
+        name: str | None = None,
+        *,
+        materials_heterogeneous=None,
+        surfaces_heterogeneous=None,
+    ):
         if isinstance(material, gs.materials.Tool):
             entity = self.tool_solver.add_entity(self.n_entities, material, morph, surface, name=name)
         elif isinstance(material, gs.materials.Rigid):
             entity = self.rigid_solver.add_entity(
-                self.n_entities, material, morph, surface, visualize_contact, name=name
+                self.n_entities,
+                material,
+                morph,
+                surface,
+                visualize_contact,
+                name=name,
+                materials_heterogeneous=materials_heterogeneous,
+                surfaces_heterogeneous=surfaces_heterogeneous,
             )
         elif isinstance(material, gs.materials.Kinematic):
             entity = self.kinematic_solver.add_entity(
-                self.n_entities, material, morph, surface, visualize_contact=False, name=name
+                self.n_entities,
+                material,
+                morph,
+                surface,
+                visualize_contact=False,
+                name=name,
+                materials_heterogeneous=materials_heterogeneous,
+                surfaces_heterogeneous=surfaces_heterogeneous,
             )
         elif isinstance(material, gs.materials.MPM.Base):
             entity = self.mpm_solver.add_entity(self.n_entities, material, morph, surface, name=name)

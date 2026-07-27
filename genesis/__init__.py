@@ -508,6 +508,7 @@ from .options import sensors
 from .options import renderers
 from .options import surfaces
 from .options import textures
+from .options import EntityOptions
 
 from .datatypes import List
 from .grad.creation_ops import *

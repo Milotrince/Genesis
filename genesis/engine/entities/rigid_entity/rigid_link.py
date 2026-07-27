@@ -923,6 +923,7 @@ class RigidLink(KinematicLink):
         contype=1,
         conaffinity=1,
         data=None,
+        material=None,
     ):
         geom = RigidGeom(
             link=self,
@@ -945,6 +946,7 @@ class RigidLink(KinematicLink):
             contype=contype,
             conaffinity=conaffinity,
             data=data,
+            material=material,
         )
         self._geoms.append(geom)
 

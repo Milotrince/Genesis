@@ -49,14 +49,17 @@ def test_physics_parity(show_viewer, tol):
             )
         )
     het_obj = scene.add_entity(
-        morph=tuple(
-            gs.morphs.MJCF(
-                file=file,
-                pos=pos,
-                offset_euler=offset_euler,
+        *[
+            gs.EntityOptions(morph=m)
+            for m in tuple(
+                gs.morphs.MJCF(
+                    file=file,
+                    pos=pos,
+                    offset_euler=offset_euler,
+                )
+                for file, pos, offset_euler in zip(asset_files, POSITIONS, OFFSET_EULERS)
             )
-            for file, pos, offset_euler in zip(asset_files, POSITIONS, OFFSET_EULERS)
-        )
+        ]
     )
     scene.build(n_envs=len(VARIANTS))
 
@@ -102,7 +105,7 @@ def test_fewer_envs_than_variants():
         gs.morphs.Box(size=(0.02, 0.02, 0.02), pos=(0.2, 0.0, 0.2)),
         gs.morphs.Sphere(radius=0.02, pos=(0.3, 0.0, 0.25)),
     ]
-    het_obj = scene.add_entity(morph=morphs_heterogeneous)
+    het_obj = scene.add_entity(*[gs.EntityOptions(morph=m) for m in morphs_heterogeneous])
 
     # Building with only 2 environments should work - each env gets a unique variant
     scene.build(n_envs=2)
@@ -125,7 +128,7 @@ def test_aabb(tol):
         gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.1)),
         gs.morphs.Sphere(radius=0.01, pos=(0.1, 0.0, 0.15)),
     )
-    het_obj = scene.add_entity(morph=morphs_heterogeneous)
+    het_obj = scene.add_entity(*[gs.EntityOptions(morph=m) for m in morphs_heterogeneous])
     # 4 envs: envs 0-1 get box, envs 2-3 get sphere
     scene.build(n_envs=4)
 
@@ -186,32 +189,33 @@ def test_runtime_variant_rebind(n_envs, show_viewer, tol):
         gs.morphs.Plane(),
     )
     het_box = scene.add_entity(
-        morph=[
-            gs.morphs.Box(size=(BIG, BIG, BIG), pos=(0.0, 0.0, BIG / 2)),
-            gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(0.0, 0.0, SMALL / 2)),
-        ],
+        gs.EntityOptions(morph=gs.morphs.Box(size=(BIG, BIG, BIG), pos=(0.0, 0.0, BIG / 2))),
+        gs.EntityOptions(morph=gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(0.0, 0.0, SMALL / 2))),
     )
     het_arm = scene.add_entity(
-        morph=[
-            gs.morphs.MJCF(
+        gs.EntityOptions(
+            morph=gs.morphs.MJCF(
                 file=build_articulated_chain(n_links=2, link_radius=0.03, link_length=0.2),
                 pos=(1.0, 0.0, 0.6),
             ),
-            gs.morphs.MJCF(
+        ),
+        gs.EntityOptions(
+            morph=gs.morphs.MJCF(
                 file=build_articulated_chain(n_links=2, link_radius=0.06, link_length=0.2),
                 pos=(1.0, 0.0, 0.6),
             ),
-        ],
+        ),
     )
     box = scene.add_entity(
         gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(2.0, 0.0, SMALL / 2)),
     )
     het_kinematic = scene.add_entity(
-        morph=[
-            gs.morphs.Box(size=(BIG, BIG, BIG), pos=(3.0, 0.0, 1.0)),
-            gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(3.0, 0.0, 1.0)),
-        ],
-        material=gs.materials.Kinematic(),
+        gs.EntityOptions(
+            morph=gs.morphs.Box(size=(BIG, BIG, BIG), pos=(3.0, 0.0, 1.0)), material=gs.materials.Kinematic()
+        ),
+        gs.EntityOptions(
+            morph=gs.morphs.Box(size=(SMALL, SMALL, SMALL), pos=(3.0, 0.0, 1.0)), material=gs.materials.Kinematic()
+        ),
     )
     scene.build(n_envs=n_envs)
 
@@ -313,10 +317,8 @@ def test_variant_switch_rebinds_relative_pose_offset(n_envs, show_viewer, tol):
         gs.morphs.Plane(),
     )
     het = scene.add_entity(
-        morph=[
-            gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5), offset_pos=(0.0, 0.0, 0.0)),
-            gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5), offset_pos=(0.2, 0.0, 0.0)),
-        ],
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5), offset_pos=(0.0, 0.0, 0.0))),
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.1, 0.1, 0.1), pos=(0.0, 0.0, 0.5), offset_pos=(0.2, 0.0, 0.0))),
     )
     scene.build(n_envs=n_envs)
 
@@ -345,10 +347,8 @@ def test_variant_switch_rejected_with_custom_vverts(show_viewer):
         gs.morphs.Plane(),
     )
     het = scene.add_entity(
-        morph=[
-            gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3), enable_custom_vverts=True),
-            gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3), enable_custom_vverts=True),
-        ],
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3), enable_custom_vverts=True)),
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3), enable_custom_vverts=True)),
     )
     scene.build(n_envs=2)
     with pytest.raises(gs.GenesisException):
@@ -365,10 +365,8 @@ def test_variant_switch_rejected_when_differentiable(show_viewer):
         gs.morphs.Plane(),
     )
     het = scene.add_entity(
-        morph=[
-            gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3)),
-            gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3)),
-        ],
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3))),
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3))),
     )
     scene.build(n_envs=2)
     # The variant change is not checkpointed, so it must be rejected rather than silently corrupt backward replay.
@@ -390,10 +388,8 @@ def test_variant_switch_notifies_geometry_subscribers(n_envs, show_viewer):
         gs.morphs.Plane(),
     )
     het = scene.add_entity(
-        morph=[
-            gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3), fixed=True),
-            gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3), fixed=True),
-        ],
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3), fixed=True)),
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3), fixed=True)),
     )
     scene.build(n_envs=n_envs)
 
@@ -409,6 +405,52 @@ def test_variant_switch_notifies_geometry_subscribers(n_envs, show_viewer):
 
 
 @pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_variant_switch_updates_reactive_raycaster(n_envs, show_viewer):
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(2.0, 2.0, 2.0),
+            camera_lookat=(0.0, 0.0, 0.6),
+        ),
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    ray_origin = scene.add_entity(
+        gs.morphs.Box(size=(0.05, 0.05, 0.05), pos=(0.0, 0.0, 1.5), collision=False, fixed=True),
+    )
+    het = scene.add_entity(
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.4, 0.4, 0.3), pos=(0.0, 0.0, 0.5), fixed=True)),
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.4, 0.4, 0.1), pos=(0.0, 0.0, 0.5), fixed=True)),
+    )
+    raycaster = scene.add_sensor(
+        gs.sensors.Raycaster(
+            pattern=gs.sensors.raycaster.GridPattern(
+                resolution=0.1,
+                size=(0.1, 0.1),
+            ),
+            entity_idx=ray_origin.idx,
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    def top_distance():
+        scene.step()
+        return tensor_to_array(raycaster.read().distances).reshape(max(scene.n_envs, 1), -1).min(axis=1)
+
+    # The tall variant's top is 0.1 above the short one's, so the downward ray hits it 0.1 sooner. The raycaster
+    # subscribes to the solver GEOMETRY notification, so its static collision BVH rebuilds for the switched variant
+    # instead of casting against the outgoing one; a non-reactive BVH would leave both distances equal.
+    het.set_entity_variant(0)
+    dist_tall = top_distance()
+    het.set_entity_variant(1)
+    dist_short = top_distance()
+    assert (dist_tall < 1.0).all()
+    assert_allclose(dist_short - dist_tall, 0.1, tol=1e-3)
+
+
+@pytest.mark.required
 def test_variant_switch_creates_nodes_for_inactive_variants(show_viewer):
     scene = gs.Scene(
         show_viewer=show_viewer,
@@ -421,10 +463,8 @@ def test_variant_switch_creates_nodes_for_inactive_variants(show_viewer):
         gs.morphs.Plane(),
     )
     het = scene.add_entity(
-        morph=[
-            gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3)),
-            gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3)),
-        ],
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.10, 0.10, 0.10), pos=(0.0, 0.0, 0.3))),
+        gs.EntityOptions(morph=gs.morphs.Box(size=(0.04, 0.04, 0.04), pos=(0.0, 0.0, 0.3))),
     )
     camera = scene.add_camera(
         res=(64, 64),
@@ -444,6 +484,59 @@ def test_variant_switch_creates_nodes_for_inactive_variants(show_viewer):
     assert (het.get_entity_variant() == inactive_variant).all()
 
 
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_per_variant_material_and_surface(n_envs, show_viewer, tol):
+    SIZE = 0.1
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(0.6, 0.6, 0.4),
+            camera_lookat=(0.0, 0.0, 0.05),
+        ),
+    )
+    scene.add_entity(
+        gs.morphs.Plane(),
+    )
+    het = scene.add_entity(
+        gs.EntityOptions(
+            morph=gs.morphs.Box(size=(SIZE, SIZE, SIZE), pos=(0.0, 0.0, SIZE / 2)),
+            material=gs.materials.Rigid(friction=0.02),
+            surface=gs.surfaces.Default(color=(1.0, 0.0, 0.0, 1.0)),
+        ),
+        gs.EntityOptions(
+            morph=gs.morphs.Box(size=(SIZE, SIZE, SIZE), pos=(0.0, 0.0, SIZE / 2)),
+            material=gs.materials.Rigid(friction=2.0),
+            surface=gs.surfaces.Default(color=(0.0, 0.0, 1.0, 1.0)),
+        ),
+    )
+    scene.build(n_envs=n_envs)
+
+    # Each variant's collision geom carries its own friction, and its visual geom its own color.
+    geom_slippery, geom_grippy = het.links[0].geoms
+    vgeom_red, vgeom_blue = het.links[0].vgeoms
+    assert_allclose(geom_slippery.friction, 0.02, tol=tol)
+    assert_allclose(geom_grippy.friction, 2.0, tol=tol)
+    assert_allclose(vgeom_red.surface.color, (1.0, 0.0, 0.0, 1.0), tol=tol)
+    assert_allclose(vgeom_blue.surface.color, (0.0, 0.0, 1.0, 1.0), tol=tol)
+
+    # Friction is observable: given equal initial sliding speed, the low-friction env travels farther.
+    if scene.n_envs > 1:
+        het.set_dofs_velocity([2.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        x_start = tensor_to_array(het.get_pos())[..., 0]
+        for _ in range(30):
+            scene.step()
+        slid = tensor_to_array(het.get_pos())[..., 0] - x_start
+        assert slid[0] > slid[1]
+
+    # `material` and `surface` belong inside each `EntityOptions`, not on `add_entity`.
+    with pytest.raises(gs.GenesisException):
+        gs.Scene(show_viewer=False).add_entity(
+            gs.EntityOptions(morph=gs.morphs.Box(size=(SIZE, SIZE, SIZE))),
+            material=gs.materials.Rigid(),
+        )
+
+
 # 30s
 @pytest.mark.slow  # ~250s
 @pytest.mark.parametrize("backend", [gs.gpu])  # Grasping physics requires GPU
@@ -457,12 +550,10 @@ def test_pick_heterogenous_objects(show_viewer):
     # Note: spheres need larger radius to be reliably grasped by the Franka gripper
     sizes = [0.04, 0.02, 0.03, 0.025]  # box0, box1, sphere0, sphere1
     het_obj = scene.add_entity(
-        morph=[
-            gs.morphs.Box(size=(sizes[0],) * 3, pos=(0.65, 0.0, 0.02)),
-            gs.morphs.Box(size=(sizes[1],) * 3, pos=(0.65, 0.0, 0.02)),
-            gs.morphs.Sphere(radius=sizes[2], pos=(0.65, 0.0, 0.02)),
-            gs.morphs.Sphere(radius=sizes[3], pos=(0.65, 0.0, 0.02)),
-        ]
+        gs.EntityOptions(morph=gs.morphs.Box(size=(sizes[0],) * 3, pos=(0.65, 0.0, 0.02))),
+        gs.EntityOptions(morph=gs.morphs.Box(size=(sizes[1],) * 3, pos=(0.65, 0.0, 0.02))),
+        gs.EntityOptions(morph=gs.morphs.Sphere(radius=sizes[2], pos=(0.65, 0.0, 0.02))),
+        gs.EntityOptions(morph=gs.morphs.Sphere(radius=sizes[3], pos=(0.65, 0.0, 0.02))),
     )
     scene.build(n_envs=4, env_spacing=(1, 1))
 
@@ -548,10 +639,7 @@ def test_invalid_material_raises():
 
     # PBD material should raise an exception
     with pytest.raises(gs.GenesisException):
-        scene.add_entity(
-            morph=morphs_heterogeneous,
-            material=gs.materials.PBD.Cloth(),
-        )
+        scene.add_entity(*[gs.EntityOptions(morph=m, material=gs.materials.PBD.Cloth()) for m in morphs_heterogeneous])
 
 
 @pytest.mark.slow  # ~200s
@@ -566,14 +654,13 @@ def test_morph_property_raises():
         gs.morphs.Box(size=(0.1, 0.1, 0.1)),
         gs.morphs.Cylinder(radius=0.05, height=0.2),
     )
-    rigid_obj = scene.add_entity(morph=rigid_morphs_heterogeneous)
+    rigid_obj = scene.add_entity(*[gs.EntityOptions(morph=m) for m in rigid_morphs_heterogeneous])
     kinematic_morphs_heterogeneous = (
         gs.morphs.Box(size=(0.2, 0.2, 0.2)),
         gs.morphs.Sphere(radius=0.1),
     )
     kinematic_obj = scene.add_entity(
-        morph=kinematic_morphs_heterogeneous,
-        material=gs.materials.Kinematic(),
+        *[gs.EntityOptions(morph=m, material=gs.materials.Kinematic()) for m in kinematic_morphs_heterogeneous]
     )
     tool = scene.add_entity(
         morph=gs.morphs.Box(size=(0.05, 0.05, 0.05)),
@@ -606,8 +693,6 @@ def test_articulated_structure_mismatch():
     # two_cube_revolute has 1 revolute joint; two_link_arm has 2 continuous joints
     with pytest.raises(gs.GenesisException):
         scene.add_entity(
-            morph=[
-                gs.morphs.URDF(file="urdf/simple/two_cube_revolute.urdf", pos=(0, 0, 0.1)),
-                gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf", pos=(0, 0, 0.1)),
-            ]
+            gs.EntityOptions(morph=gs.morphs.URDF(file="urdf/simple/two_cube_revolute.urdf", pos=(0, 0, 0.1))),
+            gs.EntityOptions(morph=gs.morphs.URDF(file="urdf/simple/two_link_arm.urdf", pos=(0, 0, 0.1))),
         )

@@ -304,14 +304,16 @@ def test_no_drift(gjk_collision, entity_kind, entity_type, ground_type, show_vie
         # unstable regardless of the bias fix) and the full-length capsule (used by "horizontal-axis" envs, barrel
         # contact). MuJoCo rejects an exact zero length so we use a tiny positive value.
         entity = scene.add_entity(
-            morph=(
-                gs.morphs.MJCF(
+            gs.EntityOptions(
+                morph=gs.morphs.MJCF(
                     file=_capsule_mjcf_path(tmp_path, SMOOTH_RADIUS, gs.EPS, name="capsule_v"),
                 ),
-                gs.morphs.MJCF(
+            ),
+            gs.EntityOptions(
+                morph=gs.morphs.MJCF(
                     file=_capsule_mjcf_path(tmp_path, SMOOTH_RADIUS, CYLINDER_HEIGHT, name="capsule_h"),
                 ),
-            )
+            ),
         )
     else:  # if entity_kind == "ellipsoid":
         entity = scene.add_entity(
