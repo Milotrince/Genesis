@@ -1028,14 +1028,16 @@ class RigidSolver(KinematicSolver):
         after a geom-set change. Also refreshes the hibernation DOF lengths, whose rotational radius follows the
         variant's body extent.
         """
-        # The batched qpos/inertia caches reject an explicit envs_idx on a non-parallelized scene.
+        # The batched qpos/inertia caches and the collider reset sanitize their envs_idx, which rejects an explicit
+        # one on a non-parallelized scene; pass None there. `_func_update_geoms` feeds a kernel directly, so it keeps
+        # the concrete index tensor.
         envs_idx_batched = envs_idx if self.n_envs > 0 else None
         qs_idx = torch.arange(self.n_qs, dtype=gs.tc_int, device=gs.device)
         qpos_cur = self.get_qpos(qs_idx=qs_idx, envs_idx=envs_idx_batched)
         self._init_invweight_and_meaninertia(envs_idx=envs_idx_batched, force_update=True)
         self.set_qpos(qpos_cur, qs_idx=qs_idx, envs_idx=envs_idx_batched)
         self._func_update_geoms(envs_idx, force_update_fixed_geoms=True)
-        self.collider.reset(envs_idx, cache_only=False)
+        self.collider.reset(envs_idx_batched, cache_only=False)
         # Reads the per-geom active-env masks the rebind just updated; a no-op unless hibernation is on.
         self._init_dof_length()
 
