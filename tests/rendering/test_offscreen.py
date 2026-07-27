@@ -675,12 +675,14 @@ def test_renders_heterogeneous_entities(n_envs, show_viewer, png_snapshot, rende
             color=(0.3, 0.8, 0.3),
         ),
     )
-    heterogeneous = scene.add_heterogeneous_entity(
-        morphs=(
-            gs.morphs.Sphere(
+    heterogeneous = scene.add_entity(
+        gs.EntityOptions(
+            morph=gs.morphs.Sphere(
                 radius=0.3,
             ),
-            gs.morphs.Mesh(
+        ),
+        gs.EntityOptions(
+            morph=gs.morphs.Mesh(
                 file="meshes/duck/duck.obj",
                 scale=0.003,
                 euler=(90.0, 0.0, 90.0),

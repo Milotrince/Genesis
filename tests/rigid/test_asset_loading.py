@@ -835,23 +835,26 @@ def test_align_mesh(show_viewer, tol):
     # hard-coded offset to check it composes with the alignment, and the mango variant must end up aligned exactly
     # like the standalone mango above.
     HET_POS = (0.5, 0.0, 0.1)
-    het_obj = scene.add_heterogeneous_entity(
-        morphs=(
-            gs.morphs.Mesh(
+    het_obj = scene.add_entity(
+        gs.EntityOptions(
+            morph=gs.morphs.Mesh(
                 file=f"{bowl_path}/glb/orange_plastic_bowl.glb",
                 scale=0.5,
                 pos=HET_POS,
                 offset_euler=(30.0, 0.0, 0.0),
                 align=True,
             ),
-            gs.morphs.Mesh(
+            material=gs.materials.Rigid(rho=1000.0),
+        ),
+        gs.EntityOptions(
+            morph=gs.morphs.Mesh(
                 file=f"{mango_path}/glb/mango.glb",
                 scale=0.045,
                 pos=HET_POS,
                 align=True,
             ),
+            material=gs.materials.Rigid(rho=1000.0),
         ),
-        materials=gs.materials.Rigid(rho=1000.0),
     )
     scene.build(n_envs=2)
 

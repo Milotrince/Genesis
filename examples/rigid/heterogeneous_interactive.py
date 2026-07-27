@@ -68,10 +68,8 @@ def main():
     scene.add_entity(
         gs.morphs.Plane(),
     )
-    het = scene.add_heterogeneous_entity(
-        morphs=variants,
-        materials=materials,
-        surfaces=surfaces,
+    het = scene.add_entity(
+        *[gs.EntityOptions(morph=m, material=mat, surface=surf) for m, mat, surf in zip(variants, materials, surfaces)],
     )
     # Mouse-drag to sanity-check collision and mass; spring force works for free and anchored bodies alike.
     scene.viewer.add_plugin(

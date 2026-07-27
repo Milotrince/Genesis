@@ -518,8 +518,8 @@ def test_dof_length_scales_with_body_size(mujoco_compatibility):
         show_viewer=False,
     )
     spheres = [scene.add_entity(gs.morphs.Sphere(radius=r, pos=(2.0 * i, 0.0, 1.0))) for i, r in enumerate(radii)]
-    het = scene.add_heterogeneous_entity(
-        morphs=tuple(gs.morphs.Sphere(radius=r, pos=(0.0, 2.0, 1.0)) for r in variant_radii)
+    het = scene.add_entity(
+        *[gs.EntityOptions(morph=gs.morphs.Sphere(radius=r, pos=(0.0, 2.0, 1.0))) for r in variant_radii]
     )
     scene.build(n_envs=4)
 

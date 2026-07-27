@@ -2135,8 +2135,8 @@ class KinematicEntity(Entity):
         """
         Switch which declared variant this heterogeneous entity shows per environment, at runtime.
 
-        Only valid for an entity built with `scene.add_heterogeneous_entity(morphs=[m0, m1, ...])`. All variants
-        share the same kinematic tree; only their collision/visual geometry and inertial differ.
+        Only valid for a heterogeneous entity built by passing several `gs.EntityOptions` to `scene.add_entity`.
+        All variants share the same kinematic tree; only their collision/visual geometry and inertial differ.
 
         Parameters
         ----------

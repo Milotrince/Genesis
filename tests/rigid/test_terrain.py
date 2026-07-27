@@ -239,16 +239,17 @@ def test_box_on_terrain_no_spurious_spin(show_viewer):
             color=(0.4, 0.8, 0.4),
         ),
     )
-    box = scene.add_heterogeneous_entity(
-        morphs=(
-            gs.morphs.Box(size=BOX_SIZE),
-            gs.morphs.MeshSet(
+    box = scene.add_entity(
+        gs.EntityOptions(
+            morph=gs.morphs.Box(size=BOX_SIZE),
+            surface=gs.surfaces.Default(color=(0.95, 0.2, 0.2)),
+        ),
+        gs.EntityOptions(
+            morph=gs.morphs.MeshSet(
                 files=(trimesh.creation.box(extents=BOX_SIZE),),
                 decimate=False,
             ),
-        ),
-        surface=gs.surfaces.Default(
-            color=(0.95, 0.2, 0.2),
+            surface=gs.surfaces.Default(color=(0.95, 0.2, 0.2)),
         ),
     )
 
