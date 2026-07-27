@@ -980,26 +980,26 @@ class RigidSolver(KinematicSolver):
 
         self.rigid_info.gravity.from_numpy(self.gravity)
 
-    def _bind_heterogeneous_variant(self, link, variant_idx, envs_idx):
+    def _bind_heterogeneous_variant(self, link, variants_idx, envs_idx):
         """
         Extend the base vgeom bind with link's per-env collision-geom ranges and per-variant inertial.
 
-        variant_idx is aligned with envs_idx (one target variant index per selected env). Per-variant inertial is
+        variants_idx is aligned with envs_idx (one target variant index per selected env). Per-variant inertial is
         pre-computed during link._build() from the variant's geoms. A link with visual-only variants (no collision
         geoms) falls back to the base vgeom-only bind.
         """
         if link._variant_geom_ranges is None:
-            super()._bind_heterogeneous_variant(link, variant_idx, envs_idx)
+            super()._bind_heterogeneous_variant(link, variants_idx, envs_idx)
             return
 
-        geom_starts = np.array([link._variant_geom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
-        geom_ends = np.array([link._variant_geom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
-        vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variant_idx], dtype=gs.np_int)
-        vgeom_ends = np.array([link._variant_vgeom_ranges[v][1] for v in variant_idx], dtype=gs.np_int)
-        links_inertial_mass = np.array([link._variant_inertial[v][0] for v in variant_idx], dtype=gs.np_float)
-        links_inertial_pos = np.array([link._variant_inertial[v][1] for v in variant_idx], dtype=gs.np_float)
-        links_inertial_quat = np.array([link._variant_inertial[v][2] for v in variant_idx], dtype=gs.np_float)
-        links_inertial_i = np.array([link._variant_inertial[v][3] for v in variant_idx], dtype=gs.np_float)
+        geom_starts = np.array([link._variant_geom_ranges[v][0] for v in variants_idx], dtype=gs.np_int)
+        geom_ends = np.array([link._variant_geom_ranges[v][1] for v in variants_idx], dtype=gs.np_int)
+        vgeom_starts = np.array([link._variant_vgeom_ranges[v][0] for v in variants_idx], dtype=gs.np_int)
+        vgeom_ends = np.array([link._variant_vgeom_ranges[v][1] for v in variants_idx], dtype=gs.np_int)
+        links_inertial_mass = np.array([link._variant_inertial[v][0] for v in variants_idx], dtype=gs.np_float)
+        links_inertial_pos = np.array([link._variant_inertial[v][1] for v in variants_idx], dtype=gs.np_float)
+        links_inertial_quat = np.array([link._variant_inertial[v][2] for v in variants_idx], dtype=gs.np_float)
+        links_inertial_i = np.array([link._variant_inertial[v][3] for v in variants_idx], dtype=gs.np_float)
 
         kernel_update_heterogeneous_link_info(
             link.idx,

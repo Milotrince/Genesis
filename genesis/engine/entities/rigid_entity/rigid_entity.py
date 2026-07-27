@@ -2084,7 +2084,7 @@ class KinematicEntity(Entity):
         self._solver.set_qpos(qpos, qs_idx, envs_idx, skip_forward=skip_forward)
 
     @gs.assert_built
-    def set_entity_variant(self, variant, envs_idx=None):
+    def set_entity_variant(self, variants_idx, envs_idx=None):
         """
         Switch which declared variant this heterogeneous entity shows per environment, at runtime.
 
@@ -2093,10 +2093,10 @@ class KinematicEntity(Entity):
 
         Parameters
         ----------
-        variant : int | array_like
-            Index into the declared morph list (0 is the first/primary morph). A scalar switches every selected
-            environment to that variant; an array of length `len(envs_idx)` (or `n_envs`) switches each selected
-            environment independently.
+        variants_idx : int | array_like
+            Variant index/indices, like `envs_idx`: a single index (0 is the first/primary morph) switches every
+            selected environment to that variant, while an array of one index per selected environment switches
+            each independently.
         envs_idx : None | array_like, optional
             The environments to switch. If None, all environments are switched. Defaults to None.
         """
@@ -2125,10 +2125,10 @@ class KinematicEntity(Entity):
                 "buffer is tied to the build-time variant and cannot follow a switch."
             )
         n_variants = len(self._morph_heterogeneous) + 1
-        variant_idx = np.atleast_1d(np.asarray(variant, dtype=gs.np_int))
-        if ((variant_idx < 0) | (variant_idx >= n_variants)).any():
-            gs.raise_exception(f"`variant` must be in range [0, {n_variants}), got {variant}.")
-        self._solver.set_entity_variant(self, variant_idx, envs_idx)
+        variants_idx = np.atleast_1d(np.asarray(variants_idx, dtype=gs.np_int))
+        if ((variants_idx < 0) | (variants_idx >= n_variants)).any():
+            gs.raise_exception(f"`variants_idx` must be in range [0, {n_variants}), got {variants_idx.tolist()}.")
+        self._solver.set_entity_variant(self, variants_idx, envs_idx)
 
     @gs.assert_built
     def get_entity_variant(self, envs_idx=None):
