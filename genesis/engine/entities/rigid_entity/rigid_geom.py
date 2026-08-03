@@ -328,10 +328,42 @@ class RigidGeom(RBC):
             )
             self._solver.scene.draw_debug_mesh(boundary_mesh, T=T)
 
+    def set_material(self, material: "RigidMaterial"):
+        """
+        Assign a material to this geom, in place of the one inherited from its entity.
+
+        The material identifies the surface that contact parameters declared for a pair of materials apply to, so
+        one entity carries as many surfaces as its geoms have materials (see 'RigidMaterial.set_friction_pair'). It
+        must be assigned before the scene is built.
+
+        The geom takes every coefficient the material declares, and keeps the one it carries where a friction
+        coefficient is left None, as it keeps an asset-authored coefficient when its entity takes the material. The
+        SDF resolution stays the one the entity's material set, being fixed when the geom was created.
+        """
+        if self._solver.is_built:
+            gs.raise_exception("A geom's material must be assigned before the scene is built.")
+        self._material = material
+
+        options = material.options
+        if options.friction is not None:
+            self.desc.friction = options.friction
+        if options.friction_torsional is not None:
+            self.desc.friction_torsional = options.friction_torsional
+        if options.friction_rolling is not None:
+            self.desc.friction_rolling = options.friction_rolling
+        coup_links = options.coup_links
+        self._needs_coup = options.needs_coup and (coup_links is None or self._link.name in coup_links)
+        self._coup_softness = options.coup_softness
+        self._coup_friction = options.coup_friction
+        self._coup_restitution = options.coup_restitution
+
     @gs.assert_built
     def set_friction(self, friction):
         """
         Set the friction coefficient of this geometry.
+
+        A contact takes the larger of the two geoms' coefficients, so it follows this one where this one is the
+        larger. See 'RigidMaterial.set_friction_pair' to fix it for a pair of materials outright.
         """
         if friction < 0:
             gs.raise_exception("`friction` must be non-negative.")
@@ -481,6 +513,34 @@ class RigidGeom(RBC):
         Get the type of the geom.
         """
         return self.desc.type
+
+    @property
+    def material(self) -> "RigidMaterial":
+        """
+        Get the material of the geom, inherited from its entity unless assigned through 'set_material'.
+        """
+        return self._material
+
+    @property
+    def friction(self):
+        """
+        Get the friction coefficient of the geom.
+        """
+        return self.desc.friction
+
+    @property
+    def friction_torsional(self):
+        """
+        Get the torsional friction coefficient of the geom (see 'gs.materials.Rigid').
+        """
+        return self.desc.friction_torsional
+
+    @property
+    def friction_rolling(self):
+        """
+        Get the rolling friction coefficient of the geom (see 'gs.materials.Rigid').
+        """
+        return self.desc.friction_rolling
 
     @property
     def data(self):
