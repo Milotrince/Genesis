@@ -224,8 +224,6 @@ def func_collider_clear_env(
                         collider_state.contact_data.normal[n_hib, i_b] = collider_state.contact_data.normal[i_c, i_b]
                         collider_state.contact_data.pos[n_hib, i_b] = collider_state.contact_data.pos[i_c, i_b]
                         collider_state.contact_data.friction[n_hib, i_b] = collider_state.contact_data.friction[i_c, i_b]
-                        collider_state.contact_data.friction_torsional[n_hib, i_b] = collider_state.contact_data.friction_torsional[i_c, i_b]
-                        collider_state.contact_data.friction_rolling[n_hib, i_b] = collider_state.contact_data.friction_rolling[i_c, i_b]
                         collider_state.contact_data.sol_params[n_hib, i_b] = collider_state.contact_data.sol_params[i_c, i_b]
                         collider_state.contact_data.force[n_hib, i_b] = collider_state.contact_data.force[i_c, i_b]
                         collider_state.contact_data.link_a[n_hib, i_b] = collider_state.contact_data.link_a[i_c, i_b]
@@ -362,6 +360,29 @@ def collider_kernel_get_contacts(
 
 
 @qd.func
+def func_resolve_contact_friction(
+    i_ga,
+    i_gb,
+    i_b,
+    dyn_state: array_class.DynState,
+    dyn_info: array_class.DynInfo,
+):
+    """Sliding, torsional and rolling friction coefficients of a contact between two geoms.
+
+    Each coefficient is the larger of the two geoms' own, scaled by that geom's friction ratio. Sliding friction
+    carries a floor, so every contact resists tangentially.
+    """
+    frictions = qd.Vector.zero(gs.qd_float, 3)
+    for j in qd.static(range(3)):
+        frictions[j] = qd.max(
+            dyn_info.geoms.friction[i_ga][j] * dyn_state.geoms.friction_ratio[i_ga, i_b],
+            dyn_info.geoms.friction[i_gb][j] * dyn_state.geoms.friction_ratio[i_gb, i_b],
+        )
+    frictions[array_class.FrictionIdx.SLIDING] = qd.max(frictions[array_class.FrictionIdx.SLIDING], 1e-2)
+    return frictions
+
+
+@qd.func
 def func_add_contact(
     i_ga,
     i_gb,
@@ -428,12 +449,7 @@ def func_set_contact(
     Set the contact data for the contact [i_c]. This is used for the backward pass, which parallelizes over the entire
     contact data, and for the split narrowphase multi-contact writes.
     """
-    friction_a = dyn_info.geoms.friction[i_ga] * dyn_state.geoms.friction_ratio[i_ga, i_b]
-    friction_b = dyn_info.geoms.friction[i_gb] * dyn_state.geoms.friction_ratio[i_gb, i_b]
-    friction_torsional_a = dyn_info.geoms.friction_torsional[i_ga] * dyn_state.geoms.friction_ratio[i_ga, i_b]
-    friction_torsional_b = dyn_info.geoms.friction_torsional[i_gb] * dyn_state.geoms.friction_ratio[i_gb, i_b]
-    friction_rolling_a = dyn_info.geoms.friction_rolling[i_ga] * dyn_state.geoms.friction_ratio[i_ga, i_b]
-    friction_rolling_b = dyn_info.geoms.friction_rolling[i_gb] * dyn_state.geoms.friction_ratio[i_gb, i_b]
+    frictions = func_resolve_contact_friction(i_ga, i_gb, i_b, dyn_state, dyn_info)
 
     # Every contact the solver sees is written here, so a non-finite position, normal or penetration is flagged here
     # rather than several stages later as a force gone wrong. Flagged rather than dropped: a missing contact lets
@@ -450,9 +466,7 @@ def func_set_contact(
     collider_state.contact_data.normal[i_c, i_b] = normal
     collider_state.contact_data.pos[i_c, i_b] = contact_pos
     collider_state.contact_data.penetration[i_c, i_b] = penetration
-    collider_state.contact_data.friction[i_c, i_b] = qd.max(qd.max(friction_a, friction_b), 1e-2)
-    collider_state.contact_data.friction_torsional[i_c, i_b] = qd.max(friction_torsional_a, friction_torsional_b)
-    collider_state.contact_data.friction_rolling[i_c, i_b] = qd.max(friction_rolling_a, friction_rolling_b)
+    collider_state.contact_data.friction[i_c, i_b] = frictions
     # The constraint time constant is floored on the mixed value rather than on each geom's own (see the geom
     # sanitize site in rigid_solver.py); 2.0 is TIME_CONSTANT_SAFETY_FACTOR (rigid_solver.py).
     sol_params = 0.5 * (dyn_info.geoms.sol_params[i_ga] + dyn_info.geoms.sol_params[i_gb])
