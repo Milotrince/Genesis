@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Hashable
 import numpy as np
 import torch
 
+import quadrants as qd
+
 import genesis as gs
 from genesis.constants import link_ref_frame
 from genesis.engine.states.entities import RigidEntityState
