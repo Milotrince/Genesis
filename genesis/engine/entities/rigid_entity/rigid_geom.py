@@ -17,7 +17,7 @@ from genesis.utils.misc import DeprecationError, qd_to_torch, tensor_to_array
 from .description import RigidGeomDescription, RigidVisGeomDescription
 
 if TYPE_CHECKING:
-    from genesis.engine.materials.rigid import Rigid as RigidMaterial
+    from genesis.engine.materials.rigid import RigidMaterial
     from genesis.engine.mesh import Mesh
     from genesis.engine.solvers.rigid.rigid_solver import RigidSolver
 
