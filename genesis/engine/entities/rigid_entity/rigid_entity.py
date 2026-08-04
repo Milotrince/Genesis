@@ -3338,8 +3338,9 @@ class RigidEntity(KinematicEntity):
         Note
         ----
         The torsional friction coefficient associated with a pair of geometries in contact is defined as the maximum
-        between their respective values (see 'gs.materials.Rigid'). Only effective when torsional friction is enabled
-        at the scene level (see 'RigidOptions.enable_torsional_friction').
+        between their respective values (see 'gs.materials.Rigid'). Declaring it for the two materials through
+        'RigidMaterial.set_friction_pair' fixes it for their contacts instead. Only effective when torsional friction
+        is enabled at the scene level (see 'RigidOptions.enable_torsional_friction').
 
         Parameters
         ----------
@@ -3359,8 +3360,9 @@ class RigidEntity(KinematicEntity):
         Note
         ----
         The rolling friction coefficient associated with a pair of geometries in contact is defined as the maximum
-        between their respective values (see 'gs.materials.Rigid'). Only effective when rolling friction is enabled
-        at the scene level (see 'RigidOptions.enable_rolling_friction').
+        between their respective values (see 'gs.materials.Rigid'). Declaring it for the two materials through
+        'RigidMaterial.set_friction_pair' fixes it for their contacts instead. Only effective when rolling friction is
+        enabled at the scene level (see 'RigidOptions.enable_rolling_friction').
 
         Parameters
         ----------
