@@ -109,8 +109,9 @@ NOISE_KWARGS = {
     "bias": 0.0005,
     "resolution": 0.0005,
     # 'jitter' is an additive delay sampled from [0, jitter), so SensorOptions rejects a jitter
-    # larger than the read delay; 'delay' matches it here to keep the jitter at its full range.
-    "delay": 0.001,
+    # larger than the read delay. The delay must also be a multiple of the step, hence one STEP_DT
+    # rather than matching the jitter.
+    "delay": STEP_DT,
     "jitter": 0.001,
     "crosstalk_strength": 0.3,
     "crosstalk_sigma": 0.01,
