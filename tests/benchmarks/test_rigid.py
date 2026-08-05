@@ -1,5 +1,6 @@
 import math
 import os
+import subprocess
 import time
 from collections import namedtuple
 from pathlib import Path
@@ -829,6 +830,45 @@ def make_dex_hand(n_envs, solver=None, gjk=None, **scene_kwargs):
 # ---------------------------------------------------------------------------
 
 
+def _process_gpu_mem_mb():
+    # Per-process GPU memory (MiB) for this worker, via nvidia-smi.
+    #
+    # `torch.cuda.mem_get_info` reports DEVICE-WIDE memory (`total - free`): it also counts other processes
+    # sharing the GPU, the CUDA context, and the quadrants memory pool reservation. That makes the number both
+    # noisy across runs and flat after build, since the pool is grabbed up front and never released.
+    # `--query-compute-apps` isolates the memory CUDA attributes to THIS pid, which is also the source of truth
+    # used by `monitor_test_mem.py`. Returns None on non-CUDA backends or when nvidia-smi is unavailable.
+    device = getattr(gs, "device", None)
+    if device is None or getattr(device, "type", None) != "cuda":
+        return None
+    try:
+        output = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=True,
+            text=True,
+            timeout=10,
+        ).stdout
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+
+    pid = os.getpid()
+    used_mb = None
+    for line in output.splitlines():
+        fields = line.split(",")
+        if len(fields) != 2:
+            continue
+        try:
+            row_pid, row_mb = int(fields[0]), float(fields[1])
+        except ValueError:
+            continue
+        if row_pid == pid:
+            # A pid can appear once per GPU context; accumulate to be safe.
+            used_mb = row_mb if used_mb is None else used_mb + row_mb
+    return used_mb
+
+
 def run_benchmark(step_fn, *, n_envs, meta):
     import quadrants as qd
 
@@ -851,6 +891,12 @@ def run_benchmark(step_fn, *, n_envs, meta):
     step_fn()
     qd.sync()
 
+    # Measured once after build and the warmup-bracketing step above, so the quadrants pool and torch allocator are
+    # fully warmed: this is the steady post-build footprint. In performance mode every array is preallocated at build
+    # and never grows during stepping, so it is also the peak. `peak_mem_mb` is kept equal to it for the plotting
+    # scripts that read both.
+    mem_after_build_mb = _process_gpu_mem_mb()
+
     num_steps = 0
     is_recording = False
     time_start = time.time()
@@ -870,7 +916,13 @@ def run_benchmark(step_fn, *, n_envs, meta):
     runtime_fps = int(num_steps * max(n_envs, 1) / time_elapsed)
     realtime_factor = runtime_fps * meta.step_dt
 
-    return dict(compile_time=meta.compile_time, runtime_fps=runtime_fps, realtime_factor=realtime_factor)
+    return dict(
+        compile_time=meta.compile_time,
+        runtime_fps=runtime_fps,
+        realtime_factor=realtime_factor,
+        mem_after_build_mb=mem_after_build_mb,
+        peak_mem_mb=mem_after_build_mb,
+    )
 
 
 # ---------------------------------------------------------------------------

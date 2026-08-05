@@ -819,13 +819,16 @@ def initialize_genesis(request, monkeypatch, tmp_path, backend, precision, perfo
 
             monkeypatch.setattr(RigidSimStaticConfig, "__init__", _RigidSimStaticConfig_init)
 
-        if gs.backend != gs.cpu and gs.device.index is not None:
-            # The device torch selected must be one this worker is allowed to use. Anything else - including a
-            # -1 meaning the device could not be confirmed - fails hard rather than letting an unverified device
-            # through, on every platform.
-            device_idx = _torch_get_gpu_idx(gs.device.index)
-            if device_idx not in _get_gpu_indices():
-                raise RuntimeError(f"Invalid CUDA GPU device, got {device_idx}, not in {_get_gpu_indices()}.")
+        # 'GENESIS_SKIP_GPU_DEVICE_CHECK' opts out on hosts where the check cannot resolve the device, e.g. a
+        # container that exposes the GPU but not the nvidia-smi enumeration the check compares against.
+        if not os.environ.get("GENESIS_SKIP_GPU_DEVICE_CHECK", ""):
+            if gs.backend != gs.cpu and gs.device.index is not None:
+                # The device torch selected must be one this worker is allowed to use. Anything else - including a
+                # -1 meaning the device could not be confirmed - fails hard rather than letting an unverified device
+                # through, on every platform.
+                device_idx = _torch_get_gpu_idx(gs.device.index)
+                if device_idx not in _get_gpu_indices():
+                    raise RuntimeError(f"Invalid CUDA GPU device, got {device_idx}, not in {_get_gpu_indices()}.")
 
         if backend != gs.cpu and gs.backend == gs.cpu:
             pytest.skip(SKIP_NO_GPU)

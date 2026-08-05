@@ -654,6 +654,27 @@ class Scene(RBC):
         """
         return self._sim._sensor_manager.create_sensor(sensor_options)
 
+    @gs.assert_unbuilt
+    def add_audio_source(self, source_options):
+        """
+        Add an audio *source* to the scene.
+
+        Audio sources generate sound from the physics (e.g. actuation noise) -- the synthesis stage of the audio
+        pipeline. They are not sensors: a receiver sensor (``SpatialAudio`` / microphone) renders the registered
+        sources. Contrast with ``add_sensor`` (receivers / measurements).
+
+        Parameters
+        ----------
+        source_options : AudioSourceOptions
+            The options for the audio source.
+        """
+        return self._sim._audio_manager.add_source(source_options)
+
+    @property
+    def audio(self):
+        """The scene's :class:`~genesis.engine.audio.AudioManager` (registry of audio sources)."""
+        return self._sim._audio_manager
+
     @gs.assert_built
     def read_sensors(self, envs_idx=None) -> "dict[type[Sensor], torch.Tensor]":
         """

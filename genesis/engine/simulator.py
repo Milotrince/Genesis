@@ -35,6 +35,7 @@ from .solvers import (
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .states.cache import QueriedStates
 from .states.solvers import SimState
+from .audio import AudioManager
 from .sensors import SensorManager
 
 if TYPE_CHECKING:
@@ -159,6 +160,9 @@ class Simulator(RBC):
         # sensors
         self._sensor_manager = SensorManager(self)
 
+        # audio sources (the synthesis stage; receiver sensors render this registry)
+        self._audio_manager = AudioManager(self)
+
     def _add_entity(self, morph: Morph, material, surface, visualize_contact=False, name: str | None = None):
         if isinstance(material, gs.materials.Tool):
             entity = self.tool_solver.add_entity(self.n_entities, material, morph, surface, name=name)
@@ -216,9 +220,11 @@ class Simulator(RBC):
                 entity.build()
 
         self._sensor_manager.build()
+        self._audio_manager.build()
 
     def destroy(self):
         self._sensor_manager.destroy()
+        self._audio_manager.destroy()
 
     def reset(self, state: SimState, envs_idx=None):
         for solver, solver_state in zip(self._solvers, state):
@@ -233,6 +239,7 @@ class Simulator(RBC):
 
         # reset sensors state
         self._sensor_manager.reset(envs_idx=envs_idx)
+        self._audio_manager.reset(envs_idx=envs_idx)
 
     def reset_grad(self):
         for solver in self._active_solvers:
@@ -293,6 +300,8 @@ class Simulator(RBC):
         if self.rigid_solver.is_active:
             self.rigid_solver.clear_external_force()
 
+        # Synthesize audio sources, then render receiver sensors (microphones) over the source registry.
+        self._audio_manager.step()
         self._sensor_manager.step()
 
     def _step_grad(self):
