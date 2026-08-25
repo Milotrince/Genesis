@@ -188,14 +188,13 @@ class LinkInertialInfo(NamedTuple):
 
     Computed while the parsed geom infos (and their authored per-geom densities) are still available, and consumed
     by the post-load passes. 'props' feeds the align anchor. 'is_mass_explicit' feeds the all-or-none source check
-    in '_align_free_roots': True when the mass is explicit in the asset (an explicit mass, or an authored density on
-    every geom), False for a pure geometry estimate (the true mass is a uniform material-density rescale of it), and
-    None when the link mixes geoms with and without an authored density (neither explicit nor uniformly rescalable).
-    'hint' is the material-density-resolved geometry estimate that resolving a link description consumes (None for
-    kinematic entities, which have no dynamics)."""
+    in '_align_free_roots': True when the asset weighs the link (an explicit mass, or a density on any of its geoms),
+    False for a pure geometry estimate, whose true mass is a uniform material-density rescale of it. 'hint' is the
+    material-density-resolved geometry estimate that resolving a link description consumes (None for kinematic
+    entities, which have no dynamics)."""
 
     props: LinkInertial
-    is_mass_explicit: bool | None
+    is_mass_explicit: bool
     hint: InertialProperties | None
 
 
