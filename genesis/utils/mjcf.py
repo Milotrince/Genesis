@@ -28,15 +28,22 @@ MIN_TIMECONST = np.finfo(np.double).eps
 MUJOCO_DEFAULT_DENSITY = 1000.0
 
 
-class MjcfModel(NamedTuple):
-    """A compiled Mujoco model and the geom densities the asset authored, indexed by geom id.
+class GeomMassSource(NamedTuple):
+    """What a geom states about its own mass, as the two alternatives Mujoco accepts. Both None when it states
+    nothing, and 'mass' wins over 'density' where the asset gives both, as it does for Mujoco."""
 
-    The compiled model folds the density into the body mass, so it is read off the spec while still available.
-    'geoms_density' holds None wherever the asset left the density to Mujoco's default.
+    density: float | None
+    mass: float | None
+
+
+class MjcfModel(NamedTuple):
+    """A compiled Mujoco model and what each of its geoms states about its mass, indexed by geom id.
+
+    The compiled model folds both into the body mass, so they are read off the spec while still available.
     """
 
     model: mujoco.MjModel
-    geoms_density: tuple[float | None, ...]
+    geoms_mass_source: tuple[GeomMassSource, ...]
 
 
 def get_model_name(file_path):
@@ -209,10 +216,12 @@ def build_model(
             # Compiling through the spec keeps the authored densities reachable, its geom ids matching the model's.
             spec = mujoco.MjSpec.from_string(data)
             mj = spec.compile()
-            geoms_density = [None] * mj.ngeom
+            geoms_mass_source = [GeomMassSource(None, None)] * mj.ngeom
             for spec_geom in spec.geoms:
-                if spec_geom.density != MUJOCO_DEFAULT_DENSITY:
-                    geoms_density[spec_geom.id] = spec_geom.density
+                # Mujoco leaves the mass NaN unless the geom states one, and resolves the density either way.
+                geom_mass = None if np.isnan(spec_geom.mass) else spec_geom.mass
+                geom_density = spec_geom.density if spec_geom.density != MUJOCO_DEFAULT_DENSITY else None
+                geoms_mass_source[spec_geom.id] = GeomMassSource(geom_density, geom_mass)
 
             # Special treatment for URDF
             if is_urdf_file:
@@ -236,12 +245,12 @@ def build_model(
                 mj.geom_solref[:, 0] = MIN_TIMECONST
                 mj.eq_solref[:, 0] = MIN_TIMECONST
     elif isinstance(xml, mujoco.MjModel):
-        # An already-compiled model has no spec to read the authored densities from.
-        mj, geoms_density = xml, [None] * xml.ngeom
+        # An already-compiled model has no spec to read what its geoms state from.
+        mj, geoms_mass_source = xml, [GeomMassSource(None, None)] * xml.ngeom
     else:
         gs.raise_exception(f"'{xml}' is not a valid MJCF or URDF file.")
 
-    return MjcfModel(mj, tuple(geoms_density))
+    return MjcfModel(mj, tuple(geoms_mass_source))
 
 
 def parse_xml(morph, surface, rigid_options=None):
@@ -256,7 +265,7 @@ def parse_xml(morph, surface, rigid_options=None):
     # the expanded model is only ever read by the parsers.
     exclude_ground_plane = isinstance(morph, gs.morphs.MJCF) and morph.exclude_ground_plane
     file = uu.load_xacro(morph.file, morph.xacro_args) if morph.is_format(XACRO_FORMAT) else morph.file
-    mj, geoms_density = build_model(
+    mj, geoms_mass_source = build_model(
         file,
         not morph.visualization,
         merge_fixed_links,
@@ -270,7 +279,7 @@ def parse_xml(morph, surface, rigid_options=None):
     #     gs.logger.warning("(MJCF) Tendon not supported")
 
     # Parse all geometries grouped by parent joint (or world)
-    links_g_infos = parse_geoms(mj, geoms_density, morph.scale, surface, file)
+    links_g_infos = parse_geoms(mj, geoms_mass_source, morph.scale, surface, file)
 
     # Parse all bodies (links and joints)
     l_infos, links_j_infos = parse_links(mj, morph.scale)
@@ -531,7 +540,7 @@ def parse_links(mj, scale):
     return l_infos, j_infos
 
 
-def parse_geom(mj, i_g, geom_density, scale, surface, xml_path):
+def parse_geom(mj, i_g, geom_mass_source, scale, surface, xml_path):
     mj_geom = mj.geom(i_g)
 
     geom_size = mj_geom.size
@@ -754,9 +763,12 @@ def parse_geom(mj, i_g, geom_density, scale, surface, xml_path):
         "friction_rolling": mj_geom.friction[2] if mj_geom.condim[0] >= 6 else 0.0,
         "sol_params": np.concatenate((mj_geom.solref, mj_geom.solimp)),
     }
-    # Fusion grouping diffs the key against a nan default when it is absent, so a None would raise instead.
-    if geom_density is not None:
-        info["density"] = geom_density
+    # Fusion grouping diffs these keys against a nan default when absent, so a None would raise instead.
+    if geom_mass_source.density is not None:
+        info["density"] = geom_mass_source.density
+    if geom_mass_source.mass is not None:
+        # A density needs no scaling, whereas a stated mass tracks the volume the morph scale gives the geom.
+        info["mass"] = geom_mass_source.mass * scale**3
     if is_col:
         info["mesh"] = mesh
     else:
@@ -765,7 +777,7 @@ def parse_geom(mj, i_g, geom_density, scale, surface, xml_path):
     return info
 
 
-def parse_geoms(mj, geoms_density, scale, surface, xml_path):
+def parse_geoms(mj, geoms_mass_source, scale, surface, xml_path):
     links_g_info = [[] for _ in range(mj.nbody)]
 
     # Loop over all geometries sequentially
@@ -775,7 +787,7 @@ def parse_geoms(mj, geoms_density, scale, surface, xml_path):
             continue
 
         # try parsing a given geometry
-        g_info = parse_geom(mj, i_g, geoms_density[i_g], scale, surface, xml_path)
+        g_info = parse_geom(mj, i_g, geoms_mass_source[i_g], scale, surface, xml_path)
         if g_info is None:
             continue
 
