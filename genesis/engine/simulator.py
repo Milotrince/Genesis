@@ -130,9 +130,11 @@ class Simulator(RBC):
             entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name)
         else:
             # Several solvers may declare a class the material belongs to, since 'Rigid' derives from 'Kinematic'. The
-            # one declaring the most derived class simulates it (see 'Solver.material_cls').
+            # one declaring the most derived class simulates it (see 'Solver.material_cls'). A visual-only scene holds
+            # no physics solver to route to, so only the kinematic solver is a candidate there.
+            candidates = (self.kinematic_solver,) if self.scene.visual_only else self._solvers
             solver = None
-            for candidate in self._solvers:
+            for candidate in candidates:
                 if candidate.material_cls is None or not isinstance(material, candidate.material_cls):
                     continue
                 if solver is None or issubclass(candidate.material_cls, solver.material_cls):

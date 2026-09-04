@@ -853,3 +853,101 @@ def test_warn_solver_numerical_stability(boxes_size, caplog):
     with caplog.at_level("WARNING"):
         scene.build()
     assert any("too small for the constraint solver" in record.message for record in caplog.records)
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_visual_only_scene_renders_without_simulating(n_envs, show_viewer):
+    # A free body whose only geometry sits off the link origin, so the COM anchor that 'align' applies shows up in
+    # qpos. World geometry is invariant under that anchor, which is why qpos is what a preview has to agree on.
+    robot = ET.Element("robot", name="offset_com")
+    link = ET.SubElement(robot, "link", name="base")
+    for tag in ("visual", "collision"):
+        node = ET.SubElement(link, tag)
+        ET.SubElement(node, "origin", xyz="0.02 0 0", rpy="0 0 0")
+        ET.SubElement(ET.SubElement(node, "geometry"), "box", size="0.1 0.1 0.1")
+    offset_com_urdf = ET.tostring(robot, encoding="unicode")
+
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+            gravity=(0.0, 0.0, -9.81),
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(4.0, -2.0, 2.0),
+            camera_lookat=(1.0, 0.0, 0.5),
+        ),
+        show_viewer=show_viewer,
+        visual_only=True,
+    )
+    falling = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(0.0, 0.0, 0.5),
+        ),
+    )
+    # Deliberately interpenetrating: a physics build would push them apart.
+    overlapping_lower = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(1.0, 0.0, 0.5),
+        ),
+    )
+    overlapping_upper = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+            pos=(1.0, 0.0, 0.6),
+        ),
+    )
+    anchored = scene.add_entity(
+        morph=gs.morphs.URDF(
+            file=offset_com_urdf,
+            pos=(2.0, 0.0, 1.0),
+            align=True,
+        ),
+    )
+    arm = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file="xml/franka_emika_panda/panda.xml",
+            pos=(3.0, 0.0, 0.0),
+        ),
+    )
+    camera = scene.add_camera(
+        res=(96, 96),
+        pos=(1.0, -2.0, 1.0),
+        lookat=(1.0, 0.0, 0.5),
+        GUI=False,
+    )
+    scene.build(n_envs=n_envs)
+
+    # The anchor 'align' derives from collision geometry, so it lands on the geom centroid rather than the link
+    # origin. A preview that skipped collision geometry would report the link origin here instead.
+    assert_allclose(anchored.get_qpos()[..., 0], 2.02, tol=gs.EPS)
+
+    # Forward kinematics still drives the render, so a commanded joint angle moves the links.
+    dofs_idx = arm.get_joint("joint1").dofs_idx_local
+    tip_pos_rest = arm.get_links_pos()[..., -1, :].clone()
+    arm.set_dofs_position(0.5, dofs_idx)
+    assert (arm.get_links_pos()[..., -1, :] - tip_pos_rest).abs().max() > 0.01
+    assert_allclose(arm.get_dofs_position(dofs_idx), 0.5, tol=gs.EPS)
+
+    falling_z_init = falling.get_pos()[..., 2].clone()
+    for _ in range(20):
+        scene.step()
+
+    # Nothing integrates: over 20 steps at dt=0.01 gravity would have pulled the box down 0.5 * 9.81 * 0.2**2.
+    assert_allclose(falling.get_pos()[..., 2], falling_z_init, tol=gs.EPS)
+
+    # Nothing resolves contacts either, so the pair authored interpenetrating holds the exact overlap it was given.
+    assert_allclose(
+        overlapping_upper.get_pos()[..., 2] - overlapping_lower.get_pos()[..., 2],
+        0.1,
+        tol=gs.EPS,
+    )
+
+    # Moving an entity re-poses it in the render without a step, which is what an editor needs to show an edit
+    # while the simulation is held.
+    rgb_before = camera.render(rgb=True)[0].copy()
+    overlapping_upper.set_pos((1.0, 0.0, 2.0))
+    rgb_after = camera.render(rgb=True, force_render=True)[0]
+    assert (rgb_before != rgb_after).any()

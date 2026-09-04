@@ -37,7 +37,7 @@ from genesis.options import (
 )
 from genesis.options.morphs import Morph
 from genesis.options.recorders import RecorderOptions
-from genesis.options.renderers import RendererOptions
+from genesis.options.renderers import BatchRenderer, RendererOptions
 from genesis.options.surfaces import Surface
 from genesis.recorders import RecorderManager
 from genesis.repr_base import RBC
@@ -105,6 +105,13 @@ class Scene(RBC):
         The renderer options used by `camera` for rendering images. This doesn't affect the behavior of the interactive viewer.
     show_viewer : bool
         Whether to show the interactive viewer. Set it to False if you only need headless rendering.
+    visual_only : bool
+        Whether to build a scene that renders but simulates nothing. Every entity is handled by the kinematic solver,
+        which places visual geometry from forward kinematics alone, so the build skips the collision and constraint
+        machinery and completes much faster, at the cost of no gravity, no contacts and no dynamics. Poses match a
+        physics build, so a scene previewed this way can be rebuilt with physics without anything moving. Only
+        `gs.materials.Rigid` and `gs.materials.Kinematic` entities can be previewed, and a raycaster sensor over one
+        needs `use_visual_raycasting=True` on its material.
     show_FPS : bool
         Whether to show the FPS in the terminal.
     options : SceneOptions
@@ -129,6 +136,7 @@ class Scene(RBC):
         profiling_options: ProfilingOptions | None = None,
         renderer: RendererOptions | None = None,
         show_viewer: bool | None = None,
+        visual_only: bool = False,
         show_FPS: bool | None = None,  # deprecated, use Scene.options.profiling.show_FPS instead
         options: SceneOptions | None = None,
     ):
@@ -175,6 +183,16 @@ class Scene(RBC):
         if show_FPS is not None:
             warn_once("Scene.show_FPS is deprecated. Please use Scene.options.profiling.show_FPS")
             self.options.profiling.show_FPS = show_FPS
+
+        self._visual_only = visual_only
+        if visual_only:
+            if self.options.sim.requires_grad:
+                gs.raise_exception("`sim_options.requires_grad` cannot be True when `visual_only` is True.")
+            if isinstance(self.options.renderer, BatchRenderer):
+                gs.raise_exception(
+                    "`gs.renderers.BatchRenderer` does not support `visual_only`, as it draws the rigid solver only. "
+                    "Use `gs.renderers.Rasterizer` or `gs.renderers.RayTracer`."
+                )
 
         # description
         self._desc = SceneDescription(options=self.options)
@@ -293,6 +311,15 @@ class Scene(RBC):
         if material is None:
             material = gs.materials.Rigid()
 
+        if self._visual_only:
+            if not isinstance(material, gs.materials.Kinematic):
+                gs.raise_exception(
+                    f"Unsupported material for a visual-only scene: {material}. Only `gs.materials.Rigid` and "
+                    "`gs.materials.Kinematic` have a visualization-only form."
+                )
+            if visualize_contact:
+                gs.raise_exception("`visualize_contact` requires contacts, which a visual-only scene does not have.")
+
         if surface is None:
             # assign a local surface, otherwise modification will apply on global default surface
             surface = gs.surfaces.Default()
@@ -318,10 +345,16 @@ class Scene(RBC):
             if surface.vis_mode is None:
                 surface.vis_mode = "visual"
 
-            if surface.vis_mode not in ("visual", "collision", "sdf"):
+            # Drawing an entity from its collision geometry requires it to hold some. The kinematic solver keeps
+            # visual geoms alone, so a previewed entity can only be drawn as 'visual'.
+            has_collision_geoms = isinstance(material, gs.materials.Tool) or (
+                isinstance(material, gs.materials.Rigid) and not self._visual_only
+            )
+            vis_modes = ("visual", "collision", "sdf") if has_collision_geoms else ("visual",)
+            if surface.vis_mode not in vis_modes:
                 gs.raise_exception(
                     f"Unsupported `surface.vis_mode` for material {material}: '{surface.vis_mode}'. Expected one of: "
-                    "['visual', 'collision', 'sdf']."
+                    f"{list(vis_modes)}."
                 )
 
         elif isinstance(
@@ -1556,6 +1589,11 @@ class Scene(RBC):
     def requires_grad(self):
         """Whether the scene is in differentiable mode."""
         return self._sim.requires_grad
+
+    @property
+    def visual_only(self) -> bool:
+        """Whether the scene renders without simulating (see `Scene.__init__`)."""
+        return self._visual_only
 
     @property
     def is_built(self) -> bool:

@@ -53,6 +53,7 @@ class InteractiveScene:
         self._scene_kwargs: dict[str, Any] = dict(
             options=scene.options,
             show_viewer=scene.viewer is not None,
+            visual_only=scene.visual_only,
         )
         self._build_kwargs: dict[str, Any] = dict(
             n_envs=scene.n_envs,
@@ -162,12 +163,7 @@ class InteractiveScene:
         self._refresh_visual_transforms_unlocked()
 
     def _refresh_visual_transforms_unlocked(self):
-        rigid_solver = self.scene.rigid_solver
-        if not rigid_solver.is_active:
-            return
-        rigid_solver.update_geoms_render_T()
-        rigid_solver.update_vgeoms()
-        rigid_solver.update_vgeoms_render_T()
+        self.scene.visualizer.update_visual_states(force_render=True)
         ctx = self._ctx
         ctx.update_link_frame()
         ctx.update_rigid()
@@ -211,6 +207,8 @@ class InteractiveScene:
         old_mode = entity.surface.vis_mode
         if old_mode == mode:
             return
+        if not isinstance(entity, gs.engine.entities.RigidEntity):
+            gs.raise_exception(f"Entity '{entity.name}' holds no collision geometry to render.")
 
         ctx = self._ctx
         rigid_solver = self.scene.rigid_solver
