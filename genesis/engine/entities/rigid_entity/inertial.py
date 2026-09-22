@@ -6,9 +6,9 @@ from typing import NamedTuple, Sequence
 import numpy as np
 
 import genesis as gs
-from genesis.engine.mesh import InertialProperties
 from genesis.typing import Matrix3x3Type, UnitVec4FType, Vec3FType
 from genesis.utils import geom as gu
+from genesis.utils.mesh import InertialProperties
 
 RHO_OBJECT = 600.0
 RHO_ROBOT = 1500.0

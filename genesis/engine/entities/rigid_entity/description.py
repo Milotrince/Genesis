@@ -18,13 +18,11 @@ from typing import Any, Sequence, TypeVar
 
 import numpy as np
 import trimesh
-from scipy.spatial import QhullError
 from typing_extensions import Self
 
 import genesis as gs
 from genesis.constants import EQUALITY_TYPE, GEOM_TYPE, JOINT_TYPE
 from genesis.engine.materials.base import Material
-from genesis.engine.mesh import InertialProperties
 from genesis.options.morphs import Morph
 from genesis.options.options import Options
 from genesis.options.surfaces import Surface
@@ -33,6 +31,7 @@ from genesis.utils import mesh as mu
 from genesis.utils import mjcf as mju
 from genesis.utils import terrain as tu
 from genesis.utils import urdf as uu
+from genesis.utils.mesh import InertialProperties
 from genesis.utils.misc import get_assets_dir
 
 from ..base_entity import EntityDescription
@@ -56,9 +55,6 @@ from .inertial import (
 
 # Rounding a pose parsed from a file may carry, within which it reads as the identity
 POSE_EPS = 1e-9
-
-# Reject wraps that collapse to a sliver when their sampling misses thin walls
-WRAP_MIN_HULL_RATIO = 1e-2
 
 
 @dataclass(kw_only=True)
@@ -1377,38 +1373,37 @@ class KinematicEntityDescription(EntityDescription):
         is_file_morph = isinstance(morph, gs.options.morphs.FileMorph)
         g_infos = select_mass_bearing_g_infos(cg_infos, vg_infos, is_file_morph and morph.inertia_from_visual)
 
-        # Close open visual meshes for inertia estimation while preserving the rendered surface
-        watertighten = morph.watertighten if is_file_morph else None
+        # An asset splits one surface across several visual meshes by material. The winding number is additive over
+        # faces and a patch alone encloses nothing, so the open meshes are fused into one soup, in the frame of the
+        # first of them as fused collision geoms are (see '_postprocess_collision_geoms_impl').
         if g_infos is vg_infos and explicit_inertia is None:
-            wrapped = []
+            closed_g_infos, open_g_infos = [], []
             for g_info in g_infos:
-                tmesh = g_info["vmesh"].trimesh
-                is_mesh = g_info.get("type", gs.GEOM_TYPE.MESH) == gs.GEOM_TYPE.MESH
-                # Degenerate meshes contribute zero inertia, as in 'Mesh.inertial'
-                hull_volume = 0.0
-                if is_mesh:
-                    try:
-                        hull_volume = tmesh.convex_hull.volume
-                    except QhullError:
-                        hull_volume = 0.0
-                # Overlapping shells can double-count volume. Fall back to collision geometry for the whole link.
-                if hull_volume > 0.0 and abs(tmesh.volume) > hull_volume:
-                    wrapped = None
-                    break
-                if hull_volume == 0.0 or tmesh.is_watertight or tmesh.is_convex or watertighten is None:
-                    wrapped.append(g_info)
-                    continue
-                closed_tmesh = mu.watertighten_trimesh(tmesh, watertighten)
-                # Keep the convex-hull fallback in 'Mesh.inertial' if wrapping collapses the mesh
-                if closed_tmesh.volume < WRAP_MIN_HULL_RATIO * hull_volume:
-                    wrapped.append(g_info)
-                    continue
-                metadata = {**g_info["vmesh"].metadata, "watertightened": True}
-                wrapped.append({**g_info, "vmesh": gs.Mesh.from_trimesh(mesh=closed_tmesh, metadata=metadata)})
-            if wrapped is not None:
-                g_infos = wrapped
-            elif cg_infos:
-                g_infos = cg_infos
+                is_open_mesh = (
+                    g_info.get("type", gs.GEOM_TYPE.MESH) == gs.GEOM_TYPE.MESH
+                    and not g_info["vmesh"].trimesh.is_watertight
+                )
+                (open_g_infos if is_open_mesh else closed_g_infos).append(g_info)
+
+            if len(open_g_infos) > 1:
+                first_g_info = open_g_infos[0]
+                T_first_inv = np.linalg.inv(
+                    gu.trans_quat_to_T(
+                        first_g_info.get("pos", gu.zero_pos()), first_g_info.get("quat", gu.identity_quat())
+                    )
+                )
+                tmeshes = []
+                for g_info in open_g_infos:
+                    tmesh = g_info["vmesh"].trimesh
+                    T_rel = T_first_inv @ gu.trans_quat_to_T(
+                        g_info.get("pos", gu.zero_pos()), g_info.get("quat", gu.identity_quat())
+                    )
+                    if not np.allclose(T_rel, np.eye(4)):
+                        tmesh = tmesh.copy()
+                        tmesh.apply_transform(T_rel)
+                    tmeshes.append(tmesh)
+                fused_vmesh = gs.Mesh.from_trimesh(mesh=trimesh.util.concatenate(tmeshes))
+                g_infos = [*closed_g_infos, {**first_g_info, "vmesh": fused_vmesh}]
 
         hint = compose_inertial_from_g_infos(g_infos, rho=1.0)
         props = finalize_inertial(

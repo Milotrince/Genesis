@@ -5,6 +5,7 @@ import os
 import pickle as pkl
 from functools import lru_cache
 from pathlib import Path
+from typing import NamedTuple
 
 import coacd
 import igl
@@ -14,8 +15,10 @@ import OpenEXR
 import tetgen
 import trimesh
 from PIL import Image
+from scipy.spatial import QhullError
 
 import genesis as gs
+from genesis.typing import Matrix3x3Type, Vec3FType
 
 from . import geom as gu
 from .misc import (
@@ -464,20 +467,73 @@ def convex_decompose(mesh, coacd_options):
     return mesh_parts
 
 
-def watertighten_trimesh(tmesh, aggressiveness):
-    """Return a watertight trimesh, cached on disk by vertices, faces, and decimation aggressiveness (0 to 8).
+# Grid the occupancy estimate starts from, in cells along the longest extent of the surface, and the cell count it stays
+# under while refining. A budget on the count lets an elongated surface refine further than a cube-shaped one for the
+# same cost.
+OCCUPANCY_CELLS_MIN = 32
+OCCUPANCY_CELLS_MAX = 2_000_000
+# Fraction of the estimated volume lying in fully interior cells, below which the solid is thinner than about two cells
+# where most of its volume lies and the boundary cells on its two sides count the same volume twice.
+OCCUPANCY_RESOLVED_MIN = 0.5
 
-    See `watertighten_mesh` for wrapping and decimation parameters.
+
+class InertialProperties(NamedTuple):
+    """A rigid body's intrinsic inertial: mass, center of mass 'com', and inertia tensor 'i' about that COM."""
+
+    mass: float
+    com: Vec3FType
+    i: Matrix3x3Type
+
+
+def inertial_from_occupancy(verts, faces) -> InertialProperties:
+    """Unit-density mass properties of the volume an open, self-intersecting or inverted triangle soup encloses.
+
+    A cell of a regular grid is interior where the generalized winding number of the surface exceeds one half in
+    magnitude, and a cell the surface crosses is filled by the fraction its distance to the surface leaves on the
+    interior side. The grid starts at `OCCUPANCY_CELLS_MIN` cells along the longest extent and is refined while under
+    `OCCUPANCY_RESOLVED_MIN` of the volume lies in fully interior cells and the next grid stays under
+    `OCCUPANCY_CELLS_MAX` cells. The convex hull bounds the result: a volume above it means the surface is thinner than
+    the finest grid, and the hull's mass properties are returned. A single-sided surface enclosing a cavity is filled,
+    and a surface too degenerate for a hull carries no mass.
     """
-    from .watertighten import watertighten_mesh
+    verts = np.ascontiguousarray(verts, dtype=np.float64)
+    faces = np.ascontiguousarray(faces, dtype=np.int64)
+    try:
+        hull = trimesh.Trimesh(vertices=verts, faces=faces, process=False).convex_hull
+    except QhullError:
+        return InertialProperties(0.0, np.zeros(3), np.zeros((3, 3)))
+    if hull.volume <= 0.0:
+        return InertialProperties(0.0, np.zeros(3), np.zeros((3, 3)))
 
-    cache = get_wt_cache(tmesh.vertices, tmesh.faces, aggressiveness)
-    cached_mesh = cache.load()
-    if cached_mesh is None:
-        cached_mesh = watertighten_mesh(tmesh.vertices, tmesh.faces, aggressiveness=aggressiveness)
-        cache.save(cached_mesh)
-    verts, faces = cached_mesh
-    return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+    verts_min = verts.min(axis=0)
+    extent = verts.max(axis=0) - verts_min
+    n_cells_axis = OCCUPANCY_CELLS_MIN
+    while True:
+        pitch = extent.max() / n_cells_axis
+        # One cell of padding: the occupancy of a surface lying on the bounding box spills half a cell outside it
+        n_cells = np.ceil(extent / pitch).astype(int) + 2
+        cells_axes = [verts_min[i] + (np.arange(n) - 0.5) * pitch for i, n in enumerate(n_cells)]
+        cells_pos = np.stack(np.meshgrid(*cells_axes, indexing="ij"), axis=-1).reshape(-1, 3)
+        cells_sqr_dist, _, _ = igl.point_mesh_squared_distance(cells_pos, verts, faces)
+        cells_winding = igl.fast_winding_number(verts, faces, cells_pos)
+        cells_signed_dist = np.sqrt(cells_sqr_dist) * np.where(np.abs(cells_winding) > 0.5, -1.0, 1.0)
+        cells_occupancy = np.clip(0.5 - cells_signed_dist / pitch, 0.0, 1.0)
+        n_cells_occupied = cells_occupancy.sum()
+        is_resolved = (cells_occupancy >= 1.0).sum() >= OCCUPANCY_RESOLVED_MIN * n_cells_occupied
+        if is_resolved or 8 * cells_pos.shape[0] > OCCUPANCY_CELLS_MAX:
+            break
+        n_cells_axis *= 2
+
+    volume = n_cells_occupied * pitch**3
+    if volume > hull.volume:
+        return InertialProperties(hull.volume, hull.center_mass, hull.moment_inertia)
+    com = (cells_occupancy @ cells_pos) * pitch**3 / volume
+    cells_rel_pos = cells_pos - com
+    # Each cell as a point mass about the center of mass, plus its own inertia as a cube about its center
+    inertia = np.eye(3) * (cells_occupancy * (cells_rel_pos**2).sum(axis=1)).sum()
+    inertia -= (cells_occupancy[:, None] * cells_rel_pos).T @ cells_rel_pos
+    inertia = inertia * pitch**3 + np.eye(3) * (volume * pitch**2 / 6.0)
+    return InertialProperties(volume, com, inertia)
 
 
 # 512 MiB of processed collision geometry. Sized by the geometry footprint actually retained (vertices and faces of
@@ -761,6 +817,8 @@ def _postprocess_collision_geoms_impl(
     # Nonconvex: watertighten each fused surface into a closed mesh so the grid SDF is reliable. The convex path skips
     # this (its hull / decomposition replaces the surface anyway, so an alpha-wrap would be wasted work).
     if not convexify and watertighten is not None:
+        from .watertighten import watertighten_mesh
+
         for g_info, is_fused in zip(g_infos, geoms_is_fused):
             # Fused geoms are always watertightened, as their sub-meshes may overlap while being individually
             # watertight. Other geoms are skipped if they are not generic meshes or already watertight or convex.
@@ -768,7 +826,15 @@ def _postprocess_collision_geoms_impl(
             if not is_fused and (g_info["type"] != gs.GEOM_TYPE.MESH or tmesh.is_watertight or tmesh.is_convex):
                 continue
 
-            fused = watertighten_trimesh(tmesh, watertighten)
+            # On-disk cache keyed by (vertices, faces, aggressiveness): a repeated build on the same geom is a file read
+            # instead of a multi-second SDF + DC + QEM rebuild.
+            cache = get_wt_cache(tmesh.vertices, tmesh.faces, watertighten)
+            cached_mesh = cache.load()
+            if cached_mesh is None:
+                cached_mesh = watertighten_mesh(tmesh.vertices, tmesh.faces, aggressiveness=watertighten)
+                cache.save(cached_mesh)
+            v_out, f_out = cached_mesh
+            fused = trimesh.Trimesh(vertices=v_out, faces=f_out, process=False)
             metadata = g_info["mesh"].metadata.copy()
             metadata["watertightened"] = True
             g_info["mesh"] = gs.Mesh.from_trimesh(mesh=fused, surface=gs.surfaces.Collision(), metadata=metadata)
