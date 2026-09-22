@@ -24,23 +24,19 @@ from .misc import get_assets_dir, redirect_libc_stderr
 
 
 MIN_TIMECONST = np.finfo(np.double).eps
-# Mujoco resolves every geom's density, so a geom authoring this value is indistinguishable from one authoring none.
+# MjSpec cannot distinguish an explicit default density from an omitted density
 MUJOCO_DEFAULT_DENSITY = 1000.0
 
 
 class GeomMassSource(NamedTuple):
-    """What a geom states about its own mass, as the two alternatives Mujoco accepts. Both None when it states
-    nothing, and 'mass' wins over 'density' where the asset gives both, as it does for Mujoco."""
+    """Per-geom mass and density, or None when unspecified. Mass takes precedence over density."""
 
     density: float | None
     mass: float | None
 
 
 class MjcfModel(NamedTuple):
-    """A compiled Mujoco model and what each of its geoms states about its mass, indexed by geom id.
-
-    The compiled model folds both into the body mass, so they are read off the spec while still available.
-    """
+    """Compiled Mujoco model and per-geom mass sources indexed by geom id."""
 
     model: mujoco.MjModel
     geoms_mass_source: tuple[GeomMassSource, ...]
@@ -213,12 +209,12 @@ def build_model(
         with open(os.devnull, "w") as stderr, redirect_libc_stderr(stderr):
             # Parse updated URDF file as a string
             data = ET.tostring(root, encoding="utf8")
-            # Compiling through the spec keeps the authored densities reachable, its geom ids matching the model's.
+            # MjSpec preserves per-geom mass and density, which compilation folds into body inertia
             spec = mujoco.MjSpec.from_string(data)
             mj = spec.compile()
             geoms_mass_source = [GeomMassSource(None, None)] * mj.ngeom
             for spec_geom in spec.geoms:
-                # Mujoco leaves the mass NaN unless the geom states one, and resolves the density either way.
+                # MjSpec uses NaN for unspecified mass
                 geom_mass = None if np.isnan(spec_geom.mass) else spec_geom.mass
                 geom_density = spec_geom.density if spec_geom.density != MUJOCO_DEFAULT_DENSITY else None
                 geoms_mass_source[spec_geom.id] = GeomMassSource(geom_density, geom_mass)
@@ -245,7 +241,6 @@ def build_model(
                 mj.geom_solref[:, 0] = MIN_TIMECONST
                 mj.eq_solref[:, 0] = MIN_TIMECONST
     elif isinstance(xml, mujoco.MjModel):
-        # An already-compiled model has no spec to read what its geoms state from.
         mj, geoms_mass_source = xml, [GeomMassSource(None, None)] * xml.ngeom
     else:
         gs.raise_exception(f"'{xml}' is not a valid MJCF or URDF file.")
@@ -763,11 +758,10 @@ def parse_geom(mj, i_g, geom_mass_source, scale, surface, xml_path):
         "friction_rolling": mj_geom.friction[2] if mj_geom.condim[0] >= 6 else 0.0,
         "sol_params": np.concatenate((mj_geom.solref, mj_geom.solimp)),
     }
-    # Fusion grouping diffs these keys against a nan default when absent, so a None would raise instead.
+    # Omit unspecified values: fusion grouping compares them numerically
     if geom_mass_source.density is not None:
         info["density"] = geom_mass_source.density
     if geom_mass_source.mass is not None:
-        # A density needs no scaling, whereas a stated mass tracks the volume the morph scale gives the geom.
         info["mass"] = geom_mass_source.mass * scale**3
     if is_col:
         info["mesh"] = mesh

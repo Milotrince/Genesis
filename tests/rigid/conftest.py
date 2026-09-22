@@ -650,9 +650,7 @@ def joint_with_partial_dynamics(joint_damping, joint_friction):
 
 @pytest.fixture(scope="session")
 def authored_geom_mass_mjcf():
-    """Generate an MJCF whose identical boxes state their mass as a geom density, a default-class density, a geom
-    mass, and not at all, beside bodies pairing a stated geom with an unstated one, fusing two stated masses, and
-    leaving a weightless collision geom beside a visual one."""
+    """Generate MJCF geoms with explicit, inherited, and default mass properties."""
     mjcf = ET.Element("mujoco", model="authored_geom_mass")
     default = ET.SubElement(mjcf, "default")
     ET.SubElement(ET.SubElement(default, "default", {"class": "light"}), "geom", density="100")
@@ -673,20 +671,17 @@ def authored_geom_mass_mjcf():
     ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="250")
     ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
 
-    # A stated mass is extensive, so these two must survive the geom fusion that a shared mass source invites.
     fused = ET.SubElement(worldbody, "body", name="fused", pos="0.0 0.0 1.0")
     ET.SubElement(fused, "freejoint")
     ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", mass="5")
     ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", mass="5")
 
-    # Convex decomposition splits one stated mass across the hulls it produces.
     asset = ET.SubElement(mjcf, "asset")
     ET.SubElement(asset, "mesh", name="bunny", file=os.path.join(get_assets_dir(), "meshes/bunny.obj"))
     decomposed = ET.SubElement(worldbody, "body", name="decomposed", pos="0.0 0.0 1.0")
     ET.SubElement(decomposed, "freejoint")
     ET.SubElement(decomposed, "geom", type="mesh", mesh="bunny", mass="5")
 
-    # A collision geom weighing nothing leaves the visual geom to carry the link.
     weightless = ET.SubElement(worldbody, "body", name="weightless", pos="0.0 0.0 1.0")
     ET.SubElement(weightless, "freejoint")
     ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", mass="0")

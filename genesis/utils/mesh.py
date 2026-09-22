@@ -767,8 +767,7 @@ def _postprocess_collision_geoms_impl(
                     first_g_info = g_infos[fusion_group[0]]
                     if (
                         first_g_info["type"] not in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN)
-                        # A fused geom carries one mass at most, which cannot stand for what several stated, so a
-                        # geom stating its own mass never joins a group.
+                        # Preserve individually specified masses through fusion
                         and first_g_info.get("mass") is None
                         and g_info.get("mass") is None
                         and all(first_g_info.get(name) == g_info.get(name) for name in ("contype", "conaffinity"))
@@ -894,7 +893,7 @@ def _postprocess_collision_geoms_impl(
                 hull_infos = [{**g_info, **dict(mesh=mesh)} for mesh in meshes]
                 geom_mass = g_info.get("mass")
                 if geom_mass is not None:
-                    # A stated mass is extensive, so each hull takes the share of it that its volume represents.
+                    # Distribute the original mass among hulls by volume
                     volumes = np.array([mesh.trimesh.volume for mesh in meshes])
                     volume_total = volumes.sum()
                     for hull_info, volume in zip(hull_infos, volumes):
