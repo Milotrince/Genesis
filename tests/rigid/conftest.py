@@ -656,11 +656,13 @@ def undefined_inertia():
     return ET.tostring(urdf, encoding="unicode")
 
 
-def _add_simplified_collision_link(urdf, link_name, visual_mesh, scale):
-    """Append a link with a visual mesh, a smaller collision sphere, and unspecified inertia."""
+def _add_simplified_collision_link(urdf, link_name, visual_meshes, scale):
+    """Append a link with visual meshes, a smaller collision sphere, and unspecified inertia."""
     link = ET.SubElement(urdf, "link", name=link_name)
-    visual = ET.SubElement(link, "visual")
-    ET.SubElement(ET.SubElement(visual, "geometry"), "mesh", filename=visual_mesh, scale=f"{scale} {scale} {scale}")
+    for visual_mesh in visual_meshes:
+        visual = ET.SubElement(link, "visual")
+        geometry = ET.SubElement(visual, "geometry")
+        ET.SubElement(geometry, "mesh", filename=visual_mesh, scale=f"{scale} {scale} {scale}")
     collision = ET.SubElement(link, "collision")
     ET.SubElement(ET.SubElement(collision, "geometry"), "sphere", radius="0.04")
 
@@ -669,21 +671,29 @@ def _add_simplified_collision_link(urdf, link_name, visual_mesh, scale):
 def simplified_collision_sphere():
     """Generate a URDF whose single link carries a watertight sphere visual mesh and a smaller collision sphere."""
     urdf = ET.Element("robot", name="simplified_collision_sphere")
-    _add_simplified_collision_link(urdf, "base_link", os.path.join(get_assets_dir(), "meshes", "sphere.obj"), 0.05)
+    _add_simplified_collision_link(urdf, "base_link", [os.path.join(get_assets_dir(), "meshes", "sphere.obj")], 0.05)
     return ET.tostring(urdf, encoding="unicode")
 
 
 @pytest.fixture(scope="session")
 def simplified_collision_open_mesh(asset_tmp_path):
-    """Return an open-pipe URDF and its closed volume. Its convex hull fills the bore and overestimates the volume."""
+    """Return a URDF whose link is drawn with an open pipe, and the volume that pipe closes to.
+
+    Its convex hull fills the bore and overestimates the volume. The surface is split across two visual meshes that
+    each sample the whole pipe, as an asset splits one surface by material, so estimating them one by one counts the
+    pipe twice. Its faces wind inward, as exported meshes commonly do.
+    """
     pipe = trimesh.creation.annulus(r_min=0.08, r_max=0.1, height=0.2)
     closed_volume = pipe.volume
     pipe.update_faces(np.abs(pipe.face_normals[:, 2]) < 0.5)
-    mesh_path = str(asset_tmp_path / "open_pipe.obj")
-    pipe.export(mesh_path)
+    pipe.invert()
+    mesh_paths = []
+    for i_half, faces in enumerate((pipe.faces[::2], pipe.faces[1::2])):
+        mesh_paths.append(str(asset_tmp_path / f"open_pipe_{i_half}.obj"))
+        trimesh.Trimesh(vertices=pipe.vertices, faces=faces, process=False).export(mesh_paths[-1])
 
     urdf = ET.Element("robot", name="simplified_collision_open_mesh")
-    _add_simplified_collision_link(urdf, "base_link", mesh_path, 1.0)
+    _add_simplified_collision_link(urdf, "base_link", mesh_paths, 1.0)
     return ET.tostring(urdf, encoding="unicode"), closed_volume
 
 

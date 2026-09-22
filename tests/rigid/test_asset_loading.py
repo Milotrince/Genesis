@@ -519,9 +519,8 @@ def test_parsing_inertia_defaults(
         tol=tol,
     )
 
-    # Wrapping should close the pipe ends while preserving the bore
-    open_tmesh = entity_open_visual.base_link.vgeoms[0].vmesh.trimesh
-    assert not open_tmesh.is_watertight
+    # The two meshes the pipe is split across are estimated as one closed pipe, and stay open as drawn
+    assert not any(vgeom.vmesh.trimesh.is_watertight for vgeom in entity_open_visual.base_link.vgeoms)
     assert_allclose(entity_open_visual.base_link.desc.mass, RHO * open_mesh_closed_volume, rtol=1e-2)
 
     # Resolving the center of mass to the link frame can place it outside the geometry, which stays worth reporting.
