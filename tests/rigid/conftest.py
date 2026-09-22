@@ -657,8 +657,7 @@ def undefined_inertia():
 
 
 def _add_simplified_collision_link(urdf, link_name, visual_mesh, scale):
-    """Append a link with no inertial element whose visual mesh is much bulkier than its collision sphere, the way an
-    asset simplifies collision geometry for speed."""
+    """Append a link with a visual mesh, a smaller collision sphere, and unspecified inertia."""
     link = ET.SubElement(urdf, "link", name=link_name)
     visual = ET.SubElement(link, "visual")
     ET.SubElement(ET.SubElement(visual, "geometry"), "mesh", filename=visual_mesh, scale=f"{scale} {scale} {scale}")
@@ -676,12 +675,7 @@ def simplified_collision_sphere():
 
 @pytest.fixture(scope="session")
 def simplified_collision_open_mesh(asset_tmp_path):
-    """Generate a URDF like 'simplified_collision_sphere' whose visual mesh is an open pipe, returned alongside the
-    volume the pipe encloses once closed.
-
-    The pipe is the two lateral surfaces of an annulus, so it is open at both ends and its bore - far wider than the
-    wrap can bridge - keeps its convex hull almost three times the volume of the shape itself.
-    """
+    """Return an open-pipe URDF and its closed volume. Its convex hull fills the bore and overestimates the volume."""
     pipe = trimesh.creation.annulus(r_min=0.08, r_max=0.1, height=0.2)
     closed_volume = pipe.volume
     pipe.update_faces(np.abs(pipe.face_normals[:, 2]) < 0.5)

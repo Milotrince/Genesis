@@ -465,14 +465,10 @@ def convex_decompose(mesh, coacd_options):
 
 
 def watertighten_trimesh(tmesh, aggressiveness):
-    """Closed manifold wrap of a triangle soup, memoized on disk by (vertices, faces, aggressiveness).
+    """Return a watertight trimesh, cached on disk by vertices, faces, and decimation aggressiveness (0 to 8).
 
-    `aggressiveness` is the integer 0..8 controlling the wrap's quadric-error decimation cost cutoff; see
-    `genesis.utils.watertighten.watertighten_mesh` for the full pipeline. The cache turns a repeated build on the
-    same geometry into a file read instead of a multi-second SDF + DC + QEM rebuild.
+    See `watertighten_mesh` for wrapping and decimation parameters.
     """
-    # Imported lazily because pulling in the wrap pipeline triggers Numba compilation, which every Genesis import
-    # would otherwise pay for whether or not any asset needs closing.
     from .watertighten import watertighten_mesh
 
     cache = get_wt_cache(tmesh.vertices, tmesh.faces, aggressiveness)
