@@ -1,7 +1,8 @@
 from typing import TYPE_CHECKING, Annotated, Any
 
-import quadrants as qd
 from pydantic import Field, PrivateAttr, StrictBool
+
+import quadrants as qd
 
 import genesis as gs
 from genesis.typing import NonNegativeFloat, PositiveFloat, StrictInt, ValidFloat

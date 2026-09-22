@@ -360,44 +360,6 @@ def collider_kernel_get_contacts(
 
 
 @qd.func
-def func_resolve_contact_friction(
-    i_ga,
-    i_gb,
-    i_b,
-    dyn_state: array_class.DynState,
-    dyn_info: array_class.DynInfo,
-    collider_info: array_class.ColliderInfo,
-):
-    """Sliding, torsional and rolling friction coefficients of a contact between two geoms.
-
-    Each coefficient is the larger of the two geoms' own, scaled by that geom's friction ratio, unless the pair
-    carries a coefficient of its own (see ColliderInfo.friction_override). Sliding friction carries a floor, so every
-    contact resists tangentially.
-
-    The override is addressed by the dense pair index of the two geoms; the caller's pair index counts broadphase
-    output on some paths, which is a different space.
-    """
-    override = collider_info.friction_override[
-        collider_info.collision_pair_idx[(i_gb, i_ga) if i_ga > i_gb else (i_ga, i_gb)]
-    ]
-    frictions = qd.Vector.zero(gs.qd_float, 3)
-    for j in qd.static(range(3)):
-        ratio_a = dyn_state.geoms.friction_ratio[i_ga, i_b][j]
-        ratio_b = dyn_state.geoms.friction_ratio[i_gb, i_b][j]
-        if override[j] >= 0.0:
-            # A pair coefficient describes the two surfaces together and has no per-surface decomposition, so the
-            # geoms' ratios reach it through their geometric mean: scaling both by k scales the coefficient by k.
-            frictions[j] = override[j] * qd.sqrt(ratio_a * ratio_b)
-        else:
-            frictions[j] = qd.max(
-                dyn_info.geoms.friction[i_ga][j] * ratio_a,
-                dyn_info.geoms.friction[i_gb][j] * ratio_b,
-            )
-    frictions[array_class.FrictionIdx.SLIDING] = qd.max(frictions[array_class.FrictionIdx.SLIDING], 1e-2)
-    return frictions
-
-
-@qd.func
 def func_add_contact(
     i_ga,
     i_gb,
@@ -464,7 +426,15 @@ def func_set_contact(
     Set the contact data for the contact [i_c]. This is used for the backward pass, which parallelizes over the entire
     contact data, and for the split narrowphase multi-contact writes.
     """
-    frictions = func_resolve_contact_friction(i_ga, i_gb, i_b, dyn_state, dyn_info, collider_info)
+    i_ma = dyn_info.geoms.material_idx[i_ga]
+    i_mb = dyn_info.geoms.material_idx[i_gb]
+    i_pair = collider_info.material_pair_idx[i_ma, i_mb]
+    frictions = (
+        collider_info.friction_pairs[i_pair]
+        * dyn_state.geoms.friction_ratio[i_ga, i_b]
+        * dyn_state.geoms.friction_ratio[i_gb, i_b]
+    )
+    frictions[array_class.FrictionIdx.SLIDING] = qd.max(frictions[array_class.FrictionIdx.SLIDING], 1e-5)
 
     # Every contact the solver sees is written here, so a non-finite position, normal or penetration is flagged here
     # rather than several stages later as a force gone wrong. Flagged rather than dropped: a missing contact lets

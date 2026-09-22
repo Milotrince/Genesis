@@ -1,9 +1,12 @@
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
+import numpy as np
+
 from pydantic import Field, StrictBool, model_validator
 
 import genesis as gs
-from genesis.typing import NonNegativeFloat, PositiveFloat, StrictInt, StrArrayType, ValidFloat
+from genesis.typing import NonNegativeFloat, PositiveFloat, StrArrayType, StrictInt, ValidFloat
+from genesis.utils import geom as gu
 
 from .base import Material
 from .kinematic import Kinematic
@@ -33,9 +36,9 @@ class Rigid(Kinematic["RigidEntity"]):
         otherwise 600 kg/m^3 for basic rigid objects (mug, table...) vs 1500 kg/m^3 for poly-articulated
         robots. Default is None.
     friction : float, optional
-        Friction coefficient within the rigid solver. A contact takes the larger of the two geoms' coefficients; to
-        fix what a contact resolves to outright, declare it for the two materials through
-        'RigidMaterial.set_friction_pair'. If None, a default of 1.0 may be used or parsed from file.
+        Sliding friction coefficient. Exact pairs declared through 'Scene.set_friction_pair' take precedence,
+        followed by the higher-priority material, then 'RigidOptions.friction_combine' for equal priorities.
+        If None, parsed from the asset when available, otherwise 1.0. Defaults to None.
     friction_torsional : float, optional
         Torsional friction coefficient, resisting relative spin about the contact normal. Expressed in meters, as it
         stands for the effective contact patch radius over which sliding friction acts. Resolved for a contact as the
@@ -49,6 +52,9 @@ class Rigid(Kinematic["RigidEntity"]):
         available (MJCF), otherwise 0.0001. Default is None.
     needs_coup : bool, optional
         Whether the material participates in coupling with other solvers. Default is True.
+    contact_priority : int, optional
+        A higher priority imposes this material's complete friction row on a contact. Equal priorities use the
+        scene's combine rule. Exact material pairs take precedence. Defaults to 0.
     coup_friction : float, optional
         Friction used during coupling. Must be non-negative. Default is 0.1.
     coup_softness : float, optional
@@ -95,9 +101,10 @@ class Rigid(Kinematic["RigidEntity"]):
     use_visual_raycasting: StrictBool = False
 
     rho: ValidFloat | None = None
-    friction: Annotated[ValidFloat, Field(ge=0.01, le=5.0)] | None = None
+    friction: Annotated[ValidFloat, Field(ge=0.0)] | None = None
     friction_torsional: Annotated[ValidFloat, Field(ge=0.0)] | None = None
     friction_rolling: Annotated[ValidFloat, Field(ge=0.0)] | None = None
+    contact_priority: StrictInt = 0
     needs_coup: StrictBool = True
     coup_friction: NonNegativeFloat = 0.1
     coup_softness: NonNegativeFloat = 0.002
@@ -163,38 +170,39 @@ class RigidMaterial(Material[Rigid]):
     Every entity built from the same handle shares one material identity, which is the granularity contact parameters
     resolved between two materials are keyed on.
 
-    Every option of 'gs.materials.Rigid' is readable under its own name, carrying the meaning documented there, with
-    the friction coefficients as the exception: what a contact resolves to depends on the other material and on
-    per-environment ratios, so a single number on one material would misreport it. Read 'options.friction' for the
-    declared value, 'geom.friction' for what a geom carries, and 'entity.get_contacts()' for what a contact developed.
+    'friction' gives this material's resolved sliding, torsional and rolling coefficients. A contact resolves those
+    against the other material and any exact pair, then applies both geoms' per-environment friction factors.
     """
 
-    def set_friction_pair(self, material, sliding_friction=None, torsional_friction=None, rolling_friction=None):
-        """
-        Pin the contact friction coefficients between this material and another, in place of the larger of the two
-        geoms' own coefficients.
-
-        A coefficient left None keeps following that maximum, so pinning sliding friction alone is enough for the
-        common case. The pair applies to every contact between geoms carrying the two materials, in both directions,
-        and a material may be paired against itself. Calling this again with the same two materials replaces the
-        coefficients, at any time before or after the scene is built.
-
-        Parameters
-        ----------
-        material : RigidMaterial
-            The other material of the pair.
-        sliding_friction : float | None, optional
-            Sliding friction coefficient of the pair. Default is None.
-        torsional_friction : float | None, optional
-            Torsional friction coefficient of the pair, effective when torsional friction is enabled at the scene
-            level (see 'RigidOptions.enable_torsional_friction'). Default is None.
-        rolling_friction : float | None, optional
-            Rolling friction coefficient of the pair, effective when rolling friction is enabled at the scene level
-            (see 'RigidOptions.enable_rolling_friction'). Default is None.
-        """
-        self._scene.sim.rigid_solver.set_friction_pair(
-            self, material, sliding_friction, torsional_friction, rolling_friction
+    @property
+    def friction(self) -> tuple[float, float, float]:
+        """Get the resolved sliding, torsional and rolling coefficients of this material."""
+        return (
+            gu.default_friction() if self.options.friction is None else self.options.friction,
+            gu.default_friction_torsional()
+            if self.options.friction_torsional is None
+            else self.options.friction_torsional,
+            gu.default_friction_rolling() if self.options.friction_rolling is None else self.options.friction_rolling,
         )
+
+    @property
+    def contact_priority(self) -> int:
+        """Get the priority used to select this material's contact parameters."""
+        return self.options.contact_priority
+
+    def set_friction(self, friction=None, *, torsional=None, rolling=None):
+        """Set this material's friction and update its contacts in every environment.
+
+        Coefficients left None retain their current values. Exact material pairs retain their declared coefficients.
+        """
+        values = (friction, torsional, rolling)
+        if any(value is not None and (not np.isfinite(value) or value < 0.0) for value in values):
+            gs.raise_exception("Friction coefficients must be finite and non-negative.")
+        for name, value in zip(("friction", "friction_torsional", "friction_rolling"), values):
+            if value is not None:
+                setattr(self.options, name, value)
+        if self.scene.is_built:
+            self.scene.sim.rigid_solver.collider.update_friction_pairs()
 
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------

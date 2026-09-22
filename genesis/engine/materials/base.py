@@ -41,10 +41,11 @@ class Material(RBC, Generic[MaterialOptionsT]):
     This class should *not* be instantiated directly.
     """
 
-    def __init__(self, scene: "Scene", idx: int, options: MaterialOptionsT):
+    def __init__(self, scene: "Scene", idx: int, options: MaterialOptionsT, name: str | None = None):
         self._scene: "Scene" = scene
         self._idx: int = idx
         self._options: MaterialOptionsT = options
+        self._name = name
         self._uid = gs.UID()
 
     def _repr_brief(self):
@@ -53,6 +54,11 @@ class Material(RBC, Generic[MaterialOptionsT]):
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
+
+    @property
+    def name(self) -> str | None:
+        """Get the name given to this material."""
+        return self._name
 
     @property
     def uid(self):

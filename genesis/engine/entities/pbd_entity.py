@@ -1,6 +1,7 @@
-import quadrants as qd
 import numpy as np
 import trimesh
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu

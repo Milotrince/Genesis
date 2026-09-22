@@ -2,12 +2,12 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 import numpy as np
-import quadrants as qd
 import torch
 from frozendict import frozendict
 
-import genesis as gs
+import quadrants as qd
 
+import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.simt as su
@@ -15,6 +15,9 @@ from genesis.engine.solvers.rigid.abd import func_solve_mass_batch
 from genesis.engine.solvers.rigid.abd.misc import func_hibernate_island_if_settled, linear_to_lower_tri
 from genesis.utils.misc import assign_indexed_tensor, indices_to_mask, qd_to_numpy, qd_to_torch
 
+from . import backward as backward_constraint_solver
+from . import linesearch
+from . import noslip as constraint_noslip
 from .island import (
     func_build_islands,
     func_build_islands_coop,
@@ -26,9 +29,6 @@ from .island import (
     func_sort_contacts,
     func_sort_contacts_coop,
 )
-from . import backward as backward_constraint_solver
-from . import linesearch
-from . import noslip as constraint_noslip
 
 
 @qd.func

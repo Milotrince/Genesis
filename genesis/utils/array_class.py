@@ -4,10 +4,11 @@ from collections.abc import Iterable, Iterator, Mapping
 from enum import IntEnum
 from typing import ClassVar, NamedTuple
 
-import quadrants as qd
-from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
 import numpy as np
 import torch
+from typing_extensions import dataclass_transform  # Made it into standard lib from Python 3.12
+
+import quadrants as qd
 
 import genesis as gs
 from genesis.utils.misc import qd_to_torch
@@ -203,7 +204,7 @@ def fill_data(items: Iterable[DataItem], values: Mapping[str, np.ndarray | torch
 
 
 class FrictionIdx(IntEnum):
-    """Component order of every packed friction vector: GeomsInfo.friction, GeomsState.friction_ratio and
+    """Component order of every packed friction vector: ColliderInfo.friction_pairs, GeomsState.friction_ratio and
     ContactData.friction all carry the coefficients in this order."""
 
     SLIDING = 0
@@ -1962,10 +1963,9 @@ class ColliderInfo:
     # Post-pruning contact-point budget per environment, which sizes the contact constraint buffers (4 constraints per
     # contact point). Smaller than max_candidate_contacts when contact pruning is enabled or 'max_contacts' is set.
     max_contacts: qd.Tensor
-    # Friction coefficients declared for a pair of geoms, indexed by the dense pair index of collision_pair_idx and
-    # packed like GeomsInfo.friction. A component holds -1 where nothing was declared, so a pair may pin the sliding
-    # coefficient and leave the torsional and rolling ones to the maximum over the two geoms.
-    friction_override: qd.Tensor
+    material_pair_idx: qd.Tensor
+    # Resolved sliding, torsional and rolling coefficients, shared by contacts of the same material pair.
+    friction_pairs: qd.Tensor = of_kind(DataKind.INFO)
     # Compact list of valid collision pairs. Used by all-vs-all broadphase to dispatch valid pairs to GPU threads.
     n_valid_pairs: qd.Tensor
     valid_collision_pairs: qd.Tensor
@@ -1992,6 +1992,8 @@ def get_collider_info(
     solver,
     n_vert_neighbors,
     n_valid_pairs,
+    n_materials,
+    n_material_pairs,
     collider_static_config,
     mpr_info,
     gjk_info,
@@ -2021,7 +2023,8 @@ def get_collider_info(
         max_candidate_contacts=V(dtype=gs.qd_int, shape=()),
         max_collision_pairs_broad=V(dtype=gs.qd_int, shape=()),
         max_contacts=V(dtype=gs.qd_int, shape=()),
-        friction_override=V(dtype=gs.qd_vec3, shape=(max(n_valid_pairs, 1),)),
+        material_pair_idx=V(dtype=gs.qd_int, shape=maybe_shape((n_materials, n_materials), n_materials > 0)),
+        friction_pairs=V(dtype=gs.qd_vec3, shape=maybe_shape((n_material_pairs,), n_material_pairs > 0)),
         n_valid_pairs=V_SCALAR_FROM(dtype=gs.qd_int, value=n_valid_pairs),
         valid_collision_pairs=V(dtype=gs.qd_ivec2, shape=(max(n_valid_pairs, 1),)),
         terrain_hf=V(dtype=gs.qd_float, shape=terrain_hf_shape),
@@ -2394,8 +2397,7 @@ class GeomsInfo:
     data: qd.Tensor
     link_idx: qd.Tensor
     type: qd.Tensor
-    # Sliding, torsional and rolling coefficients of the geom, packed in that order.
-    friction: qd.Tensor
+    material_idx: qd.Tensor = of_kind(DataKind.CONSTANT)
     sol_params: qd.Tensor
     vert_num: qd.Tensor
     vert_start: qd.Tensor
@@ -2430,7 +2432,7 @@ def get_geoms_info(solver, is_active=True):
         data=V(dtype=gs.qd_vec7, shape=shape),
         link_idx=V(dtype=gs.qd_int, shape=shape),
         type=V(dtype=gs.qd_int, shape=shape),
-        friction=V(dtype=gs.qd_vec3, shape=shape),
+        material_idx=V(dtype=gs.qd_int, shape=shape),
         sol_params=V(dtype=gs.qd_vec7, shape=shape),
         vert_num=V(dtype=gs.qd_int, shape=shape),
         vert_start=V(dtype=gs.qd_int, shape=shape),

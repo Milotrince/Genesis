@@ -1,13 +1,14 @@
 import functools
 
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import MPMEntityState
 from genesis.utils.misc import to_gs_tensor
 
-from .particle_entity import assert_active, ParticleEntity
+from .particle_entity import ParticleEntity, assert_active
 
 
 def assert_muscle(method):

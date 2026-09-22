@@ -9,11 +9,10 @@ import sys
 import weakref
 import zipfile
 from collections import Counter
-from typing import BinaryIO, Callable, Iterable, Literal, NamedTuple, TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, BinaryIO, Callable, Iterable, Literal, NamedTuple, overload
 
 import numpy as np
 import torch
-
 import trimesh
 
 import genesis as gs
@@ -21,12 +20,12 @@ import genesis.utils.geom as gu
 import genesis.utils.mesh as mu
 from genesis.engine.entities.base_entity import Entity, EntityDescription
 from genesis.engine.entities.rigid_entity import KinematicEntity
+from genesis.engine.entities.rigid_entity.description import ContactPairDescription, RigidEntityDescription
 from genesis.engine.force_fields import ForceField
 from genesis.engine.materials.base import EntityT, Material, MaterialOptions
 from genesis.engine.materials.rigid import Rigid, RigidMaterial
 from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
-    SceneOptions,
     BaseCouplerOptions,
     FEMOptions,
     KinematicOptions,
@@ -34,6 +33,7 @@ from genesis.options import (
     PBDOptions,
     ProfilingOptions,
     RigidOptions,
+    SceneOptions,
     SFOptions,
     SimOptions,
     SPHOptions,
@@ -77,6 +77,9 @@ class SceneDescription:
 
     options: SceneOptions
     entities: list[EntityDescription] = dataclasses.field(default_factory=list)
+    materials: list[Rigid] = dataclasses.field(default_factory=list)
+    material_names: list[str | None] = dataclasses.field(default_factory=list)
+    friction_pairs: list[ContactPairDescription] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -302,45 +305,16 @@ class Scene(RBC):
                 self._sim = None
 
     @gs.assert_built
-    def set_friction_ratio(
-        self,
-        sliding_ratio=None,
-        links_idx=None,
-        envs_idx=None,
-        *,
-        torsional_ratio=None,
-        rolling_ratio=None,
-    ):
-        """
-        Scale the friction coefficients of every geom of the addressed links.
+    def set_friction_ratio(self, ratio, links_idx=None, envs_idx=None):
+        """Set per-environment friction factors for the selected links.
 
-        Each coefficient answers to its own ratio: giving one leaves the other two as they are. Addressing no link
-        scales every link in the scene, which is the whole-scene randomization sweep.
-
-        Parameters
-        ----------
-        sliding_ratio : float | array_like, shape (n_envs, n_links), optional
-            Ratio applied to the sliding friction. If None, the sliding ratio keeps its current value. Defaults to
-            None.
-        links_idx : array_like | None, optional
-            The global indices of the links to scale. If None, every link in the scene is scaled. Defaults to None.
-        envs_idx : array_like | None, optional
-            The indices of the environments. If None, all environments are considered. Defaults to None.
-        torsional_ratio : float | array_like, shape (n_envs, n_links), optional
-            Ratio applied to the torsional friction. If None, it keeps its current value. Defaults to None.
-        rolling_ratio : float | array_like, shape (n_envs, n_links), optional
-            Ratio applied to the rolling friction. If None, it keeps its current value. Defaults to None.
+        A scalar scales every coefficient. A trailing axis of length three supplies sliding, torsional and rolling
+        factors. Both contacting geoms' factors multiply the resolved material-pair coefficients.
         """
-        self._sim.rigid_solver.set_links_friction_ratio(
-            sliding_ratio,
-            links_idx,
-            envs_idx,
-            torsional_ratio=torsional_ratio,
-            rolling_ratio=rolling_ratio,
-        )
+        self._sim.rigid_solver.set_links_friction_ratio(ratio, links_idx, envs_idx)
 
     @gs.assert_unbuilt
-    def add_material(self, material: Rigid) -> RigidMaterial:
+    def add_material(self, material: Rigid, name: str | None = None) -> RigidMaterial:
         """
         Register a material on the scene and get back the handle to pass to `add_entity`.
 
@@ -356,6 +330,8 @@ class Scene(RBC):
         ----------
         material : gs.materials.Rigid
             The options describing the material. Rigid materials are the ones that carry a handle.
+        name : str or None, optional
+            Unique material name within this scene. Defaults to None.
 
         Returns
         -------
@@ -368,9 +344,22 @@ class Scene(RBC):
         idx = self._material_idx.get(id(material))
         if idx is None:
             idx = len(self._materials)
+            if name is not None and any(other.name == name for other in self._materials):
+                gs.raise_exception(f"A material named '{name}' is already registered.")
             self._material_idx[id(material)] = idx
-            self._materials.append(RigidMaterial(self, idx, material))
+            self._materials.append(RigidMaterial(self, idx, material, name))
+            self._desc.materials.append(material)
+            self._desc.material_names.append(name)
         return self._materials[idx]
+
+    def set_friction_pair(self, material_a, material_b, *, sliding=None, torsional=None, rolling=None):
+        """Set the friction between two registered materials, before or after build.
+
+        An exact pair overrides material priority and the combine rule in every environment. Omitted coefficients
+        take their built-in defaults on the first declaration and retain their declared values on subsequent calls.
+        Per-environment friction ratios multiply the resulting coefficients.
+        """
+        self.sim.rigid_solver.set_friction_pair(material_a, material_b, sliding, torsional, rolling)
 
     @overload
     def add_entity(
@@ -450,6 +439,8 @@ class Scene(RBC):
         # Every check and dispatch below keys on the material options, so an already-registered material is unwrapped
         # here. The registration downstream is idempotent, restoring the very same handle for the entity.
         if isinstance(material, Material):
+            if material.scene is not self:
+                gs.raise_exception("The material is registered on another scene.")
             material = material.options
 
         if surface is None:
@@ -1737,10 +1728,23 @@ class Scene(RBC):
         replaced = (("viewer", viewer_options), ("vis", vis_options), ("renderer", renderer))
         options = described.options.model_copy(update={name: value for name, value in replaced if value is not None})
         scene = cls(show_viewer=show_viewer, options=options)
+        for material, name in zip(described.materials, described.material_names):
+            scene.add_material(material, name)
         # 'add_entity' would resolve a material and a surface the description already holds, and read the asset it
         # replaces.
         for desc in described.entities:
+            if isinstance(desc, RigidEntityDescription) and desc.material_idx >= 0:
+                desc.material = scene._materials[desc.material_idx].options
+                desc.contact_materials = [scene._materials[idx].options for idx in desc.contact_material_indices]
             scene._sim._add_entity(desc=desc)
+        for pair in described.friction_pairs:
+            scene.set_friction_pair(
+                scene._materials[pair.material_a],
+                scene._materials[pair.material_b],
+                sliding=pair.friction[0],
+                torsional=pair.friction[1],
+                rolling=pair.friction[2],
+            )
         return scene
 
     @gs.assert_built
