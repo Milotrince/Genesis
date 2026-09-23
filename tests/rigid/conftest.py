@@ -660,12 +660,13 @@ def authored_geom_mass_mjcf():
     for name, attrib in (
         ("on_geom", dict(density="250")),
         ("on_class", {"class": "water"}),
-        ("on_mass", dict(mass="5")),
+        ("on_mass", dict(mass="5", density="250", size="0.001 0.001 0.001")),
+        ("on_default", dict(density="1000")),
         ("unstated", {}),
     ):
         body = ET.SubElement(worldbody, "body", name=name, pos="0.0 0.0 1.0")
         ET.SubElement(body, "freejoint")
-        ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", **attrib)
+        ET.SubElement(body, "geom", **(dict(type="box", size="0.1 0.1 0.1") | attrib))
 
     mixed = ET.SubElement(worldbody, "body", name="mixed", pos="0.0 0.0 1.0")
     ET.SubElement(mixed, "freejoint")
@@ -688,6 +689,33 @@ def authored_geom_mass_mjcf():
     ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", mass="0")
     ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", contype="0", conaffinity="0")
     return ET.tostring(mjcf, encoding="unicode")
+
+
+@pytest.fixture(scope="session")
+def mjcf_geom_density_defaults():
+    models = []
+    for root_density, discard_visual, material_density in (
+        (None, False, None),
+        (None, True, None),
+        (700.0, False, None),
+        (700.0, True, None),
+        (None, True, 2000.0),
+    ):
+        mjcf = ET.Element("mujoco")
+        ET.SubElement(mjcf, "compiler", inertiafromgeom="false", discardvisual=str(discard_visual).lower())
+        default = ET.SubElement(mjcf, "default")
+        if root_density is not None:
+            ET.SubElement(default, "geom", density=str(root_density))
+        ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
+        worldbody = ET.SubElement(mjcf, "worldbody")
+        body = ET.SubElement(worldbody, "body", name="mounted")
+        ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", mass="123", contype="0", conaffinity="0")
+        for i_g, attrib in enumerate(({}, dict(density="1000"), {"class": "water"}, dict(density="0"), dict(mass="5"))):
+            ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", pos=f"{i_g} 0 0", **attrib)
+        replicate = ET.SubElement(body, "replicate", count="2", offset="1 0 0")
+        ET.SubElement(replicate, "geom", type="box", size="0.1 0.1 0.1", pos="5 0 0", density="250")
+        models.append((ET.tostring(mjcf, encoding="unicode"), root_density, material_density))
+    return models
 
 
 @pytest.fixture(scope="session")

@@ -25,9 +25,6 @@ from .misc import get_assets_dir, redirect_libc_stderr
 
 
 MIN_TIMECONST = np.finfo(np.double).eps
-# MjSpec cannot distinguish an explicit default density from an omitted density
-MUJOCO_DEFAULT_DENSITY = 1000.0
-UNSPECIFIED_GEOM_DENSITY = -np.finfo(np.double).max
 
 
 class GeomMassSource(NamedTuple):
@@ -209,30 +206,29 @@ def build_model(
                 # Mujoco MJCF parser to determine how to load mesh files.
                 elem.set("filename", str(Path(asset_path) / mesh_path))
 
-        if not is_urdf_file:
-            # A sentinel distinguishes an omitted density from an authored value of 1000. Restore MuJoCo's default
-            # before compilation so the sentinel only records whether the asset specified a density.
-            default.find("geom").attrib.setdefault("density", str(UNSPECIFIED_GEOM_DENSITY))
-
         with open(os.devnull, "w") as stderr, redirect_libc_stderr(stderr):
-            # Parse updated URDF file as a string
-            data = ET.tostring(root, encoding="utf8")
-            # MjSpec preserves per-geom mass and density, which compilation folds into body inertia
-            spec = mujoco.MjSpec.from_string(data)
-            geoms_without_density = [geom for geom in spec.geoms if geom.density <= UNSPECIFIED_GEOM_DENSITY]
-            for geom in geoms_without_density:
-                geom.density = MUJOCO_DEFAULT_DENSITY
-            mj = spec.compile()
-            for geom in geoms_without_density:
-                geom.density = UNSPECIFIED_GEOM_DENSITY
-            geoms_mass_source = [GeomMassSource(None, None)] * mj.ngeom
-            # URDF has no geom mass or density attributes, so its MjSpec values are parser defaults
+            spec = mujoco.MjSpec.from_string(ET.tostring(root, encoding="utf8"))
+            geoms_mass_source_map: dict[mujoco.MjsGeom, GeomMassSource] = {}
             if not is_urdf_file:
-                for spec_geom in spec.geoms:
-                    # MjSpec uses NaN for unspecified mass
-                    geom_mass = None if np.isnan(spec_geom.mass) else spec_geom.mass
-                    geom_density = spec_geom.density if spec_geom.density > UNSPECIFIED_GEOM_DENSITY else None
-                    geoms_mass_source[spec_geom.id] = GeomMassSource(geom_density, geom_mass)
+                density_spec = spec
+                if "density" not in default.find("geom").attrib:
+                    # Defaults are resolved by MuJoCo. Only omitted densities change under a different root default.
+                    # The second spec is never compiled, so its zero density cannot affect the model's inertia.
+                    default.find("geom").set("density", "0")
+                    density_spec = mujoco.MjSpec.from_string(ET.tostring(root, encoding="utf8"))
+                geoms_mass_source_map = {
+                    geom: GeomMassSource(
+                        geom.density if np.isclose(geom.density, density_geom.density) else None,
+                        None if np.isnan(geom.mass) else geom.mass,
+                    )
+                    for geom, density_geom in zip(spec.geoms, density_spec.geoms, strict=True)
+                }
+            mj = spec.compile()
+            geoms_mass_source = [GeomMassSource(None, None)] * mj.ngeom
+            # Compilation can discard visual geoms. Retained geoms acquire their final model id.
+            if not is_urdf_file:
+                for geom in spec.geoms:
+                    geoms_mass_source[geom.id] = geoms_mass_source_map[geom]
 
             # Special treatment for URDF
             if is_urdf_file:
