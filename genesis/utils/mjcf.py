@@ -1,17 +1,17 @@
 import os
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from itertools import chain
 from bisect import bisect_right
+from itertools import chain
+from pathlib import Path
 from typing import NamedTuple
+
+import numpy as np
 
 # Note the importing mujoco with env var `MUJOCO_GL=EGL` forcibly defines `PYOPENGL_PLATFORM=egl`
 import mujoco
-
-import numpy as np
 import trimesh
-from trimesh.visual.texture import TextureVisuals
 from PIL import Image
+from trimesh.visual.texture import TextureVisuals
 
 import genesis as gs
 from genesis.constants import XACRO_FORMAT
@@ -79,7 +79,7 @@ def get_model_name(file_path):
     return None
 
 
-def build_model(
+def _build_model_with_mass_sources(
     xml,
     discard_visual,
     merge_fixed_links=False,
@@ -248,6 +248,18 @@ def build_model(
     return MjcfModel(mj, tuple(geoms_mass_source))
 
 
+def build_model(
+    xml,
+    discard_visual,
+    merge_fixed_links=False,
+    exclude_ground_plane=False,
+    links_to_keep=(),
+):
+    """Build a MuJoCo model from MJCF or URDF."""
+    result = _build_model_with_mass_sources(xml, discard_visual, merge_fixed_links, exclude_ground_plane, links_to_keep)
+    return result.model
+
+
 def parse_xml(morph, surface, rigid_options=None):
     # Always merge fixed links unless explicitly asked not to do so
     merge_fixed_links, links_to_keep = False, ()
@@ -260,7 +272,7 @@ def parse_xml(morph, surface, rigid_options=None):
     # the expanded model is only ever read by the parsers.
     exclude_ground_plane = isinstance(morph, gs.morphs.MJCF) and morph.exclude_ground_plane
     file = uu.load_xacro(morph.file, morph.xacro_args) if morph.is_format(XACRO_FORMAT) else morph.file
-    mj, geoms_mass_source = build_model(
+    mj, geoms_mass_source = _build_model_with_mass_sources(
         file,
         not morph.visualization,
         merge_fixed_links,
