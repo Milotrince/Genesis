@@ -440,31 +440,6 @@ def test_align_anchor_with_geom_densities(density_align_usd):
         ),
         material=gs.materials.Kinematic(),
     )
-    mixed = scene.add_entity(
-        gs.morphs.USD(
-            file=density_align_usd,
-            prim_path="/root/mixed_body",
-            align=True,
-        ),
-    )
-    mixed_ghost = scene.add_entity(
-        gs.morphs.USD(
-            file=density_align_usd,
-            prim_path="/root/mixed_body",
-            align=True,
-        ),
-        material=gs.materials.Kinematic(),
-    )
-    uniform_material = scene.add_entity(
-        gs.morphs.USD(
-            file=density_align_usd,
-            prim_path="/root/mixed_body",
-            align=True,
-        ),
-        material=gs.materials.Rigid(
-            rho=1000.0,
-        ),
-    )
     scene.build()
     # Two unit cubes at x = -0.5 / +0.5 with densities 100 / 300: mass 400, center of mass at
     # x = 0.25. The aligned body frame anchors at the density-weighted center of mass, identically
@@ -474,13 +449,41 @@ def test_align_anchor_with_geom_densities(density_align_usd):
     assert_allclose(body.base_link.desc.inertial_pos, 0.0, tol=gs.EPS)
     assert_allclose(ghost.base_link.get_pos(relative=False), (0.25, 0.0, 0.0), tol=gs.EPS)
 
-    # The unspecified density falls back to RHO_OBJECT (600 kg/m^3)
-    assert_allclose(mixed.get_mass(), 800.0, tol=gs.EPS)
-    assert_allclose(mixed.base_link.get_pos(relative=False), (0.25, 0.0, 0.0), tol=gs.EPS)
-    assert_allclose(mixed_ghost.base_link.get_pos(relative=False), (0.25, 0.0, 0.0), tol=gs.EPS)
 
-    assert_allclose(uniform_material.get_mass(), 2000.0, tol=gs.EPS)
-    assert_allclose(uniform_material.base_link.get_pos(relative=False), 0.0, tol=gs.EPS)
+@pytest.mark.required
+@pytest.mark.parametrize("align, rho", [(True, None), (None, 1000.0), (None, None)])
+def test_align_requires_all_or_none_geom_densities(density_align_usd, align, rho):
+    scene = gs.Scene()
+
+    # A density authored on only part of a link's geoms leaves the anchor sensitive to the density the others take.
+    # No kinematic entity holds such a density (see '_align_free_roots'), so an explicit align=True raises. The
+    # estimate is resolved as the entity is added, and it raises from there.
+    if align:
+        with pytest.raises(gs.GenesisException, match="with and without an authored density"):
+            scene.add_entity(
+                gs.morphs.USD(file=density_align_usd, prim_path="/root/mixed_body", align=align),
+                material=gs.materials.Rigid(rho=rho),
+            )
+        return
+
+    body = scene.add_entity(
+        gs.morphs.USD(
+            file=density_align_usd,
+            prim_path="/root/mixed_body",
+            align=align,
+        ),
+        material=gs.materials.Rigid(
+            rho=rho,
+        ),
+    )
+
+    # An explicitly set material density overrides the authored per-geom density, leaving a plain
+    # uniform-density body for which auto-alignment proceeds; otherwise auto-alignment quietly declines
+    # and the density-less geom follows the entity material's density.
+    scene.build()
+    assert body.base_link.aligned == (rho is not None)
+    if rho is not None:
+        assert_allclose(body.get_mass(), 2000.0, tol=gs.EPS)
 
 
 @pytest.mark.required

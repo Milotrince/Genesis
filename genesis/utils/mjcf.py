@@ -1,15 +1,17 @@
 import os
 import xml.etree.ElementTree as ET
 from bisect import bisect_right
+from dataclasses import dataclass
 from itertools import chain
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
 # Note the importing mujoco with env var `MUJOCO_GL=EGL` forcibly defines `PYOPENGL_PLATFORM=egl`
 import mujoco
-import trimesh
 from PIL import Image
+import trimesh
 from trimesh.visual.texture import TextureVisuals
 
 import genesis as gs
@@ -26,6 +28,21 @@ MIN_TIMECONST = np.finfo(np.double).eps
 # MjSpec cannot distinguish an explicit default density from an omitted density
 MUJOCO_DEFAULT_DENSITY = 1000.0
 UNSPECIFIED_GEOM_DENSITY = -np.finfo(np.double).max
+
+
+class GeomMassSource(NamedTuple):
+    """Per-geom mass and density, or None when unspecified. Mass takes precedence over density."""
+
+    density: float | None
+    mass: float | None
+
+
+@dataclass(frozen=True)
+class MjcfBuildResult:
+    """Compiled MuJoCo model and per-geom mass sources indexed by geom id."""
+
+    model: mujoco.MjModel
+    geoms_mass_source: tuple[GeomMassSource, ...]
 
 
 def get_model_name(file_path):
@@ -65,14 +82,13 @@ def get_model_name(file_path):
     return None
 
 
-def _prepare_spec(
+def build_model(
     xml,
     discard_visual,
     merge_fixed_links=False,
     exclude_ground_plane=False,
     links_to_keep=(),
 ):
-    """Preprocess MJCF or URDF input and parse it into an MjSpec."""
     if isinstance(xml, (str, Path, urdfpy.URDF)):
         if isinstance(xml, urdfpy.URDF):
             is_urdf_file = True
@@ -193,56 +209,58 @@ def _prepare_spec(
                 # Mujoco MJCF parser to determine how to load mesh files.
                 elem.set("filename", str(Path(asset_path) / mesh_path))
 
-        # A negative default distinguishes an omitted density from an authored value of 1000. Restore MuJoCo's
-        # default before compilation so the sentinel never affects the compiled model.
-        default_geom = default.find("geom")
-        default_geom.attrib.setdefault("density", str(UNSPECIFIED_GEOM_DENSITY))
+        if not is_urdf_file:
+            # A sentinel distinguishes an omitted density from an authored value of 1000. Restore MuJoCo's default
+            # before compilation so the sentinel only records whether the asset specified a density.
+            default.find("geom").attrib.setdefault("density", str(UNSPECIFIED_GEOM_DENSITY))
 
         with open(os.devnull, "w") as stderr, redirect_libc_stderr(stderr):
-            spec = mujoco.MjSpec.from_string(ET.tostring(root, encoding="utf8"))
-        return spec, robot if is_urdf_file else None
-    gs.raise_exception(f"'{xml}' is not a valid MJCF or URDF file.")
+            # Parse updated URDF file as a string
+            data = ET.tostring(root, encoding="utf8")
+            # MjSpec preserves per-geom mass and density, which compilation folds into body inertia
+            spec = mujoco.MjSpec.from_string(data)
+            geoms_without_density = [geom for geom in spec.geoms if geom.density <= UNSPECIFIED_GEOM_DENSITY]
+            for geom in geoms_without_density:
+                geom.density = MUJOCO_DEFAULT_DENSITY
+            mj = spec.compile()
+            for geom in geoms_without_density:
+                geom.density = UNSPECIFIED_GEOM_DENSITY
+            geoms_mass_source = [GeomMassSource(None, None)] * mj.ngeom
+            # URDF has no geom mass or density attributes, so its MjSpec values are parser defaults
+            if not is_urdf_file:
+                for spec_geom in spec.geoms:
+                    # MjSpec uses NaN for unspecified mass
+                    geom_mass = None if np.isnan(spec_geom.mass) else spec_geom.mass
+                    geom_density = spec_geom.density if spec_geom.density > UNSPECIFIED_GEOM_DENSITY else None
+                    geoms_mass_source[spec_geom.id] = GeomMassSource(geom_density, geom_mass)
 
+            # Special treatment for URDF
+            if is_urdf_file:
+                # Discard placeholder inertias that were used to avoid parsing failure
+                for link in robot.links:
+                    inertial = link.inertial
+                    mass = (inertial.mass or 0.0) if inertial is not None else 0.0
+                    is_inertia_defined = inertial is not None and np.linalg.norm(inertial.inertia, np.inf) > 0.0
+                    if mass > 0.0 and is_inertia_defined:
+                        continue
+                    body = mj.body(link.name)
+                    body.mass[:] = mass
+                    # Keep non-zero authored inertia with invalid diagonal so the consistency check reports it
+                    if not is_inertia_defined:
+                        body.inertia[:] = 0.0
+                    # invweight0 derives from placeholder mass and inertia; zero triggers recomputation
+                    body.invweight0[:] = 0.0
 
-def _compile_spec(spec, robot):
-    """Compile an MjSpec and apply URDF inertial and solver settings."""
-    unspecified_geoms = [geom for geom in spec.geoms if geom.density == UNSPECIFIED_GEOM_DENSITY]
-    for geom in unspecified_geoms:
-        geom.density = MUJOCO_DEFAULT_DENSITY
-    with open(os.devnull, "w") as stderr, redirect_libc_stderr(stderr):
-        mj = spec.compile()
-    for geom in unspecified_geoms:
-        geom.density = UNSPECIFIED_GEOM_DENSITY
+                # Set default constraint solver time constant
+                mj.jnt_solref[:, 0] = MIN_TIMECONST
+                mj.geom_solref[:, 0] = MIN_TIMECONST
+                mj.eq_solref[:, 0] = MIN_TIMECONST
+    elif isinstance(xml, mujoco.MjModel):
+        mj, geoms_mass_source = xml, [GeomMassSource(None, None)] * xml.ngeom
+    else:
+        gs.raise_exception(f"'{xml}' is not a valid MJCF or URDF file.")
 
-    if robot is not None:
-        # Discard placeholder inertias that were used to avoid parsing failure
-        for link in robot.links:
-            inertial = link.inertial
-            mass = (inertial.mass or 0.0) if inertial is not None else 0.0
-            is_inertia_defined = inertial is not None and np.linalg.norm(inertial.inertia, np.inf) > 0.0
-            if mass > 0.0 and is_inertia_defined:
-                continue
-            body = mj.body(link.name)
-            body.mass[:] = mass
-            # Keep non-zero authored inertia with invalid diagonal so the consistency check reports it
-            if not is_inertia_defined:
-                body.inertia[:] = 0.0
-            # invweight0 derives from placeholder mass and inertia; zero triggers recomputation
-            body.invweight0[:] = 0.0
-
-        # Set default constraint solver time constant
-        mj.jnt_solref[:, 0] = MIN_TIMECONST
-        mj.geom_solref[:, 0] = MIN_TIMECONST
-        mj.eq_solref[:, 0] = MIN_TIMECONST
-    return mj
-
-
-def build_model(xml, discard_visual, merge_fixed_links=False, exclude_ground_plane=False, links_to_keep=()):
-    """Build a MuJoCo model from MJCF or URDF."""
-    if isinstance(xml, mujoco.MjModel):
-        return xml
-    spec, robot = _prepare_spec(xml, discard_visual, merge_fixed_links, exclude_ground_plane, links_to_keep)
-    return _compile_spec(spec, robot)
+    return MjcfBuildResult(mj, tuple(geoms_mass_source))
 
 
 def parse_xml(morph, surface, rigid_options=None):
@@ -257,17 +275,15 @@ def parse_xml(morph, surface, rigid_options=None):
     # the expanded model is only ever read by the parsers.
     exclude_ground_plane = isinstance(morph, gs.morphs.MJCF) and morph.exclude_ground_plane
     file = uu.load_xacro(morph.file, morph.xacro_args) if morph.is_format(XACRO_FORMAT) else morph.file
-    if isinstance(file, mujoco.MjModel):
-        mj, spec = file, None
-    else:
-        spec, robot = _prepare_spec(
-            file,
-            not morph.visualization,
-            merge_fixed_links,
-            exclude_ground_plane,
-            links_to_keep,
-        )
-        mj = _compile_spec(spec, robot)
+    model_result = build_model(
+        file,
+        not morph.visualization,
+        merge_fixed_links,
+        exclude_ground_plane,
+        links_to_keep,
+    )
+    mj = model_result.model
+    geoms_mass_source = model_result.geoms_mass_source
 
     # We have another more informative warning later so we suppress this one
     # gs.logger.warning(f"(MJCF) Approximating tendon by joint actuator for `{j_info['name']}`")
@@ -275,7 +291,7 @@ def parse_xml(morph, surface, rigid_options=None):
     #     gs.logger.warning("(MJCF) Tendon not supported")
 
     # Parse all geometries grouped by parent joint (or world)
-    links_g_infos = parse_geoms(mj, spec, morph.scale, surface, file)
+    links_g_infos = parse_geoms(mj, geoms_mass_source, morph.scale, surface, file)
 
     # Parse all bodies (links and joints)
     l_infos, links_j_infos = parse_links(mj, morph.scale)
@@ -536,7 +552,7 @@ def parse_links(mj, scale):
     return l_infos, j_infos
 
 
-def parse_geom(mj, i_g, spec_geom, scale, surface, xml_path):
+def parse_geom(mj, i_g, geom_mass_source, scale, surface, xml_path):
     mj_geom = mj.geom(i_g)
 
     geom_size = mj_geom.size
@@ -760,11 +776,10 @@ def parse_geom(mj, i_g, spec_geom, scale, surface, xml_path):
         "sol_params": np.concatenate((mj_geom.solref, mj_geom.solimp)),
     }
     # Omit unspecified values: fusion grouping compares them numerically
-    if spec_geom is not None:
-        if spec_geom.density != UNSPECIFIED_GEOM_DENSITY:
-            info["density"] = spec_geom.density
-        if not np.isnan(spec_geom.mass):
-            info["mass"] = spec_geom.mass * scale**3
+    if geom_mass_source.density is not None:
+        info["density"] = geom_mass_source.density
+    if geom_mass_source.mass is not None:
+        info["mass"] = geom_mass_source.mass * scale**3
     if is_col:
         info["mesh"] = mesh
     else:
@@ -773,9 +788,8 @@ def parse_geom(mj, i_g, spec_geom, scale, surface, xml_path):
     return info
 
 
-def parse_geoms(mj, spec, scale, surface, xml_path):
+def parse_geoms(mj, geoms_mass_source, scale, surface, xml_path):
     links_g_info = [[] for _ in range(mj.nbody)]
-    spec_geoms = {geom.id: geom for geom in spec.geoms} if spec is not None else {}
 
     # Loop over all geometries sequentially
     is_any_col = False
@@ -784,7 +798,7 @@ def parse_geoms(mj, spec, scale, surface, xml_path):
             continue
 
         # try parsing a given geometry
-        g_info = parse_geom(mj, i_g, spec_geoms[i_g] if spec is not None else None, scale, surface, xml_path)
+        g_info = parse_geom(mj, i_g, geoms_mass_source[i_g], scale, surface, xml_path)
         if g_info is None:
             continue
 

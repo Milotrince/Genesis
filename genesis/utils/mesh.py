@@ -593,7 +593,6 @@ def postprocess_collision_geoms(
         geom_type = g_info.get("type")
         friction = g_info.get("friction")
         density = g_info.get("density")
-        geom_mass = g_info.get("mass")
         sol_params = g_info.get("sol_params")
         key_parts += [
             np.ascontiguousarray(mesh.verts),
@@ -603,7 +602,6 @@ def postprocess_collision_geoms(
             int(g_info.get("conaffinity", 0)),
             float("nan") if friction is None else float(friction),
             float("nan") if density is None else float(density),
-            float("nan") if geom_mass is None else float(geom_mass),
             np.zeros(0) if sol_params is None else np.ascontiguousarray(sol_params, dtype=np.float64),
             np.ascontiguousarray(g_info.get("pos", gu.zero_pos()), dtype=np.float64),
             np.ascontiguousarray(g_info.get("quat", gu.identity_quat()), dtype=np.float64),
@@ -767,9 +765,6 @@ def _postprocess_collision_geoms_impl(
                     first_g_info = g_infos[fusion_group[0]]
                     if (
                         first_g_info["type"] not in (gs.GEOM_TYPE.PLANE, gs.GEOM_TYPE.TERRAIN)
-                        # Preserve individually specified masses through fusion
-                        and first_g_info.get("mass") is None
-                        and g_info.get("mass") is None
                         and all(first_g_info.get(name) == g_info.get(name) for name in ("contype", "conaffinity"))
                         and all(
                             np.allclose(first_g_info.get(name, np.nan), g_info.get(name, np.nan), equal_nan=True)
@@ -890,15 +885,7 @@ def _postprocess_collision_geoms_impl(
                     )
                     for tmesh in tmeshes
                 ]
-                hull_infos = [{**g_info, **dict(mesh=mesh)} for mesh in meshes]
-                geom_mass = g_info.get("mass")
-                if geom_mass is not None:
-                    # Distribute the original mass among hulls by volume
-                    volumes = np.array([mesh.trimesh.volume for mesh in meshes])
-                    volume_total = volumes.sum()
-                    for hull_info, volume in zip(hull_infos, volumes):
-                        hull_info["mass"] = geom_mass * volume / volume_total if volume_total > gs.EPS else 0.0
-                _g_infos += hull_infos
+                _g_infos += [{**g_info, **dict(mesh=mesh)} for mesh in meshes]
             else:
                 _g_infos.append(g_info)
         g_infos = _g_infos

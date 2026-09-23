@@ -2,9 +2,10 @@ import os
 import xml.etree.ElementTree as ET
 
 import numpy as np
+
+from PIL import Image
 import pytest
 import trimesh
-from PIL import Image
 
 from genesis.utils.misc import get_assets_dir
 
@@ -668,13 +669,13 @@ def authored_geom_mass_mjcf():
 
     mixed = ET.SubElement(worldbody, "body", name="mixed", pos="0.0 0.0 1.0")
     ET.SubElement(mixed, "freejoint")
-    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="250")
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", mass="2")
     ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
 
     fused = ET.SubElement(worldbody, "body", name="fused", pos="0.0 0.0 1.0")
     ET.SubElement(fused, "freejoint")
-    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", mass="5")
-    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", mass="5")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", mass="3")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", mass="7")
 
     asset = ET.SubElement(mjcf, "asset")
     ET.SubElement(asset, "mesh", name="bunny", file=os.path.join(get_assets_dir(), "meshes/bunny.obj"))

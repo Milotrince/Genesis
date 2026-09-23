@@ -3,9 +3,10 @@ import os
 import xml.etree.ElementTree as ET
 
 import numpy as np
-import pytest
 import torch
+
 from PIL import Image
+import pytest
 
 import genesis as gs
 import genesis.utils.geom as gu
@@ -236,7 +237,6 @@ def test_mjcf_authored_geom_mass(authored_geom_mass_mjcf, show_viewer):
         morph=gs.morphs.MJCF(
             file=authored_geom_mass_mjcf,
             recompute_inertia=True,
-            align=True,
             convexify=False,
         ),
     )
@@ -245,7 +245,6 @@ def test_mjcf_authored_geom_mass(authored_geom_mass_mjcf, show_viewer):
         morph=gs.morphs.MJCF(
             file=authored_geom_mass_mjcf,
             recompute_inertia=True,
-            align=True,
         ),
     )
     scene.build()
@@ -255,7 +254,7 @@ def test_mjcf_authored_geom_mass(authored_geom_mass_mjcf, show_viewer):
     assert_allclose(masses["on_class"], 1000.0 * VOLUME, tol=gs.EPS)
     assert_allclose(masses["on_mass"], 5.0, tol=gs.EPS)
     assert_allclose(masses["unstated"], 600.0 * VOLUME, tol=gs.EPS)
-    assert_allclose(masses["mixed"], (250.0 + 600.0) * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["mixed"], 2.0 + 600.0 * VOLUME, tol=gs.EPS)
     assert_allclose(masses["fused"], 10.0, tol=gs.EPS)
     assert_allclose(masses["weightless"], 600.0 * VOLUME, tol=gs.EPS)
     decomposed_link = entity_decomposed.get_link("decomposed")
@@ -263,10 +262,11 @@ def test_mjcf_authored_geom_mass(authored_geom_mass_mjcf, show_viewer):
     assert_allclose(decomposed_link.desc.mass, 5.0, tol=1e-6)
 
     mixed_link = entity.get_link("mixed")
-    first_moment = sum(
-        density * VOLUME * np.asarray(geom.init_pos) for density, geom in zip((250.0, 600.0), mixed_link.geoms)
+    assert not mixed_link.aligned
+    assert_allclose(
+        mixed_link.desc.inertial_pos, ((-0.3 * 2.0 + 0.3 * 600.0 * VOLUME) / masses["mixed"], 0.0, 0.0), tol=gs.EPS
     )
-    assert_allclose(first_moment, 0.0, tol=1e-6)
+    assert_allclose(entity.get_link("fused").get_pos(relative=False), (0.12, 0.0, 1.0), tol=gs.EPS)
 
 
 @pytest.mark.slow  # ~200s
@@ -1488,7 +1488,7 @@ def test_align_urdf(show_viewer, tol):
 
 
 @pytest.mark.required
-def test_align_mixed_mass_raises():
+def test_align_mixed_mass_raises(authored_geom_mass_mjcf):
     # Mixing a user-specified mass with a geometry-estimated one in an aligned free body makes the anchor density-
     # dependent (so rigid and kinematic could align differently) and must raise. The fixed joint with
     # merge_fixed_links=False keeps the child a distinct fixed link with unspecified mass while the base specifies one.
@@ -1499,13 +1499,18 @@ def test_align_mixed_mass_raises():
         links_inertial=[{"mass": 1.0, "ixx": 0.01, "iyy": 0.01, "izz": 0.01, "origin_xyz": "0 0 0"}, None],
         joint_type="fixed",
     )
-    for material in (gs.materials.Rigid(), gs.materials.Kinematic()):
+    for material in (gs.materials.Rigid(), gs.materials.Rigid(rho=2000.0), gs.materials.Kinematic()):
         scene = gs.Scene(
             show_viewer=False,
             show_FPS=False,
         )
         with pytest.raises(gs.GenesisException, match="geometry-estimated link masses"):
             scene.add_entity(gs.morphs.URDF(file=urdf, align=True, merge_fixed_links=False), material=material)
+        if not isinstance(material, gs.materials.Rigid) or material.rho is None:
+            with pytest.raises(gs.GenesisException, match="with and without an authored density or mass"):
+                scene.add_entity(
+                    gs.morphs.MJCF(file=authored_geom_mass_mjcf, align=True, recompute_inertia=True), material=material
+                )
 
 
 @pytest.mark.required
