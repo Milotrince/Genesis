@@ -653,12 +653,12 @@ def authored_geom_mass_mjcf():
     """Generate MJCF geoms with explicit, inherited, and default mass properties."""
     mjcf = ET.Element("mujoco", model="authored_geom_mass")
     default = ET.SubElement(mjcf, "default")
-    ET.SubElement(ET.SubElement(default, "default", {"class": "light"}), "geom", density="100")
+    ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
 
     worldbody = ET.SubElement(mjcf, "worldbody")
     for name, attrib in (
         ("on_geom", dict(density="250")),
-        ("on_class", {"class": "light"}),
+        ("on_class", {"class": "water"}),
         ("on_mass", dict(mass="5")),
         ("unstated", {}),
     ):

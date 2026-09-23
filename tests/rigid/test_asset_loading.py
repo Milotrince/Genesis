@@ -252,7 +252,7 @@ def test_mjcf_authored_geom_mass(authored_geom_mass_mjcf, show_viewer):
 
     masses = {link.name: link.desc.mass for link in entity.links}
     assert_allclose(masses["on_geom"], 250.0 * VOLUME, tol=gs.EPS)
-    assert_allclose(masses["on_class"], 100.0 * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["on_class"], 1000.0 * VOLUME, tol=gs.EPS)
     assert_allclose(masses["on_mass"], 5.0, tol=gs.EPS)
     assert_allclose(masses["unstated"], 600.0 * VOLUME, tol=gs.EPS)
     assert_allclose(masses["mixed"], (250.0 + 600.0) * VOLUME, tol=gs.EPS)
