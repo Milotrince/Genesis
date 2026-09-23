@@ -1,6 +1,7 @@
 import os
 import xml.etree.ElementTree as ET
 from bisect import bisect_right
+from dataclasses import dataclass
 from itertools import chain
 from pathlib import Path
 from typing import NamedTuple
@@ -35,8 +36,9 @@ class GeomMassSource(NamedTuple):
     mass: float | None
 
 
-class MjcfModel(NamedTuple):
-    """Compiled Mujoco model and per-geom mass sources indexed by geom id."""
+@dataclass(frozen=True)
+class MjcfBuildResult:
+    """Compiled MuJoCo model and per-geom mass sources indexed by geom id."""
 
     model: mujoco.MjModel
     geoms_mass_source: tuple[GeomMassSource, ...]
@@ -79,7 +81,7 @@ def get_model_name(file_path):
     return None
 
 
-def _build_model_with_mass_sources(
+def build_model(
     xml,
     discard_visual,
     merge_fixed_links=False,
@@ -245,19 +247,7 @@ def _build_model_with_mass_sources(
     else:
         gs.raise_exception(f"'{xml}' is not a valid MJCF or URDF file.")
 
-    return MjcfModel(mj, tuple(geoms_mass_source))
-
-
-def build_model(
-    xml,
-    discard_visual,
-    merge_fixed_links=False,
-    exclude_ground_plane=False,
-    links_to_keep=(),
-):
-    """Build a MuJoCo model from MJCF or URDF."""
-    result = _build_model_with_mass_sources(xml, discard_visual, merge_fixed_links, exclude_ground_plane, links_to_keep)
-    return result.model
+    return MjcfBuildResult(mj, tuple(geoms_mass_source))
 
 
 def parse_xml(morph, surface, rigid_options=None):
@@ -272,13 +262,15 @@ def parse_xml(morph, surface, rigid_options=None):
     # the expanded model is only ever read by the parsers.
     exclude_ground_plane = isinstance(morph, gs.morphs.MJCF) and morph.exclude_ground_plane
     file = uu.load_xacro(morph.file, morph.xacro_args) if morph.is_format(XACRO_FORMAT) else morph.file
-    mj, geoms_mass_source = _build_model_with_mass_sources(
+    model_result = build_model(
         file,
         not morph.visualization,
         merge_fixed_links,
         exclude_ground_plane,
         links_to_keep,
     )
+    mj = model_result.model
+    geoms_mass_source = model_result.geoms_mass_source
 
     # We have another more informative warning later so we suppress this one
     # gs.logger.warning(f"(MJCF) Approximating tendon by joint actuator for `{j_info['name']}`")
