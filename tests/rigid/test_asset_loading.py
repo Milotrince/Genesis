@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import torch
 
+import mujoco
 from PIL import Image
 import pytest
 
@@ -294,6 +295,54 @@ def test_mjcf_geom_density(authored_geom_density_mjcf, mjcf_geom_density_default
         inertia[2, 2] = inertia[1, 1]
         assert_allclose(entity_mounted.base_link.get_mass(), masses.sum(), tol=1e-6)
         assert_allclose(entity_mounted.base_link.desc.inertia, inertia, rtol=1e-6)
+
+
+@pytest.mark.required
+def test_mjcf_shell_inertia(mjcf_shell_inertia, show_viewer):
+    RADIUS = 0.1
+    EXTENT = 0.2
+    SURFACE_DENSITY = 250.0
+    sphere_mass = 4.0 * np.pi * RADIUS**2 * SURFACE_DENSITY
+    sphere_inertia = 2.0 / 3.0 * sphere_mass * RADIUS**2
+    mesh_mass = 6.0 * EXTENT**2 * SURFACE_DENSITY
+    mesh_inertia = 5.0 / 18.0 * mesh_mass * EXTENT**2
+    expected = np.array(
+        [
+            [sphere_mass, sphere_inertia, sphere_inertia, sphere_inertia],
+            [mesh_mass, mesh_inertia, mesh_inertia, mesh_inertia],
+        ]
+    )
+    model = mujoco.MjModel.from_xml_string(mjcf_shell_inertia)
+    for i_l, name in enumerate(("sphere", "mesh")):
+        assert_allclose(model.body(name).mass, expected[i_l, 0], rtol=1e-6)
+        assert_allclose(model.body(name).inertia, expected[i_l, 1:], rtol=1e-6)
+
+    scene = gs.Scene(
+        show_viewer=show_viewer,
+    )
+    entity_loaded = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=mjcf_shell_inertia,
+        ),
+        vis_mode="collision",
+    )
+    entity_recomputed = scene.add_entity(
+        morph=gs.morphs.MJCF(
+            file=mjcf_shell_inertia,
+            recompute_inertia=True,
+        ),
+        vis_mode="collision",
+    )
+    scene.build()
+
+    for entity in (entity_loaded, entity_recomputed):
+        inertial = np.array(
+            [
+                [entity.get_link(name).desc.mass, *np.linalg.eigvalsh(entity.get_link(name).desc.inertia)]
+                for name in ("sphere", "mesh")
+            ]
+        )
+        assert_allclose(inertial, expected, rtol=1e-6)
 
 
 @pytest.mark.slow  # ~200s
