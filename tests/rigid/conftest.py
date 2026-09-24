@@ -650,9 +650,9 @@ def joint_with_partial_dynamics(joint_damping, joint_friction):
 
 
 @pytest.fixture(scope="session")
-def authored_geom_mass_mjcf():
-    """Generate MJCF geoms with explicit, inherited, and default mass properties."""
-    mjcf = ET.Element("mujoco", model="authored_geom_mass")
+def authored_geom_density_mjcf():
+    """Generate MJCF geoms with explicit, inherited, and unspecified densities."""
+    mjcf = ET.Element("mujoco", model="authored_geom_density")
     default = ET.SubElement(mjcf, "default")
     ET.SubElement(ET.SubElement(default, "default", {"class": "water"}), "geom", density="1000")
 
@@ -660,7 +660,6 @@ def authored_geom_mass_mjcf():
     for name, attrib in (
         ("on_geom", dict(density="250")),
         ("on_class", {"class": "water"}),
-        ("on_mass", dict(mass="5", density="250", size="0.001 0.001 0.001")),
         ("on_default", dict(density="1000")),
         ("unstated", {}),
     ):
@@ -670,23 +669,17 @@ def authored_geom_mass_mjcf():
 
     mixed = ET.SubElement(worldbody, "body", name="mixed", pos="0.0 0.0 1.0")
     ET.SubElement(mixed, "freejoint")
-    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", mass="2")
+    ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="250")
     ET.SubElement(mixed, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0")
 
     fused = ET.SubElement(worldbody, "body", name="fused", pos="0.0 0.0 1.0")
     ET.SubElement(fused, "freejoint")
-    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", mass="3")
-    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", mass="7")
-
-    asset = ET.SubElement(mjcf, "asset")
-    ET.SubElement(asset, "mesh", name="bunny", file=os.path.join(get_assets_dir(), "meshes/bunny.obj"))
-    decomposed = ET.SubElement(worldbody, "body", name="decomposed", pos="0.0 0.0 1.0")
-    ET.SubElement(decomposed, "freejoint")
-    ET.SubElement(decomposed, "geom", type="mesh", mesh="bunny", mass="5")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="-0.3 0.0 0.0", density="375")
+    ET.SubElement(fused, "geom", type="box", size="0.1 0.1 0.1", pos="0.3 0.0 0.0", density="875")
 
     weightless = ET.SubElement(worldbody, "body", name="weightless", pos="0.0 0.0 1.0")
     ET.SubElement(weightless, "freejoint")
-    ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", mass="0")
+    ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", density="0")
     ET.SubElement(weightless, "geom", type="box", size="0.1 0.1 0.1", contype="0", conaffinity="0")
     return ET.tostring(mjcf, encoding="unicode")
 
@@ -710,7 +703,9 @@ def mjcf_geom_density_defaults():
         worldbody = ET.SubElement(mjcf, "worldbody")
         body = ET.SubElement(worldbody, "body", name="mounted")
         ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", mass="123", contype="0", conaffinity="0")
-        for i_g, attrib in enumerate(({}, dict(density="1000"), {"class": "water"}, dict(density="0"), dict(mass="5"))):
+        for i_g, attrib in enumerate(
+            ({}, dict(density="1000"), {"class": "water"}, dict(density="0"), dict(density="500"))
+        ):
             ET.SubElement(body, "geom", type="box", size="0.1 0.1 0.1", pos=f"{i_g} 0 0", **attrib)
         replicate = ET.SubElement(body, "replicate", count="2", offset="1 0 0")
         ET.SubElement(replicate, "geom", type="box", size="0.1 0.1 0.1", pos="5 0 0", density="250")

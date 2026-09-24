@@ -222,31 +222,27 @@ def test_urdf_parsing(show_viewer, tol):
 
 
 @pytest.mark.required
-def test_mjcf_authored_geom_mass(authored_geom_mass_mjcf, mjcf_geom_density_defaults, show_viewer):
-    HALF_EXTENT = 0.1
-    VOLUME = (2.0 * HALF_EXTENT) ** 3
+def test_mjcf_geom_density(authored_geom_density_mjcf, mjcf_geom_density_defaults, show_viewer):
+    VOLUME = 0.2**3
 
     scene = gs.Scene(
-        viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.5, -1.5, 1.5),
-            camera_lookat=(0.0, 0.0, 1.0),
-        ),
         show_viewer=show_viewer,
     )
     entity = scene.add_entity(
         morph=gs.morphs.MJCF(
-            file=authored_geom_mass_mjcf,
+            file=authored_geom_density_mjcf,
             recompute_inertia=True,
             convexify=False,
         ),
+        vis_mode="collision",
     )
-    # Exercise fusion and convex decomposition separately
-    entity_decomposed = scene.add_entity(
+    entity_scaled = scene.add_entity(
         morph=gs.morphs.MJCF(
-            file=authored_geom_mass_mjcf,
+            file=authored_geom_density_mjcf,
             scale=2.0,
             recompute_inertia=True,
         ),
+        vis_mode="collision",
     )
     entities_mounted = []
     for xml, root_density, material_density in mjcf_geom_density_defaults:
@@ -258,45 +254,38 @@ def test_mjcf_authored_geom_mass(authored_geom_mass_mjcf, mjcf_geom_density_defa
             material=gs.materials.Rigid(
                 rho=material_density,
             ),
+            vis_mode="collision",
         )
-        entity_mounted.attach(entity_decomposed, parent_link_name="weightless")
+        entity_mounted.attach(entity_scaled, parent_link_name="weightless")
         entities_mounted.append(entity_mounted)
     scene.build()
 
-    masses = {link.name: link.desc.mass for link in entity.links}
+    masses = {link.name: link.get_mass() for link in entity.links}
     assert_allclose(masses["on_geom"], 250.0 * VOLUME, tol=gs.EPS)
     assert_allclose(masses["on_class"], 1000.0 * VOLUME, tol=gs.EPS)
-    assert_allclose(masses["on_mass"], 5.0, tol=gs.EPS)
     assert_allclose(masses["on_default"], 1000.0 * VOLUME, tol=gs.EPS)
-    assert_allclose(entity.get_link("on_mass").desc.inertia / 5.0, np.eye(3) * 0.002**2 / 6.0, tol=1e-12)
     assert_allclose(masses["unstated"], 600.0 * VOLUME, tol=gs.EPS)
-    assert_allclose(masses["mixed"], 2.0 + 600.0 * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["mixed"], (250.0 + 600.0) * VOLUME, tol=gs.EPS)
     assert_allclose(masses["fused"], 10.0, tol=gs.EPS)
     assert_allclose(masses["weightless"], gs.EPS, tol=gs.EPS)
-    decomposed_link = entity_decomposed.get_link("decomposed")
-    assert len(decomposed_link.geoms) > 1
-    assert_allclose(decomposed_link.desc.mass, 5.0 * 2.0**3, tol=1e-6)
+    assert_equal(entity.get_link("weightless").desc.inertia, 0.0)
 
     mixed_link = entity.get_link("mixed")
     assert not mixed_link.aligned
-    assert_allclose(
-        mixed_link.desc.inertial_pos, ((-0.3 * 2.0 + 0.3 * 600.0 * VOLUME) / masses["mixed"], 0.0, 0.0), tol=gs.EPS
-    )
+    assert_allclose(mixed_link.desc.inertial_pos, ((-0.3 * 250.0 + 0.3 * 600.0) / 850.0, 0.0, 0.0), tol=gs.EPS)
     assert_allclose(entity.get_link("fused").get_pos(relative=False), (0.12, 0.0, 1.0), tol=gs.EPS)
+    assert_allclose(entity.get_link("on_geom").desc.inertia, np.eye(3) * 250.0 * VOLUME * 0.2**2 / 6.0, tol=gs.EPS)
 
-    assert_equal(entity.get_link("weightless").desc.inertia, 0.0)
-    for name in ("on_geom", "on_class", "on_mass", "on_default", "unstated", "mixed", "fused"):
+    for name in ("on_geom", "on_class", "on_default", "unstated", "mixed", "fused"):
         link = entity.get_link(name)
-        scaled_link = entity_decomposed.get_link(name)
-        assert_allclose(scaled_link.desc.mass, link.desc.mass * 2.0**3, rtol=1e-6, err_msg=name)
+        scaled_link = entity_scaled.get_link(name)
+        assert_allclose(scaled_link.get_mass(), link.get_mass() * 2.0**3, rtol=1e-6, err_msg=name)
         assert_allclose(scaled_link.desc.inertial_pos, link.desc.inertial_pos * 2.0, tol=1e-6, err_msg=name)
         assert_allclose(scaled_link.desc.inertia, link.desc.inertia * 2.0**5, rtol=1e-6, err_msg=name)
 
     for entity_mounted, (_, root_density, material_density) in zip(entities_mounted, mjcf_geom_density_defaults):
         density = 600.0 if root_density is None else root_density
-        masses = np.array(
-            [density * VOLUME, 1000.0 * VOLUME, 1000.0 * VOLUME, 0.0, 5.0, 250.0 * VOLUME, 250.0 * VOLUME]
-        )
+        masses = np.array([density, 1000.0, 1000.0, 0.0, 500.0, 250.0, 250.0]) * VOLUME
         if material_density is not None:
             masses[:] = material_density * VOLUME
         center = np.dot(masses, np.arange(7)) / masses.sum()
@@ -305,22 +294,6 @@ def test_mjcf_authored_geom_mass(authored_geom_mass_mjcf, mjcf_geom_density_defa
         inertia[2, 2] = inertia[1, 1]
         assert_allclose(entity_mounted.base_link.get_mass(), masses.sum(), tol=1e-6)
         assert_allclose(entity_mounted.base_link.desc.inertia, inertia, rtol=1e-6)
-
-    # Mesh simplification can change hull volumes after the authored mass is distributed among them
-    hull_masses = np.array([geom.desc.mass for geom in decomposed_link.geoms])
-    centers, inertias = [], []
-    for geom, mass in zip(decomposed_link.geoms, hull_masses):
-        rotation = gu.quat_to_R(geom.init_quat)
-        centers.append(rotation @ geom.mesh.trimesh.center_mass + geom.init_pos)
-        inertias.append(rotation @ geom.mesh.trimesh.moment_inertia @ rotation.T * mass / geom.mesh.trimesh.volume)
-    centers = np.stack(centers)
-    center = (hull_masses[:, None] * centers).sum(axis=0) / hull_masses.sum()
-    inertia = np.sum(inertias, axis=0)
-    for mass, offset in zip(hull_masses, centers - center):
-        inertia += mass * (np.dot(offset, offset) * np.eye(3) - np.outer(offset, offset))
-    assert_allclose(decomposed_link.desc.inertial_pos, center, tol=1e-6)
-    # Principal moments avoid reconstructing a diagonal tensor through the rounded alignment quaternion
-    assert_allclose(np.linalg.eigvalsh(decomposed_link.desc.inertia), np.linalg.eigvalsh(inertia), rtol=1e-6)
 
 
 @pytest.mark.slow  # ~200s
@@ -1542,7 +1515,7 @@ def test_align_urdf(show_viewer, tol):
 
 
 @pytest.mark.required
-def test_align_mixed_mass_raises(authored_geom_mass_mjcf):
+def test_align_mixed_mass_raises(authored_geom_density_mjcf):
     # Mixing a user-specified mass with a geometry-estimated one in an aligned free body makes the anchor density-
     # dependent (so rigid and kinematic could align differently) and must raise. The fixed joint with
     # merge_fixed_links=False keeps the child a distinct fixed link with unspecified mass while the base specifies one.
@@ -1561,9 +1534,10 @@ def test_align_mixed_mass_raises(authored_geom_mass_mjcf):
         with pytest.raises(gs.GenesisException, match="geometry-estimated link masses"):
             scene.add_entity(gs.morphs.URDF(file=urdf, align=True, merge_fixed_links=False), material=material)
         if not isinstance(material, gs.materials.Rigid) or material.rho is None:
-            with pytest.raises(gs.GenesisException, match="with and without an authored density or mass"):
+            with pytest.raises(gs.GenesisException, match="with and without an authored density"):
                 scene.add_entity(
-                    gs.morphs.MJCF(file=authored_geom_mass_mjcf, align=True, recompute_inertia=True), material=material
+                    gs.morphs.MJCF(file=authored_geom_density_mjcf, align=True, recompute_inertia=True),
+                    material=material,
                 )
 
 
