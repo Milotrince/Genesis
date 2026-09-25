@@ -21,6 +21,7 @@ import genesis as gs
 from genesis.typing import Matrix3x3Type, Vec3FType
 
 from . import geom as gu
+from . import serialization
 from .misc import (
     SizeCappedCache,
     get_assets_dir,
@@ -488,6 +489,19 @@ class InertialProperties(NamedTuple):
     mass: float
     com: Vec3FType
     i: Matrix3x3Type
+
+
+def _exported_inertial(inertial: InertialProperties, exporting: serialization.Exporting) -> dict:
+    """Store the center of mass and inertia tensor in the file's array member, beside the mass."""
+    return {"mass": float(inertial.mass), "com": exporting.array(inertial.com), "i": exporting.array(inertial.i)}
+
+
+def _loaded_inertial(raw: dict, loading: serialization.Loading) -> InertialProperties:
+    """Recreate the inertial properties as they were exported."""
+    return InertialProperties(raw["mass"], loading.array(raw["com"]), loading.array(raw["i"]))
+
+
+serialization.register(InertialProperties, _exported_inertial, _loaded_inertial)
 
 
 def inertial_from_occupancy(verts, faces) -> InertialProperties:

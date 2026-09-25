@@ -67,11 +67,9 @@ class BaseRigidGeomDescription:
 
 @dataclass(kw_only=True)
 class RigidVisGeomDescription(BaseRigidGeomDescription):
-    """Visual geometry and its link-local pose. Primitive type and dimensions preserve analytic inertia estimates."""
+    """Describe one geometry a link is drawn with: where it sits on the link, and the mesh drawn there."""
 
     vmesh: "gs.Mesh"
-    type: GEOM_TYPE = GEOM_TYPE.MESH
-    data: np.ndarray | None = None
 
 
 @dataclass(kw_only=True)
@@ -189,6 +187,9 @@ class RigidLinkDescription(KinematicLinkDescription):
     the geometry estimate otherwise. A link the world carries holds what the asset states and None where it states
     nothing, until an attach sets it moving or the build resolves it. The inverse weight holds the asset value, zeros
     for a link the world carries, or the sentinel '-1.0', which the solver's refresh completes at build.
+
+    'inertial_hint' is the geometry estimate of a link the world carries, which an attach that sets it moving resolves
+    the inertial against. It is None for a link described as moving, whose inertial already accounts for it.
     """
 
     inertial_pos: np.ndarray | None
@@ -197,6 +198,7 @@ class RigidLinkDescription(KinematicLinkDescription):
     mass: float | None
     invweight: np.ndarray
     geoms: list[RigidGeomDescription] = field(default_factory=list)
+    inertial_hint: InertialProperties | None = None
 
 
 @dataclass
@@ -1373,9 +1375,8 @@ class KinematicEntityDescription(EntityDescription):
         is_file_morph = isinstance(morph, gs.options.morphs.FileMorph)
         g_infos = select_mass_bearing_g_infos(cg_infos, vg_infos, is_file_morph and morph.inertia_from_visual)
 
-        # An asset splits one surface across several visual meshes by material. The winding number is additive over
-        # faces and a patch alone encloses nothing, so the open meshes are fused into one soup, in the frame of the
-        # first of them as fused collision geoms are (see '_postprocess_collision_geoms_impl').
+        # Assets may have open meshes which do not enclose the volume. Merge them into one mesh, in the frame of the
+        # first, to compute the volume estimate.
         if g_infos is vg_infos and explicit_inertia is None:
             closed_g_infos, open_g_infos = [], []
             for g_info in g_infos:
@@ -1721,6 +1722,7 @@ class RigidEntityDescription(KinematicEntityDescription):
             mass=inertial.mass,
             invweight=invweight,
             geoms=self._describe_geoms(cg_infos),
+            inertial_hint=inertial_info.hint if is_fixed else None,
         )
 
 
