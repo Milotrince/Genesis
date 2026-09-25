@@ -790,6 +790,15 @@ class KinematicEntityDescription(EntityDescription):
         if isinstance(morph, gs.morphs.MJCF):
             # Mujoco's unified MJCF+URDF parser systematically for MJCF files
             l_infos, links_j_infos, links_g_infos, eqs_info = mju.parse_xml(morph, self.surface, resolution.options)
+            if (
+                morph.recompute_inertia
+                and isinstance(self.material, gs.materials.Rigid)
+                and self.material.rho is not None
+            ):
+                gs.logger.warning(
+                    "(MJCF) Recomputing inertia from the geom densities of the MJCF file (1000 kg/m^3 where omitted) "
+                    "instead of material 'rho'."
+                )
         elif isinstance(morph, (gs.morphs.URDF, gs.morphs.Drone)):
             # Custom "legacy" URDF parser for loading geometries (visual and collision) and equality constraints.
             # This is necessary because Mujoco cannot parse visual geometries (meshes) reliably for URDF.
@@ -1279,8 +1288,13 @@ class KinematicEntityDescription(EntityDescription):
         """
         # An explicitly set material density overrides any asset-authored per-geom density, as material friction does
         # for authored frictions. Dropping the keys up front keeps the align anchor, its all-or-none source check,
-        # and the build-time inertial estimate consistently uniform-density.
-        if isinstance(self.material, gs.materials.Rigid) and self.material.rho is not None:
+        # and the build-time inertial estimate consistently uniform-density. MJCF is the exception, because the format
+        # assigns a density to every geom (see '_parse_scene').
+        if (
+            not isinstance(morph, gs.morphs.MJCF)
+            and isinstance(self.material, gs.materials.Rigid)
+            and self.material.rho is not None
+        ):
             for g_info in g_infos:
                 g_info.pop("density", None)
 

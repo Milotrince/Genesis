@@ -264,15 +264,13 @@ def test_mjcf_geom_density(authored_geom_density_mjcf, mjcf_geom_density_default
     assert_allclose(masses["on_geom"], 250.0 * VOLUME, tol=gs.EPS)
     assert_allclose(masses["on_class"], 1000.0 * VOLUME, tol=gs.EPS)
     assert_allclose(masses["on_default"], 1000.0 * VOLUME, tol=gs.EPS)
-    assert_allclose(masses["unstated"], 600.0 * VOLUME, tol=gs.EPS)
-    assert_allclose(masses["mixed"], (250.0 + 600.0) * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["unstated"], 1000.0 * VOLUME, tol=gs.EPS)
+    assert_allclose(masses["mixed"], (250.0 + 1000.0) * VOLUME, tol=gs.EPS)
     assert_allclose(masses["fused"], 10.0, tol=gs.EPS)
     assert_allclose(masses["weightless"], gs.EPS, tol=gs.EPS)
     assert_equal(entity.get_link("weightless").desc.inertia, 0.0)
 
-    mixed_link = entity.get_link("mixed")
-    assert not mixed_link.aligned
-    assert_allclose(mixed_link.desc.inertial_pos, ((-0.3 * 250.0 + 0.3 * 600.0) / 850.0, 0.0, 0.0), tol=gs.EPS)
+    assert_allclose(entity.get_link("mixed").get_pos(relative=False), (0.18, 0.0, 1.0), tol=gs.EPS)
     assert_allclose(entity.get_link("fused").get_pos(relative=False), (0.12, 0.0, 1.0), tol=gs.EPS)
     assert_allclose(entity.get_link("on_geom").desc.inertia, np.eye(3) * 250.0 * VOLUME * 0.2**2 / 6.0, tol=gs.EPS)
 
@@ -283,11 +281,9 @@ def test_mjcf_geom_density(authored_geom_density_mjcf, mjcf_geom_density_default
         assert_allclose(scaled_link.desc.inertial_pos, link.desc.inertial_pos * 2.0, tol=1e-6, err_msg=name)
         assert_allclose(scaled_link.desc.inertia, link.desc.inertia * 2.0**5, rtol=1e-6, err_msg=name)
 
-    for entity_mounted, (_, root_density, material_density) in zip(entities_mounted, mjcf_geom_density_defaults):
-        density = 600.0 if root_density is None else root_density
+    for entity_mounted, (_, root_density, _) in zip(entities_mounted, mjcf_geom_density_defaults):
+        density = 1000.0 if root_density is None else root_density
         masses = np.array([density, 1000.0, 1000.0, 0.0, 500.0, 250.0, 250.0]) * VOLUME
-        if material_density is not None:
-            masses[:] = material_density * VOLUME
         center = np.dot(masses, np.arange(7)) / masses.sum()
         inertia = np.eye(3) * masses.sum() * 0.2**2 / 6.0
         inertia[1, 1] += np.dot(masses, (np.arange(7) - center) ** 2)
@@ -1515,7 +1511,7 @@ def test_align_urdf(show_viewer, tol):
 
 
 @pytest.mark.required
-def test_align_mixed_mass_raises(authored_geom_density_mjcf):
+def test_align_mixed_mass_raises():
     # Mixing a user-specified mass with a geometry-estimated one in an aligned free body makes the anchor density-
     # dependent (so rigid and kinematic could align differently) and must raise. The fixed joint with
     # merge_fixed_links=False keeps the child a distinct fixed link with unspecified mass while the base specifies one.
@@ -1526,19 +1522,13 @@ def test_align_mixed_mass_raises(authored_geom_density_mjcf):
         links_inertial=[{"mass": 1.0, "ixx": 0.01, "iyy": 0.01, "izz": 0.01, "origin_xyz": "0 0 0"}, None],
         joint_type="fixed",
     )
-    for material in (gs.materials.Rigid(), gs.materials.Rigid(rho=2000.0), gs.materials.Kinematic()):
+    for material in (gs.materials.Rigid(), gs.materials.Kinematic()):
         scene = gs.Scene(
             show_viewer=False,
             show_FPS=False,
         )
         with pytest.raises(gs.GenesisException, match="geometry-estimated link masses"):
             scene.add_entity(gs.morphs.URDF(file=urdf, align=True, merge_fixed_links=False), material=material)
-        if not isinstance(material, gs.materials.Rigid) or material.rho is None:
-            with pytest.raises(gs.GenesisException, match="with and without an authored density"):
-                scene.add_entity(
-                    gs.morphs.MJCF(file=authored_geom_density_mjcf, align=True, recompute_inertia=True),
-                    material=material,
-                )
 
 
 @pytest.mark.required

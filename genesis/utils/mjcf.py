@@ -249,22 +249,13 @@ def parse_xml(morph, surface, rigid_options=None):
         spec = mujoco.MjSpec.from_string(ET.tostring(root, encoding="utf8"))
         geoms_density_map: dict[mujoco.MjsGeom, float | None] = {}
         if robot is None:
-            density_spec = spec
-            default_geom = root.find("default/geom")
-            if "density" not in default_geom.attrib:
-                # Changing the implicit default only affects geoms without an authored or inherited density
-                default_geom.set("density", "0")
-                density_spec = mujoco.MjSpec.from_string(ET.tostring(root, encoding="utf8"))
-            for geom, density_geom in zip(spec.geoms, density_spec.geoms, strict=True):
+            # An omitted density takes the MJCF default of 1000, resolved by MuJoCo through the default classes
+            for geom in spec.geoms:
                 if geom.type == mujoco.mjtGeom.mjGEOM_MESH:
                     is_shell = spec.mesh(geom.meshname).inertia == mujoco.mjtMeshInertia.mjMESH_INERTIA_SHELL
                 else:
                     is_shell = geom.typeinertia == mujoco.mjtGeomInertia.mjINERTIA_SHELL
-                geoms_density_map[geom] = (
-                    geom.density
-                    if np.isnan(geom.mass) and not is_shell and geom.density == density_geom.density
-                    else None
-                )
+                geoms_density_map[geom] = geom.density if np.isnan(geom.mass) and not is_shell else None
         mj = compile_model(spec, robot)
         geoms_density = [None] * mj.ngeom
         if robot is None:
