@@ -274,7 +274,7 @@ class Mesh(RBC, serialization.SerializationMixin):
         """
         Mass, center of mass and inertia tensor of the geometry in its own frame, at unit density.
 
-        Non-watertight geometry is estimated from the volume its surface encloses (see 'inertial_from_occupancy'); a
+        Non-watertight geometry is estimated from the volume its surface encloses (see 'inertial_from_winding_number'); a
         degenerate geometry has no mass, and composes as a geom of no mass at the origin. The result is memoized and
         shared by reference across entities backed by the same geometry.
         """
@@ -300,7 +300,7 @@ class Mesh(RBC, serialization.SerializationMixin):
                 else:
                     self._inertial = mu.InertialProperties(0.0, np.zeros(3), np.zeros((3, 3)))
             else:
-                self._inertial = mu.inertial_from_occupancy(self._mesh.vertices, self._mesh.faces)
+                self._inertial = mu.inertial_from_winding_number(self._mesh.vertices, self._mesh.faces)
         return self._inertial
 
     def get_vert_adjacency(self):
