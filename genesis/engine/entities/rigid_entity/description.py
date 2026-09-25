@@ -1370,10 +1370,13 @@ class KinematicEntityDescription(EntityDescription):
         """Compute a link's load-time inertial data (see 'LinkInertialInfo').
 
         Alignment and dynamics use the same geometry and authored densities. Missing densities default to unit density
-        for alignment and material density for dynamics.
+        for alignment and material density for dynamics. A link whose asset states both its mass and its inertia uses
+        the estimate only to check them, so the collision geometry serves it whatever 'inertia_from_visual' asks, and
+        the costlier visual estimate is spared.
         """
-        is_file_morph = isinstance(morph, gs.options.morphs.FileMorph)
-        g_infos = select_mass_bearing_g_infos(cg_infos, vg_infos, is_file_morph and morph.inertia_from_visual)
+        is_inertial_explicit = explicit_mass is not None and explicit_mass > 0.0 and explicit_inertia is not None
+        is_from_visual = isinstance(morph, gs.options.morphs.FileMorph) and morph.inertia_from_visual
+        g_infos = select_mass_bearing_g_infos(cg_infos, vg_infos, is_from_visual and not is_inertial_explicit)
 
         # Assets may have open meshes which do not enclose the volume. Merge them into one mesh, in the frame of the
         # first, to compute the volume estimate.
