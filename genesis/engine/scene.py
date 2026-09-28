@@ -877,7 +877,12 @@ class Scene(RBC):
         with gs.logger.timer("Compiling simulation kernels..."):
             self._sim.step()
             if self._sim.rigid_solver.is_active:
-                self._sim.rigid_solver.check_errno()
+                try:
+                    self._sim.rigid_solver.check_errno()
+                except gs.GenesisException as e:
+                    self._is_built = False
+                    self.destroy()
+                    gs.raise_exception_from(f"The initial configuration of the scene is invalid. {e}", e)
             self._reset()
 
         # visualizer
