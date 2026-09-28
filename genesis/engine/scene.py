@@ -873,7 +873,6 @@ class Scene(RBC):
             self._desc_digest = description_digest(self._desc)
             self._is_built = True
 
-        # The reset below clears errno, so an error triggered by the initial configuration is raised here or never.
         with gs.logger.timer("Compiling simulation kernels..."):
             self._sim.step()
             if self._sim.rigid_solver.is_active:
@@ -882,7 +881,7 @@ class Scene(RBC):
                 except gs.GenesisException as e:
                     self._is_built = False
                     self.destroy()
-                    gs.raise_exception_from(f"The initial configuration of the scene is invalid. {e}", e)
+                    gs.raise_exception_from(f"Problem encountered during build: {e}", e)
             self._reset()
 
         # visualizer
