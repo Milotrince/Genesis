@@ -1093,7 +1093,12 @@ def test_num_contact_overflow(scene_kind, max_collision_pairs, max_contacts, err
                     radius=0.1,
                 ),
             )
-    scene.build()
+    # The spheres overflow on the step taken by the build, the piled-up bowls within the first few steps. errno is only
+    # polled every RATE_CHECK_ERRNO substeps, so one extra step is required to guarantee that the error gets raised.
+    with nullcontext() if error_pattern is None else pytest.raises(gs.GenesisException, match=error_pattern):
+        scene.build()
+        for _ in range(RATE_CHECK_ERRNO + 1):
+            scene.step()
     assert scene.rigid_solver.collider.collider_config.has_prunable_contacts
 
     # The resolved contact budget must match the documented resolution: 32 contact points per link pair floored at
@@ -1111,20 +1116,11 @@ def test_num_contact_overflow(scene_kind, max_collision_pairs, max_contacts, err
     expected_len_constraints = 4 * expected_max_contacts + solver.n_dofs + 6 * solver.n_candidate_equalities_
     assert solver.constraint_solver.len_constraints == expected_len_constraints
 
-    # All overflows occur on the very first step (the bowls start fully overlapping, the spheres start resting on the
-    # plane), but errno is only polled every RATE_CHECK_ERRNO substeps, so one extra step is required to guarantee
-    # that the error gets raised.
-    with nullcontext() if error_pattern is None else pytest.raises(gs.GenesisException, match=error_pattern):
-        for _ in range(RATE_CHECK_ERRNO + 1):
-            scene.step()
-
 
 @pytest.mark.required
 @pytest.mark.parametrize("use_hibernation", [False, True])
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
-def test_broad_phase_pair_overflow(use_hibernation, show_viewer):
-    from genesis.engine.simulator import RATE_CHECK_ERRNO
-
+def test_broad_phase_pair_overflow(use_hibernation):
     # Six spheres stacked on the same spot overlap pairwise and with the plane, i.e. 21 candidate pairs against a
     # broad phase buffer of 4. The sweep must flag the overflow rather than write past the buffer, whether hibernation
     # splits it into awake and hibernated geoms or not.
@@ -1135,17 +1131,12 @@ def test_broad_phase_pair_overflow(use_hibernation, show_viewer):
             broadphase_traversal=gs.broadphase_traversal.SAP,
             use_hibernation=use_hibernation,
         ),
-        show_viewer=show_viewer,
     )
     scene.add_entity(gs.morphs.Plane())
     for i in range(6):
         scene.add_entity(gs.morphs.Sphere(pos=(0.0, 0.0, 0.1 + 0.05 * i), radius=0.1))
-    scene.build()
-    assert scene.rigid_solver.collider.collider_info.max_collision_pairs_broad[None] == 4
-
-    with pytest.raises(gs.GenesisException, match="max number of broad phase candidate contact pairs"):
-        for _ in range(RATE_CHECK_ERRNO + 1):
-            scene.step()
+    with pytest.raises(gs.GenesisException, match=r"max number of broad phase candidate contact pairs \(4\)"):
+        scene.build()
 
 
 @pytest.mark.slow  # ~200s

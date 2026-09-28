@@ -873,8 +873,11 @@ class Scene(RBC):
             self._desc_digest = description_digest(self._desc)
             self._is_built = True
 
+        # The reset below clears errno, so an error triggered by the initial configuration is raised here or never.
         with gs.logger.timer("Compiling simulation kernels..."):
             self._sim.step()
+            if self._sim.rigid_solver.is_active:
+                self._sim.rigid_solver.check_errno()
             self._reset()
 
         # visualizer
