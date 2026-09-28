@@ -1031,66 +1031,38 @@ def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
 
 @pytest.mark.slow("gpu")  # gpu ~250s
 @pytest.mark.parametrize(
-    "scene_kind, max_collision_pairs, multiplier_collision_broad_phase, max_contacts, use_hibernation, "
-    "build_error_match, step_error_match",
+    "scene_kind, max_collision_pairs, max_contacts, error_pattern",
     [
         # Post-pruning contact budget overflow, with the candidate buffer large enough (2x margin) that it cannot
         # trip first. The automatic budget resolves to 32 contact points per link pair floored at 512, far below
         # what the bowls produce once they pile up, after the step taken by the build.
         pytest.param(
-            "bowls",
-            1_000,
-            8,
-            None,
-            False,
-            None,
-            "max number of post-pruning contact points",
-            marks=pytest.mark.required,
+            "bowls", 1_000, None, "^Exceeding max number of post-pruning contact points", marks=pytest.mark.required
         ),
         # Candidate contact buffer overflow. The explicit contact budget is clamped down to the buffer size, so only
         # the buffer itself can overflow.
-        ("bowls", 150, 8, 1_000, False, None, "max number of candidate contact points"),
+        ("bowls", 150, 1_000, "^Exceeding max number of candidate contact points"),
+        # Broad phase candidate pair overflow on the step taken by the build, the bowls starting fully overlapping.
+        pytest.param(
+            "bowls",
+            20,
+            None,
+            "^Problem encountered during build: Exceeding max number of broad phase candidate contact pairs",
+            marks=pytest.mark.required,
+        ),
         # Buffers large enough for the whole pile: no overflow at all. Both values keep a 2x margin over the peaks
         # reached within the stepped window (about 500 colliding geom pairs and 1040 post-pruning contact points).
-        ("bowls", 1_000, 8, 2_000, False, None, None),
+        ("bowls", 1_000, 2_000, None),
         # Two contacts against a budget of one, from spheres resting on the plane at build: the clamp must also run
         # when the contact count is below the pruning gate (n_contacts < 3), in both the serial and the GPU
         # cooperative kernel variants.
-        ("spheres", 150, 8, 1, False, "max number of post-pruning contact points", None),
-        # Broad phase candidate pair overflow at build, whether hibernation splits the sweep into awake and hibernated
-        # geoms or not.
-        pytest.param(
-            "sphere_stack",
-            4,
-            1,
-            None,
-            False,
-            r"max number of broad phase candidate contact pairs \(4\)",
-            None,
-            marks=pytest.mark.required,
-        ),
-        pytest.param(
-            "sphere_stack",
-            4,
-            1,
-            None,
-            True,
-            r"max number of broad phase candidate contact pairs \(4\)",
-            None,
-            marks=pytest.mark.required,
-        ),
+        ("spheres", 150, 1, "^Problem encountered during build: Exceeding max number of post-pruning contact points"),
     ],
 )
+@pytest.mark.parametrize("use_hibernation", [False, True])
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_num_contact_overflow(
-    scene_kind,
-    max_collision_pairs,
-    multiplier_collision_broad_phase,
-    max_contacts,
-    use_hibernation,
-    build_error_match,
-    step_error_match,
-    show_viewer,
+    scene_kind, max_collision_pairs, max_contacts, error_pattern, use_hibernation, show_viewer
 ):
     from genesis.engine.simulator import RATE_CHECK_ERRNO
 
@@ -1098,7 +1070,6 @@ def test_num_contact_overflow(
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             max_collision_pairs=max_collision_pairs,
-            multiplier_collision_broad_phase=multiplier_collision_broad_phase,
             max_contacts=max_contacts,
             use_hibernation=use_hibernation,
         ),
@@ -1120,7 +1091,7 @@ def test_num_contact_overflow(
                     file_meshes_are_zup=True,
                 ),
             )
-    elif scene_kind == "spheres":
+    else:
         # Non-contacting nonconvex mesh: makes the scene prunable so that the GPU cooperative kernel is exercised.
         scene.add_entity(
             morph=gs.morphs.Mesh(
@@ -1137,40 +1108,26 @@ def test_num_contact_overflow(
                     radius=0.1,
                 ),
             )
-    else:
-        # Six spheres stacked on the same spot overlap pairwise and with the plane, i.e. 21 candidate pairs.
-        for i in range(6):
-            scene.add_entity(
-                morph=gs.morphs.Sphere(
-                    pos=(0.0, 0.0, 0.1 + 0.05 * i),
-                    radius=0.1,
-                ),
-            )
-    with nullcontext() if build_error_match is None else pytest.raises(gs.GenesisException, match=build_error_match):
+
+    # An error raised by the build is prefixed as such, so each pattern pins the phase that raises it.
+    with nullcontext() if error_pattern is None else pytest.raises(gs.GenesisException, match=error_pattern):
         scene.build()
-    if build_error_match is not None:
-        assert not scene.is_built
-        return
-    assert scene.rigid_solver.collider.collider_config.has_prunable_contacts
+        assert scene.rigid_solver.collider.collider_config.has_prunable_contacts
 
-    # The resolved contact budget must match the documented resolution: 32 contact points per link pair floored at
-    # 512 when automatic (every link pair here has more than 32 candidate contact points), the explicit value clamped
-    # to the candidate buffer size otherwise. The constraint buffers are sized accordingly, with 4 constraint rows
-    # per contact point (all joints are free so there is no joint-limit term).
-    solver = scene.rigid_solver
-    collider_info = solver.collider.collider_info
-    if max_contacts is None:
-        n_link_pairs = (N_BOWLS + 1) * N_BOWLS // 2
-        expected_max_contacts = max(32 * n_link_pairs, 512)
-    else:
-        expected_max_contacts = min(max_contacts, int(collider_info.max_candidate_contacts[None]))
-    assert int(collider_info.max_contacts[None]) == expected_max_contacts
-    expected_len_constraints = 4 * expected_max_contacts + solver.n_dofs + 6 * solver.n_candidate_equalities_
-    assert solver.constraint_solver.len_constraints == expected_len_constraints
+        # Contact budget as documented for 'max_contacts', with 4 constraint rows per contact point.
+        solver = scene.rigid_solver
+        collider_info = solver.collider.collider_info
+        if max_contacts is None:
+            n_link_pairs = (N_BOWLS + 1) * N_BOWLS // 2
+            expected_max_contacts = max(32 * n_link_pairs, 512)
+        else:
+            expected_max_contacts = min(max_contacts, int(collider_info.max_candidate_contacts[None]))
+        assert int(collider_info.max_contacts[None]) == expected_max_contacts
+        expected_len_constraints = 4 * expected_max_contacts + solver.n_dofs + 6 * solver.n_candidate_equalities_
+        assert solver.constraint_solver.len_constraints == expected_len_constraints
 
-    # errno is only polled every RATE_CHECK_ERRNO substeps, so one extra step is required to guarantee that an error
-    # triggered by the first steps gets raised.
-    with nullcontext() if step_error_match is None else pytest.raises(gs.GenesisException, match=step_error_match):
+        # errno is only polled every RATE_CHECK_ERRNO substeps, so one extra step is required to guarantee that an
+        # error triggered by the first steps gets raised.
         for _ in range(RATE_CHECK_ERRNO + 1):
             scene.step()
 
