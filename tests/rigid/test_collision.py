@@ -1030,39 +1030,37 @@ def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
 
 
 @pytest.mark.slow("gpu")  # gpu ~250s
+# The first step from the overlapping bowls lands close to the automatic contact budget, under it in single precision
+# only, so the phase of that overflow is pinned by the precision.
+@pytest.mark.precision("32")
 @pytest.mark.parametrize(
-    "scene_kind, max_collision_pairs, max_contacts, error_pattern",
+    "scene_kind, max_collision_pairs, max_contacts, error_pattern, is_raised_by_build",
     [
         # Post-pruning contact budget overflow, with the candidate buffer large enough (2x margin) that it cannot
         # trip first. The automatic budget resolves to 32 contact points per link pair floored at 512, far below
         # what the bowls produce once they pile up, after the step taken by the build.
         pytest.param(
-            "bowls", 1_000, None, "^Exceeding max number of post-pruning contact points", marks=pytest.mark.required
+            "bowls", 1_000, None, "max number of post-pruning contact points", False, marks=pytest.mark.required
         ),
         # Candidate contact buffer overflow. The explicit contact budget is clamped down to the buffer size, so only
         # the buffer itself can overflow.
-        ("bowls", 150, 1_000, "^Exceeding max number of candidate contact points"),
+        ("bowls", 150, 1_000, "max number of candidate contact points", False),
         # Broad phase candidate pair overflow on the step taken by the build, the bowls starting fully overlapping.
         pytest.param(
-            "bowls",
-            20,
-            None,
-            "^Problem encountered during build: Exceeding max number of broad phase candidate contact pairs",
-            marks=pytest.mark.required,
+            "bowls", 20, None, "max number of broad phase candidate contact pairs", True, marks=pytest.mark.required
         ),
         # Buffers large enough for the whole pile: no overflow at all. Both values keep a 2x margin over the peaks
         # reached within the stepped window (about 500 colliding geom pairs and 1040 post-pruning contact points).
-        ("bowls", 1_000, 2_000, None),
+        ("bowls", 1_000, 2_000, None, False),
         # Two contacts against a budget of one, from spheres resting on the plane at build: the clamp must also run
-        # when the contact count is below the pruning gate (n_contacts < 3), in both the serial and the GPU
-        # cooperative kernel variants.
-        ("spheres", 150, 1, "^Problem encountered during build: Exceeding max number of post-pruning contact points"),
+        # below the pruning gate (n_contacts < 3), in both the serial and the GPU cooperative kernel variants.
+        ("spheres", 150, 1, "max number of post-pruning contact points", True),
     ],
 )
 @pytest.mark.parametrize("use_hibernation", [False, True])
 @pytest.mark.parametrize("backend", [gs.cpu, gs.gpu])
 def test_num_contact_overflow(
-    scene_kind, max_collision_pairs, max_contacts, error_pattern, use_hibernation, show_viewer
+    scene_kind, max_collision_pairs, max_contacts, error_pattern, is_raised_by_build, use_hibernation, show_viewer
 ):
     from genesis.engine.simulator import RATE_CHECK_ERRNO
 
@@ -1109,12 +1107,12 @@ def test_num_contact_overflow(
                 ),
             )
 
-    # An error raised by the build is prefixed as such, so each pattern pins the phase that raises it.
     with nullcontext() if error_pattern is None else pytest.raises(gs.GenesisException, match=error_pattern):
         scene.build()
         assert scene.rigid_solver.collider.collider_config.has_prunable_contacts
 
-        # Contact budget as documented for 'max_contacts', with 4 constraint rows per contact point.
+        # Contact budget as documented for 'RigidOptions.max_contacts' (32 contact points per link pair floored at 512),
+        # each contact point taking 4 constraint rows under the default pyramidal friction cone.
         solver = scene.rigid_solver
         collider_info = solver.collider.collider_info
         if max_contacts is None:
@@ -1130,6 +1128,9 @@ def test_num_contact_overflow(
         # error triggered by the first steps gets raised.
         for _ in range(RATE_CHECK_ERRNO + 1):
             scene.step()
+
+    # An error raised by the build leaves the scene destroyed, one raised by a step leaves it built.
+    assert scene.is_built is not is_raised_by_build
 
 
 @pytest.mark.slow  # ~200s

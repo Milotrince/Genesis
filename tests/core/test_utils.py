@@ -747,7 +747,13 @@ def test_genuine_interpenetration(show_viewer):
     # Real-asset cases, both representations (watertight wraps and convex decompositions) built as separate
     # entities of a single scene, all placements done by rigid-transforming the extracted geoms. Real meshes
     # have no analytical truth: bounds only, to catch garbage estimates.
-    scene = gs.Scene()
+    scene = gs.Scene(
+        rigid_options=gs.options.RigidOptions(
+            # Collision disabled to not overflow the contact budget on the step taken by the build.
+            # This test is not stepping physics.
+            enable_collision=False,
+        ),
+    )
     asset_entities = {
         convexify: [
             scene.add_entity(

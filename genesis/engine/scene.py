@@ -273,6 +273,8 @@ class Scene(RBC):
         self.destroy()
 
     def destroy(self):
+        self._is_built = False
+
         # Stop tracking this scene right away
         try:
             gs._scene_registry.remove(weakref.ref(self))
@@ -878,10 +880,9 @@ class Scene(RBC):
             if self._sim.rigid_solver.is_active:
                 try:
                     self._sim.rigid_solver.check_errno()
-                except gs.GenesisException as e:
-                    self._is_built = False
+                except gs.GenesisException:
                     self.destroy()
-                    gs.raise_exception_from(f"Problem encountered during build: {e}", e)
+                    raise
             self._reset()
 
         # visualizer
