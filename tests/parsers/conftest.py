@@ -590,9 +590,9 @@ def emissive_material_variants_glb(asset_tmp_path):
 
     The materials are a base-color atlas (red) on texCoord 0 with an emissive atlas on texCoord 1, a flat base color
     with an emissive atlas on texCoord 1, a KHR_materials_unlit material whose red base atlas stands in for the unlit
-    imagery, and a KHR_materials_pbrSpecularGlossiness material with the red atlas as diffuse. The red atlas is index 0. The triangle holds the first two materials as primitives, with the
-    same texture coordinates stored as float in set 0 and as normalized UNSIGNED_SHORT, an encoding core glTF allows,
-    in set 1."""
+    imagery, and a KHR_materials_pbrSpecularGlossiness material with the red atlas as diffuse. The red atlas is index
+    0. The triangle holds the first two materials as primitives, with the same texture coordinates stored as float in
+    set 0 and as normalized UNSIGNED_SHORT, an encoding core glTF allows, in set 1."""
     images = []
     for color in (np.array([220, 30, 30], np.uint8), np.array([30, 220, 30], np.uint8)):
         buffer = io.BytesIO()
