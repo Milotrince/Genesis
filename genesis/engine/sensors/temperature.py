@@ -535,8 +535,7 @@ class TemperatureGridSensor(
             self._shared_metadata.link_to_material_idx = torch.full(
                 (solver.n_links,), -1, dtype=gs.tc_int, device=gs.device
             )
-        # The material table is rebuilt from the merged dict at every sensor build, since a later sensor may add links or
-        # change the properties of a link that an earlier one already listed.
+        # Rebuild the merged material properties dict.
         self._shared_metadata.properties_dict.update(self._options.properties_dict)
         self._shared_metadata.link_material_properties = torch.empty(
             (len(_PropIdx), len(self._shared_metadata.properties_dict)), dtype=gs.tc_float, device=gs.device
