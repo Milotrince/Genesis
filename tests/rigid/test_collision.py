@@ -1030,17 +1030,15 @@ def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
 
 
 @pytest.mark.slow("gpu")  # gpu ~250s
-# The first step from the overlapping bowls lands close to the automatic contact budget, under it in single precision
-# only, so the phase of that overflow is pinned by the precision.
-@pytest.mark.precision("32")
 @pytest.mark.parametrize(
     "scene_kind, max_collision_pairs, max_contacts, error_pattern, is_raised_by_build",
     [
         # Post-pruning contact budget overflow, with the candidate buffer large enough (2x margin) that it cannot
         # trip first. The automatic budget resolves to 32 contact points per link pair floored at 512, far below
-        # what the bowls produce once they pile up, after the step taken by the build.
+        # what the bowls produce once they pile up. Its phase is left unpinned: the coincident bowls put the contact
+        # count of the step taken by the build close to the budget, on either side depending on rounding.
         pytest.param(
-            "bowls", 1_000, None, "max number of post-pruning contact points", False, marks=pytest.mark.required
+            "bowls", 1_000, None, "max number of post-pruning contact points", None, marks=pytest.mark.required
         ),
         # Candidate contact buffer overflow. The explicit contact budget is clamped down to the buffer size, so only
         # the buffer itself can overflow.
@@ -1130,7 +1128,8 @@ def test_num_contact_overflow(
             scene.step()
 
     # An error raised by the build leaves the scene destroyed, one raised by a step leaves it built.
-    assert scene.is_built is not is_raised_by_build
+    if is_raised_by_build is not None:
+        assert scene.is_built is not is_raised_by_build
 
 
 @pytest.mark.slow  # ~200s
