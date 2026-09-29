@@ -93,7 +93,7 @@ class SupportField:
                 max_indices = _SUPPORT_VID_CACHE.get(key)
                 if max_indices is None:
                     window_size = int(5e8 // this_pos.shape[0])
-                    max_indices = np.empty(num_v, dtype=np.intp)
+                    max_indices = np.empty(num_v, dtype=gs.np_int)
                     for i in range(0, num_v, window_size):
                         end = min(i + window_size, num_v)
                         dot_chunk = v1[i:end] @ this_pos.T
