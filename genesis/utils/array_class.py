@@ -42,8 +42,8 @@ register_cache_clear(_STATIC_CONFIGS.clear)
 
 @dataclass_transform(eq_default=True, kw_only_default=False, frozen_default=True)
 class AutoInitMeta(type):
-    """Metaclass that generates __init__ from annotations, like a dataclass, and hands out one shared instance per
-    distinct set of values, which must therefore never be modified.
+    """Metaclass that generates __init__ from annotations, like a frozen dataclass, and hands out one shared instance
+    per distinct set of values.
 
     Kernels specialize on a static config by reference, so a scene built again with the same config reuses the kernels
     already compiled for it. The instances are kept for the process rather than left to garbage collection with their
@@ -83,9 +83,13 @@ class AutoInitMeta(type):
 
             # Set attributes
             for key, value in assigned.items():
-                setattr(self, key, value)
+                object.__setattr__(self, key, value)
+
+        def __setattr__(self, key, value):
+            raise AttributeError(f"{name} is shared by every scene holding the same values and cannot be modified")
 
         namespace["__init__"] = __init__
+        namespace["__setattr__"] = __setattr__
 
         return super().__new__(cls, name, bases, namespace)
 
