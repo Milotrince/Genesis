@@ -1072,15 +1072,15 @@ def test_merge_matches_single_equivalent_entity(merged_arm_hand_models, box_posi
 @pytest.mark.parametrize("precision", ["32", "64"])
 @pytest.mark.parametrize("backend", [gs.gpu])
 def test_cholesky_tiling(monkeypatch, tol):
-    rigid_sim_static_config_orig = array_class.RigidSimStaticConfig
+    rigid_sim_static_config_init_orig = array_class.RigidSimStaticConfig.__init__
 
     values = []
     for enable_tiled_cholesky in (True, False):
         monkeypatch.setattr(
-            array_class,
-            "RigidSimStaticConfig",
-            lambda **kwargs: rigid_sim_static_config_orig(
-                **{**kwargs, "enable_tiled_cholesky_mass_matrix": enable_tiled_cholesky}
+            array_class.RigidSimStaticConfig,
+            "__init__",
+            lambda self, **kwargs: rigid_sim_static_config_init_orig(
+                self, **{**kwargs, "enable_tiled_cholesky_mass_matrix": enable_tiled_cholesky}
             ),
         )
 
