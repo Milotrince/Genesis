@@ -273,8 +273,6 @@ class Scene(RBC):
         self.destroy()
 
     def destroy(self):
-        self._is_built = False
-
         # Stop tracking this scene right away
         try:
             gs._scene_registry.remove(weakref.ref(self))
@@ -296,6 +294,9 @@ class Scene(RBC):
             if getattr(self, "_sim", None) is not None:
                 self._sim.destroy()
                 self._sim = None
+
+            # The viewer plugins stopped by the visualizer still require a built scene
+            self._is_built = False
 
     @overload
     def add_entity(
