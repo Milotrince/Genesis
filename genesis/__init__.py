@@ -1,13 +1,13 @@
+import atexit
 import io
+import logging as _logging
 import os
 import sys
-import atexit
-import logging as _logging
 import traceback
 import weakref
+from contextlib import redirect_stdout
 from typing import Callable
 from warnings import warn
-from contextlib import redirect_stdout
 
 # Import quadrants while collecting its output without printing directly
 _qd_outputs = io.StringIO()
@@ -524,7 +524,7 @@ from .options import textures
 from .datatypes import List
 from .grad.creation_ops import *
 
-from .engine import states, materials, force_fields
+from .engine import data, force_fields, materials, states
 from .engine.mesh import Mesh
 from .engine.scene import Scene
 
