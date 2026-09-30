@@ -36,7 +36,7 @@ def maybe_shape(shape, is_on):
     return shape if is_on else ()
 
 
-_STATIC_CONFIGS: dict[tuple, "AutoInitMeta"] = {}
+_STATIC_CONFIGS: dict[tuple, Any] = {}
 register_cache_clear(_STATIC_CONFIGS.clear)
 
 
