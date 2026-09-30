@@ -10,10 +10,14 @@ registration, contact rules, behaviors, topology editing, and new heterogeneous-
 ## Data contract
 
 - `scene.data` enumerates geometry, link, and joint records. Domain handles expose the corresponding `.data` record.
-- `DataReference.read()` returns an independent Torch snapshot. `read(copy=False)` returns a protected live view on
-  backends supporting zero-copy interoperation. Explicit clones and arithmetic results are writable.
+- `DataReference.read()` returns a protected live view on backends supporting zero-copy interoperation.
+  `read(copy=True)` allocates an independent writable snapshot. Use snapshots for observations retained across solver
+  updates, including inputs saved for a later backward pass. Explicit clones and arithmetic results are writable.
 - Torch operation schemas identify writable arguments, including nested tensor lists. Aliasing results retain read
-  protection. NumPy exports are snapshots. Pointer, storage, DLPack, and tensor-type exports require a clone.
+  protection. NumPy exports are snapshots. Pointer access, DLPack, serialization, and tensor-type exports require a
+  clone. Storage metadata remains available to Torch tooling, with native pointer access blocked.
+- Compiled consumers retain alias protection and check the owner's lifetime on each invocation. Live owner references
+  prevent persistent compilation cache serialization. Use snapshots when persistent caching or graph export is needed.
 - Protection covers the supported Python interface. Private attributes and arbitrary native code are outside it.
   Native solver kernels retain their private arrays. Enforcing access in a future kernel extension interface requires
   a separate compiler/binding contract.

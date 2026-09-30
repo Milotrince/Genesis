@@ -3,9 +3,11 @@
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Callable
+import weakref
 
 import numpy as np
 import torch
+from torch.utils._python_dispatch import return_and_correct_aliasing
 from torch.utils._pytree import tree_flatten, tree_map
 
 import quadrants as qd
@@ -21,7 +23,7 @@ class ReadOnlyTensor(torch.Tensor):
     """A tensor view that rejects writes through Torch operations.
 
     Slices and other storage-sharing results retain read protection. Arithmetic and clones produce ordinary tensors.
-    NumPy conversion produces a snapshot. External kernels must consume a snapshot because they bypass Torch dispatch.
+    NumPy conversion produces a snapshot. Serialization and external kernels require a clone.
     Access after the owning scene is destroyed raises. Python private attributes are outside this access contract.
     Solver gradient history is available through queried states. These views expose numerical observations.
     """
@@ -42,6 +44,16 @@ class ReadOnlyTensor(torch.Tensor):
     def __init__(self, tensor: torch.Tensor, owners: "tuple[Solver, ...]" = ()):
         self._tensor = tensor
         self._owners = owners
+        # Native exports bypass dispatch and must reject the wrapper's unallocated storage
+        torch._C._set_throw_on_mutable_data_ptr(self)
+
+    def __tensor_flatten__(self):
+        # Compiler guards must invalidate when the scene dies, even if the tensor metadata stays unchanged
+        return ["_tensor"], tuple((weakref.ref(owner), owner.is_built) for owner in self._owners)
+
+    @staticmethod
+    def __tensor_unflatten__(inner_tensors, metadata, outer_size, outer_stride):
+        return ReadOnlyTensor(inner_tensors["_tensor"], tuple(owner() for owner, _ in metadata))
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
@@ -63,11 +75,14 @@ class ReadOnlyTensor(torch.Tensor):
                     gs.raise_exception("Solver data is read-only. Use the owning entity's setters or clone the tensor.")
         result = func(*tree_map(_unwrap_tensor, args), **tree_map(_unwrap_tensor, kwargs))
         if any(result_type.alias_info is not None for result_type in func._schema.returns):
-            return tree_map(partial(_wrap_tensor, owners=tuple(owners)), result)
-        return result
+            result = tree_map(partial(_wrap_tensor, owners=tuple(owners)), result)
+        return return_and_correct_aliasing(func, args, kwargs, result)
 
     def __repr__(self):
         return f"ReadOnlyTensor({self.clone()!r})"
+
+    def __reduce_ex__(self, protocol):
+        gs.raise_exception("Serialize a clone of read-only data.")
 
     def numpy(self, *, force=False) -> np.ndarray:
         """Return an independent NumPy snapshot."""
@@ -75,15 +90,6 @@ class ReadOnlyTensor(torch.Tensor):
 
     def tolist(self):
         return self.clone().tolist()
-
-    def data_ptr(self):
-        gs.raise_exception("Export a clone to access tensor storage.")
-
-    def storage(self):
-        gs.raise_exception("Export a clone to access tensor storage.")
-
-    def untyped_storage(self):
-        gs.raise_exception("Export a clone to access tensor storage.")
 
     def __dlpack__(self, *args, **kwargs):
         gs.raise_exception("Export a clone to use DLPack.")
@@ -114,7 +120,7 @@ class DataReference:
 
     ``selection`` indexes the array after its environment axis moves to the front. Basic slices retain storage
     sharing. The owner refreshes derived values before a read. References remain valid for the owning scene's built
-    lifetime, including stepping and in-place reset. ``read()`` returns a snapshot and ``read(copy=False)`` a live view.
+    lifetime, including stepping and in-place reset. ``read()`` returns a live view and ``read(copy=True)`` a snapshot.
     """
 
     owner: "Solver"
@@ -129,11 +135,13 @@ class DataReference:
                 "A DataReference selection must contain slices. Gather from a snapshot for other indices."
             )
 
-    def read(self, *, copy: bool = True) -> torch.Tensor:
-        """Read a snapshot, or a protected live view when copying is disabled.
+    def read(self, *, copy: bool = False) -> torch.Tensor:
+        """Read a protected live view, or an independent writable snapshot.
 
         Live views require zero-copy interoperation on the active backend. Numerical reads require a built scene.
         The owner refreshes derived values on each call. A retained view observes subsequent writes to the same array.
+        ``copy=True`` allocates and copies the selected data. Use it to retain observations across simulation updates,
+        including inputs saved for a later backward pass, or to export data to external kernels.
         """
         if not self.owner.is_built:
             gs.raise_exception("Reading solver data requires its owning scene to be built.")

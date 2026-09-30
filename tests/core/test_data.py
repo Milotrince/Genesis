@@ -1,6 +1,9 @@
+from io import BytesIO
+
 import numpy as np
-import pytest
 import torch
+
+import pytest
 
 import genesis as gs
 
@@ -18,7 +21,11 @@ def test_read_only_tensor():
         tensor.detach(),
         tensor.data,
         tensor.to(values.device),
+        tensor.contiguous(),
+        tensor.transpose(0, 1),
+        torch.as_strided(tensor, (2,), (2,), 1),
         *tensor.unbind(),
+        *tensor.split(1),
     )
     for view in views:
         with pytest.raises(gs.GenesisException, match="read-only"):
@@ -31,14 +38,23 @@ def test_read_only_tensor():
         tensor[0] = 0
     with pytest.raises(gs.GenesisException, match="read-only"):
         tensor.data = torch.zeros_like(values)
+    with pytest.raises(gs.GenesisException, match="read-only"):
+        torch.ops.aten.add_.Tensor(tensor, 1)
+    with pytest.raises(gs.GenesisException, match="read-only"):
+        tensor.transpose_(0, 1)
     with pytest.raises(gs.GenesisException, match="Clone"):
         tensor.as_subclass(torch.Tensor)
-    with pytest.raises(gs.GenesisException, match="clone"):
+    with pytest.raises(RuntimeError, match="data pointer"):
         tensor.data_ptr()
-    with pytest.raises(gs.GenesisException, match="clone"):
-        tensor.untyped_storage()
+    with pytest.raises(RuntimeError, match="data pointer"):
+        tensor.untyped_storage().data_ptr()
     with pytest.raises(gs.GenesisException, match="clone"):
         torch.from_dlpack(tensor)
+    for view in views:
+        with pytest.raises(RuntimeError, match="data pointer"):
+            torch.utils.dlpack.to_dlpack(view)
+    with pytest.raises(gs.GenesisException, match="clone"):
+        torch.save(tensor, BytesIO())
 
     assert_equal(values, [[0, 1, 2], [3, 4, 5]])
     values.add_(1)
@@ -49,14 +65,20 @@ def test_read_only_tensor():
     assert_equal(tensor, [[1, 2, 3], [4, 5, 6]])
     assert_equal(tensor + 1, values + 1)
     destination = torch.empty_like(values)
-    destination.copy_(tensor)
+    assert destination.copy_(tensor) is destination
     assert_equal(destination, values)
-    torch.add(tensor, 1, out=destination)
+    assert torch.add(tensor, 1, out=destination) is destination
     assert_equal(destination, values + 1)
     snapshot = tensor.cpu().numpy()
     snapshot.fill(0)
     assert_equal(tensor, [[1, 2, 3], [4, 5, 6]])
     assert_equal(np.asarray(tensor.cpu()), [[1, 2, 3], [4, 5, 6]])
+    assert_equal(torch.vmap(lambda row: row.square().sum())(tensor), values.square().sum(dim=1))
+    weights = torch.ones(3, 2, dtype=gs.tc_float, device=gs.device, requires_grad=True)
+    (tensor @ weights).sum().backward()
+    assert_equal(weights.grad, [[5, 5], [7, 7], [9, 9]])
+    with pytest.raises(RuntimeError, match="read-only"):
+        torch.compile(lambda value: value.add_(1), fullgraph=True)(tensor)
 
 
 @pytest.mark.required
@@ -74,12 +96,19 @@ def test_data_reference(n_envs):
     reference = gs.data.DataReference(
         entity.solver, "links.pos", entity.solver.dyn_state.links.pos, (slice(None), slice(0, 1))
     )
-    snapshot = reference.read()
-    view = reference.read(copy=False)
+    snapshot = reference.read(copy=True)
+    view = reference.read()
+    observe = torch.compile(lambda value: value + 1, fullgraph=True)
+    assert_equal(observe(view), snapshot + 1)
+    alias = torch.compile(lambda value: value[..., 1:], fullgraph=True)(view)
+    with pytest.raises(gs.GenesisException, match="read-only"):
+        alias.zero_()
     entity.set_pos((1.0, 2.0, 3.0))
     assert_equal(reference.read(), [[[1.0, 2.0, 3.0]]])
     assert_equal(view, [[[1.0, 2.0, 3.0]]])
     assert_equal(snapshot, 0.0)
+    assert_equal(observe(view), [[[2.0, 3.0, 4.0]]])
+    assert_equal(alias, [[[2.0, 3.0]]])
     with pytest.raises(gs.GenesisException, match="read-only"):
         view.zero_()
     scene.reset()
@@ -89,3 +118,9 @@ def test_data_reference(n_envs):
         reference.read()
     with pytest.raises(gs.GenesisException, match="destroyed"):
         view.clone()
+    with pytest.raises(gs.GenesisException, match="destroyed"):
+        alias.clone()
+    with pytest.raises((gs.GenesisException, RuntimeError), match="destroyed"):
+        observe(view)
+    snapshot.add_(1)
+    assert_equal(snapshot, 1.0)
