@@ -3,8 +3,9 @@ import pytest
 import torch
 
 import genesis as gs
+import genesis.utils.geom as gu
 
-from ..utils.assertions import assert_equal
+from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.required
@@ -61,27 +62,85 @@ def test_read_only_tensor():
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_data_reference(n_envs):
+def test_data_reference(n_envs, show_viewer):
     scene = gs.Scene(
-        show_viewer=False,
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(13.0, -14.0, 11.0),
+            camera_lookat=(4.0, 2.0, 2.0),
+        ),
+        show_viewer=show_viewer,
     )
     entity = scene.add_entity(
         morph=gs.morphs.Box(
             size=(0.2, 0.2, 0.2),
         ),
     )
-    scene.build(n_envs=n_envs)
-    reference = gs.data.DataReference(
-        entity.solver, "links.pos", entity.solver.dyn_state.links.pos, (slice(None), slice(0, 1))
+    fixed = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(4.0, 0.0, 0.0),
+            size=(0.2, 0.2, 0.2),
+            fixed=True,
+        ),
     )
+    visual = scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(8.0, 0.0, 0.0),
+            size=(0.2, 0.2, 0.2),
+        ),
+        material=gs.materials.Kinematic(),
+    )
+    with pytest.raises(gs.GenesisException, match="built"):
+        scene.data
+    scene.build(n_envs=n_envs)
+    reference = entity.base_link.data.pos
+    geom = entity.geoms[0]
+    joint = entity.joints[0]
+    assert geom.data in scene.data
+    assert entity.base_link.data in entity.data
+    assert joint.data.child is entity.base_link
+    assert joint.data.parent is None
+    assert len(scene.data) == len({record.uid for record in scene.data})
+    assert_equal(joint.data.qpos.read(), entity.get_qpos())
+    assert_equal(joint.data.dofs_vel.read(), entity.get_dofs_velocity())
+    assert_equal(geom.data.vertices.read(), geom.init_verts)
+    assert_equal(geom.data.triangles.read() - geom.data.vertex_start, geom.init_faces)
     snapshot = reference.read()
     view = reference.read(copy=False)
     entity.set_pos((1.0, 2.0, 3.0))
     assert_equal(reference.read(), [[[1.0, 2.0, 3.0]]])
     assert_equal(view, [[[1.0, 2.0, 3.0]]])
     assert_equal(snapshot, 0.0)
+    assert_equal(geom.data.pos.read()[..., 0, :], geom.get_pos(relative=False))
+    assert_allclose(
+        geom.get_verts(),
+        gu.transform_by_trans_quat(geom.data.vertices.read(), geom.data.pos.read(), geom.data.quat.read()),
+        tol=gs.EPS,
+    )
+    assert_allclose(
+        fixed.geoms[0].get_verts(),
+        fixed.geoms[0].data.vertices.read() + fixed.geoms[0].get_pos(relative=False)[..., None, :],
+        tol=gs.EPS,
+    )
+    assert_allclose(geom.data.world_vertices.read(), geom.get_verts(), tol=gs.EPS)
+    assert_allclose(fixed.geoms[0].data.world_vertices.read(), fixed.geoms[0].get_verts(), tol=gs.EPS)
+    visual.set_pos((9.0, 0.0, 0.0), skip_forward=True)
+    assert_equal(visual.vgeoms[0].data.pos.read(), [[[9.0, 0.0, 0.0]]])
+    entity.set_pos((2.0, 3.0, 4.0), skip_forward=True)
+    assert_equal(geom.data.pos.read(), [[[2.0, 3.0, 4.0]]])
     with pytest.raises(gs.GenesisException, match="read-only"):
         view.zero_()
+    scene.step()
+    assert_equal(reference.read()[..., 0, :], entity.base_link.get_pos(relative=False))
+    checkpoint_pos = reference.read()
+    checkpoint = scene.__getstate__()
+    entity.set_pos((5.0, 6.0, 7.0), envs_idx=1 if n_envs else None)
+    assert_equal(reference.read()[..., 0, :], entity.base_link.get_pos(relative=False))
+    scene.__setstate__(checkpoint)
+    assert_equal(reference.read(), checkpoint_pos)
+    if n_envs:
+        entity.set_pos((5.0, 6.0, 7.0), envs_idx=1)
+        scene.reset(envs_idx=[0])
+        assert_equal(reference.read(), [[[0.0, 0.0, 0.0]], [[5.0, 6.0, 7.0]]])
     scene.reset()
     assert_equal(reference.read(), snapshot)
     scene.destroy()

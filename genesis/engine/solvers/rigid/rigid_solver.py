@@ -1,5 +1,6 @@
 import math
 from collections.abc import Iterator
+from functools import cached_property, partial
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11,6 +12,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
+from genesis.engine.data import DataReference, RigidGeomData, SceneData
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.materials import Rigid
 from genesis.engine.states import KinematicSolverCheckpoint, RigidSolverState
@@ -1184,7 +1186,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 np.array([geom.desc.friction_torsional for geom in geoms], dtype=gs.np_float),
                 np.array([geom.desc.friction_rolling for geom in geoms], dtype=gs.np_float),
                 geoms_sol_params,
-                np.array([geom.data for geom in geoms], dtype=gs.np_float),
+                np.array([geom.shape_data for geom in geoms], dtype=gs.np_float),
                 np.array([geom.is_convex for geom in geoms], dtype=gs.np_bool),
                 np.array([geom.needs_coup for geom in geoms], dtype=gs.np_int),
                 np.array([geom.contype for geom in geoms], dtype=np.int32),
@@ -1236,6 +1238,65 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
                 self.dyn_info,
                 self.rigid_config,
             )
+
+    @cached_property
+    @gs.assert_built
+    def scene_data(self) -> tuple[SceneData, ...]:
+        records = list(super().scene_data)
+        for entity in self.entities:
+            for link in entity.links:
+                for geom in link.geoms:
+                    selection = (slice(None), slice(geom.idx, geom.idx + 1))
+                    verts_selection = (slice(geom.verts_state_start, geom.verts_state_end),)
+                    if geom.is_fixed and not entity._batch_fixed_verts:
+                        verts = self.dyn_state.fixed_verts.pos
+                    else:
+                        verts = self.dyn_state.free_verts.pos
+                        verts_selection = (slice(None), *verts_selection)
+                    records.append(
+                        RigidGeomData(
+                            uid=geom.uid,
+                            entity=entity,
+                            role="collision",
+                            link=link,
+                            vertices=DataReference(
+                                self,
+                                "verts.init_pos",
+                                self.dyn_info.verts.init_pos,
+                                (slice(geom.vert_start, geom.vert_end),),
+                            ),
+                            triangles=DataReference(
+                                self,
+                                "faces.verts_idx",
+                                self.dyn_info.faces.verts_idx,
+                                (slice(geom.face_start, geom.face_end),),
+                            ),
+                            vertex_start=geom.vert_start,
+                            active_envs=DataReference(self, "geoms.active_envs", geom.active_envs_mask)
+                            if geom.active_envs_mask is not None
+                            else None,
+                            pos=DataReference(
+                                self, "geoms.pos", self.dyn_state.geoms.pos, selection, self.update_forward_pos
+                            ),
+                            quat=DataReference(
+                                self, "geoms.quat", self.dyn_state.geoms.quat, selection, self.update_forward_pos
+                            ),
+                            edges_v0=DataReference(
+                                self, "edges.v0", self.dyn_info.edges.v0, (slice(geom.edge_start, geom.edge_end),)
+                            ),
+                            edges_v1=DataReference(
+                                self, "edges.v1", self.dyn_info.edges.v1, (slice(geom.edge_start, geom.edge_end),)
+                            ),
+                            world_vertices=DataReference(
+                                self,
+                                "verts.pos",
+                                verts,
+                                verts_selection,
+                                partial(self.update_verts_for_geoms, geom.idx),
+                            ),
+                        )
+                    )
+        return tuple(records)
 
     def _init_collider(self):
         self.collider = Collider(self)

@@ -9,7 +9,8 @@ import sys
 import weakref
 import zipfile
 from collections import Counter
-from typing import BinaryIO, Callable, Iterable, Literal, NamedTuple, TYPE_CHECKING, overload
+from functools import cached_property
+from typing import TYPE_CHECKING, BinaryIO, Callable, Iterable, Literal, NamedTuple, overload
 
 import numpy as np
 import torch
@@ -271,6 +272,12 @@ class Scene(RBC):
 
     def __del__(self):
         self.destroy()
+
+    @cached_property
+    @gs.assert_built
+    def data(self) -> "tuple[gs.data.SceneData, ...]":
+        """The immutable registry of typed records backed by the active solvers."""
+        return tuple(record for solver in self.sim.active_solvers for record in solver.scene_data)
 
     def destroy(self):
         # Stop tracking this scene right away

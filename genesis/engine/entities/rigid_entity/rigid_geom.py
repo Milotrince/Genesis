@@ -1,11 +1,13 @@
 import os
 import pickle as pkl
+from functools import cached_property
 from typing import TYPE_CHECKING
 
-import igl
 import numpy as np
-import skimage
 import torch
+
+import igl
+import skimage
 import trimesh
 
 import genesis as gs
@@ -84,9 +86,9 @@ class RigidGeom(RBC):
         )
 
         # The solver reads a row of fixed width, so copy the described shape data into one
-        self._data = np.zeros([7])
+        self._shape_data = np.zeros([7])
         if desc.data is not None:
-            self._data[: len(desc.data)] = desc.data
+            self._shape_data[: len(desc.data)] = desc.data
 
         # verts and faces for sdf genertaion
         if "sdf_mesh" in self._metadata:
@@ -481,12 +483,16 @@ class RigidGeom(RBC):
         """
         return self.desc.type
 
+    @cached_property
+    @gs.assert_built
+    def data(self) -> "gs.data.RigidGeomData":
+        """The geom's topology, pose, and world vertices in the scene registry."""
+        return next(record for record in self.solver.scene_data if record.uid is self.uid)
+
     @property
-    def data(self):
-        """
-        Get the additional data of the geom.
-        """
-        return self._data
+    def shape_data(self):
+        """The packed primitive parameters used to build this geom."""
+        return self._shape_data
 
     @property
     def metadata(self):
@@ -883,6 +889,12 @@ class RigidVisGeom(RBC):
         # For heterogeneous simulation: which environments this vgeom is active in (None = all envs)
         self.active_envs_mask: torch.Tensor | None = None
         self.active_envs_idx: np.ndarray | None = None
+
+    @cached_property
+    @gs.assert_built
+    def data(self) -> "gs.data.RigidGeomData":
+        """The visual geom's local mesh and world pose in the scene registry."""
+        return next(record for record in self.solver.scene_data if record.uid is self.uid)
 
     def _build(self):
         pass

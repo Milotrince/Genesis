@@ -360,6 +360,11 @@ class Solver(RBC):
         self._B = self._sim._B
 
     @property
+    def scene_data(self) -> "tuple[gs.data.SceneData, ...]":
+        """The typed public records backed by this solver's arrays."""
+        gs.raise_exception(f"{type(self).__name__} does not expose scene data yet.")
+
+    @property
     def data(self) -> Iterator[array_class.DataItem]:
         """Yield every array and static config the solver holds, tagged by kind (see 'DataKind'), under the dotted name
         a checkpoint and a trajectory frame use for it.

@@ -447,7 +447,7 @@ class IPCCoupler(RBC):
                                     f"but only 'ipc_only' is supported for plane geoms."
                                 )
 
-                            local_normal = geom.data[:3].astype(np.float64, copy=False)
+                            local_normal = geom.shape_data[:3].astype(np.float64, copy=False)
                             normal = gu.transform_by_quat(local_normal, geom.init_quat)
                             normal = normal / np.linalg.norm(normal)
                             height = np.dot(geom.init_pos, normal)

@@ -697,7 +697,7 @@ def test_urdf_capsule(tmp_path, show_viewer, tol):
 
     (geom,) = robot.geoms
     assert geom.type == gs.GEOM_TYPE.CAPSULE
-    assert_allclose(geom.data[:2], (0.02, 0.1), tol=gs.EPS)
+    assert_allclose(geom.shape_data[:2], (0.02, 0.1), tol=gs.EPS)
 
     for _ in range(40):
         scene.step()

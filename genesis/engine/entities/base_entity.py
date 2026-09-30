@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 import torch
@@ -71,6 +72,12 @@ class Entity(RBC):
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
+
+    @cached_property
+    @gs.assert_built
+    def data(self) -> "tuple[gs.data.SceneData, ...]":
+        """The scene records belonging to this entity."""
+        return tuple(record for record in self.solver.scene_data if record.entity is self)
 
     @property
     def uid(self):

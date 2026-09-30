@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Literal
 
 import numpy as np
 import torch
@@ -14,6 +14,8 @@ import genesis as gs
 from genesis.utils.misc import qd_to_torch
 
 if TYPE_CHECKING:
+    from genesis.engine.entities.base_entity import Entity
+    from genesis.engine.entities.rigid_entity.rigid_link import KinematicLink
     from genesis.engine.solvers.base_solver import Solver
 
 
@@ -108,7 +110,7 @@ def _wrap_tensor(value, *, owners):
     return ReadOnlyTensor(value, owners) if isinstance(value, torch.Tensor) else value
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class DataReference:
     """A read-only subview of an array owned by one solver.
 
@@ -145,3 +147,64 @@ class DataReference:
             tensor = qd_to_torch(self._array, transpose=True, copy=None if copy else False)
         tensor = tensor[self.selection]
         return tensor.clone() if copy else ReadOnlyTensor(tensor, (self.owner,))
+
+
+@dataclass(frozen=True, eq=False, kw_only=True)
+class SceneData:
+    """Identity and entity association of one scene record."""
+
+    uid: "gs.UID"
+    entity: "Entity"
+
+
+@dataclass(frozen=True, eq=False, kw_only=True)
+class LinkData(SceneData):
+    """Link pose in the solver world frame, including authored pose offsets."""
+
+    parent: "KinematicLink | None"
+    pos: DataReference
+    quat: DataReference
+
+
+@dataclass(frozen=True, eq=False, kw_only=True)
+class JointData(SceneData):
+    """Joint endpoints, configuration, DOF velocity, and world-space anchor and axis."""
+
+    parent: "KinematicLink | None"
+    child: "KinematicLink"
+    type: "gs.JOINT_TYPE"
+    qpos: DataReference
+    dofs_vel: DataReference
+    anchor: DataReference
+    axis: DataReference
+
+
+@dataclass(frozen=True, eq=False, kw_only=True)
+class GeometryData(SceneData):
+    """Geometry vertices and connectivity in one declared representation.
+
+    Topology indices address the owning solver's vertex array. Subtract ``vertex_start`` to index this record's vertex
+    subview. ``active_envs`` is an environment mask, or None when the geometry belongs to every environment.
+    """
+
+    role: Literal["collision", "visual", "simulation"]
+    vertices: DataReference
+    triangles: DataReference | None
+    vertex_start: int
+    active_envs: DataReference | None
+
+
+@dataclass(frozen=True, eq=False, kw_only=True)
+class RigidGeomData(GeometryData):
+    """Geom-local vertices and the geom's pose in the solver world frame.
+
+    Collision geometry also exposes edge endpoints and world vertices. Shared fixed world vertices have no environment
+    axis. Visual geometry represents its undeformed mesh through local vertices and the geom transform.
+    """
+
+    link: "KinematicLink"
+    pos: DataReference
+    quat: DataReference
+    edges_v0: DataReference | None = None
+    edges_v1: DataReference | None = None
+    world_vertices: DataReference | None = None

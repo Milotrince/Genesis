@@ -55,9 +55,10 @@ an incompatible material into a compatible one is permitted.
 ## Stack order
 
 1. Protected tensor reads and `DataReference`, with mutation and lifetime tests.
-2. Scene registry and rigid/link/joint bindings, with public handle access and migrated runtime readers.
-3. Deformable, particle, and grid bindings, including current time slots and stable particle ordering.
-4. Typed entity construction and explicit family validation, using the common scene representation.
+2. Scene registry and rigid/link/joint bindings, with public handle access.
+3. Typed rigid and kinematic entity construction with explicit family validation.
+4. Deformable, particle, and grid bindings, including current time slots and stable particle ordering.
+   Extend typed construction to those families as their shared representations become available.
 5. Typed link/geom/joint options and selections, physical material migration, and updates to existing examples/tests.
 6. Remaining core consumers and removal of superseded access paths.
 

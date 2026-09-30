@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -7,6 +8,7 @@ import torch
 import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
+from genesis.engine.data import DataReference, JointData, LinkData, RigidGeomData, SceneData
 from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.materials import Kinematic
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
@@ -433,6 +435,91 @@ class KinematicSolver(Solver):
             structs.append("dyn_state_adjoint_cache")
         for name in structs:
             yield from array_class.iter_data(getattr(self.data_manager, name), name)
+
+    @cached_property
+    @gs.assert_built
+    def scene_data(self) -> tuple[SceneData, ...]:
+        records = []
+        for entity in self.entities:
+            for link in entity.links:
+                parent = self.links[link.parent_idx] if link.parent_idx >= 0 else None
+                selection = (slice(None), slice(link.idx, link.idx + 1))
+                records.append(
+                    LinkData(
+                        uid=link.uid,
+                        entity=entity,
+                        parent=parent,
+                        pos=DataReference(
+                            self, "links.pos", self.dyn_state.links.pos, selection, self.update_forward_pos
+                        ),
+                        quat=DataReference(
+                            self, "links.quat", self.dyn_state.links.quat, selection, self.update_forward_pos
+                        ),
+                    )
+                )
+                for joint in link.joints:
+                    selection = (slice(None), slice(joint.idx, joint.idx + 1))
+                    records.append(
+                        JointData(
+                            uid=joint.uid,
+                            entity=entity,
+                            parent=parent,
+                            child=link,
+                            type=joint.type,
+                            qpos=DataReference(
+                                self, "qpos", self.rigid_info.qpos, (slice(None), slice(joint.q_start, joint.q_end))
+                            ),
+                            dofs_vel=DataReference(
+                                self,
+                                "dofs.vel",
+                                self.dyn_state.dofs.vel,
+                                (slice(None), slice(joint.dof_start, joint.dof_end)),
+                            ),
+                            anchor=DataReference(
+                                self,
+                                "joints.xanchor",
+                                self.dyn_state.joints.xanchor,
+                                selection,
+                                self.update_forward_pos,
+                            ),
+                            axis=DataReference(
+                                self, "joints.xaxis", self.dyn_state.joints.xaxis, selection, self.update_forward_pos
+                            ),
+                        )
+                    )
+                for geom in link.vgeoms:
+                    selection = (slice(None), slice(geom.idx, geom.idx + 1))
+                    records.append(
+                        RigidGeomData(
+                            uid=geom.uid,
+                            entity=entity,
+                            role="visual",
+                            link=link,
+                            vertices=DataReference(
+                                self,
+                                "vverts.init_pos",
+                                self.dyn_info.vverts.init_pos,
+                                (slice(geom.vvert_start, geom.vvert_end),),
+                            ),
+                            triangles=DataReference(
+                                self,
+                                "vfaces.vverts_idx",
+                                self.dyn_info.vfaces.vverts_idx,
+                                (slice(geom.vface_start, geom.vface_end),),
+                            ),
+                            vertex_start=geom.vvert_start,
+                            active_envs=DataReference(self, "vgeoms.active_envs", geom.active_envs_mask)
+                            if geom.active_envs_mask is not None
+                            else None,
+                            pos=DataReference(
+                                self, "vgeoms.pos", self.dyn_state.vgeoms.pos, selection, self.update_vgeoms
+                            ),
+                            quat=DataReference(
+                                self, "vgeoms.quat", self.dyn_state.vgeoms.quat, selection, self.update_vgeoms
+                            ),
+                        )
+                    )
+        return tuple(records)
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- hook methods -------------------------------------
@@ -1407,6 +1494,7 @@ class KinematicSolver(Solver):
         return tensor[..., 0], tensor[..., 1]
 
     def update_vgeoms(self):
+        self.update_forward_pos()
         kernel_update_vgeoms(self.dyn_state, self.dyn_info, self.rigid_config)
 
     def update_forward_pos(self):

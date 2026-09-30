@@ -1,3 +1,4 @@
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -194,6 +195,12 @@ class KinematicLink(RBC):
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
+
+    @cached_property
+    @gs.assert_built
+    def data(self) -> "gs.data.LinkData":
+        """The link's pose and parent relationship in the scene registry."""
+        return next(record for record in self.solver.scene_data if record.uid is self.uid)
 
     @property
     def uid(self):

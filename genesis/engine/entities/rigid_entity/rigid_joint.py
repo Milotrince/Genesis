@@ -1,3 +1,5 @@
+from functools import cached_property
+
 import numpy as np
 
 import genesis as gs
@@ -103,6 +105,12 @@ class RigidJoint(RBC):
     # ------------------------------------------------------------------------------------
     # ----------------------------------- properties -------------------------------------
     # ------------------------------------------------------------------------------------
+
+    @cached_property
+    @gs.assert_built
+    def data(self) -> "gs.data.JointData":
+        """The joint's endpoints, configuration, velocity, anchor, and axis."""
+        return next(record for record in self.solver.scene_data if record.uid is self.uid)
 
     @property
     def uid(self):
