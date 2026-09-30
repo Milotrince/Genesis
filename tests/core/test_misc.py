@@ -19,6 +19,60 @@ from ..utils.assertions import assert_allclose, assert_equal
 
 
 @pytest.mark.required
+def test_entity_options():
+    scene = gs.Scene(
+        show_viewer=False,
+    )
+    options = gs.options.RigidEntityOptions(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+        ),
+        material=gs.materials.Rigid(
+            rho=500.0,
+        ),
+        surface=gs.surfaces.Default(),
+    )
+    entity = scene.add_entity(
+        options=options,
+    )
+    second = scene.add_entity(
+        options=options,
+    )
+    assert entity.solver is scene.sim.rigid_solver
+    assert_equal(entity.material.rho, 500.0)
+    assert entity.name != second.name
+    assert options.surface.smooth
+    assert options.surface.vis_mode is None
+    assert_equal(options.morph.pos, (0.0, 0.0, 0.0))
+
+    kinematic = scene.add_entity(
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+            ),
+        ),
+    )
+    assert kinematic.solver is scene.sim.kinematic_solver
+    with pytest.raises(gs.GenesisException, match="material"):
+        gs.options.RigidEntityOptions(morph=options.morph, material=gs.materials.Kinematic())
+    with pytest.raises(gs.GenesisException, match="kinematic material"):
+        gs.options.KinematicEntityOptions(morph=options.morph, material=gs.materials.Rigid())
+    with pytest.raises(gs.GenesisException, match="material"):
+        options.material = gs.materials.Kinematic()
+    with pytest.raises(gs.GenesisException, match="material"):
+        scene.add_entity(options=options.model_copy(update={"material": gs.materials.Kinematic()}))
+    with pytest.raises(gs.GenesisException, match="either entity options"):
+        scene.add_entity(morph=options.morph, options=options)
+    with pytest.raises(gs.GenesisException, match="either entity options"):
+        scene.add_entity(visualize_contact=False, options=options)
+    with pytest.raises(gs.GenesisException, match="entity family"):
+        scene.add_entity(options=gs.options.EntityOptions(morph=options.morph, material=options.material))
+    with pytest.raises(gs.GenesisException, match="requires a morph"):
+        scene.add_entity()
+    assert_equal(len(scene.entities), 3)
+
+
+@pytest.mark.required
 def test_scene_destroy_cleans_up_simulator():
     scene = gs.Scene(show_viewer=False)
     scene.add_entity(

@@ -71,8 +71,10 @@ def test_data_reference(n_envs, show_viewer):
         show_viewer=show_viewer,
     )
     entity = scene.add_entity(
-        morph=gs.morphs.Box(
-            size=(0.2, 0.2, 0.2),
+        options=gs.options.RigidEntityOptions(
+            morph=gs.morphs.Box(
+                size=(0.2, 0.2, 0.2),
+            ),
         ),
     )
     fixed = scene.add_entity(
@@ -83,11 +85,12 @@ def test_data_reference(n_envs, show_viewer):
         ),
     )
     visual = scene.add_entity(
-        morph=gs.morphs.Box(
-            pos=(8.0, 0.0, 0.0),
-            size=(0.2, 0.2, 0.2),
+        options=gs.options.KinematicEntityOptions(
+            morph=gs.morphs.Box(
+                pos=(8.0, 0.0, 0.0),
+                size=(0.2, 0.2, 0.2),
+            ),
         ),
-        material=gs.materials.Kinematic(),
     )
     with pytest.raises(gs.GenesisException, match="built"):
         scene.data

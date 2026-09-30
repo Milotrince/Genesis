@@ -26,14 +26,17 @@ from genesis.engine.force_fields import ForceField
 from genesis.engine.materials.base import EntityT, Material
 from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
-    SceneOptions,
     BaseCouplerOptions,
+    EntityOptions,
     FEMOptions,
+    KinematicEntityOptions,
     KinematicOptions,
     MPMOptions,
     PBDOptions,
     ProfilingOptions,
+    RigidEntityOptions,
     RigidOptions,
+    SceneOptions,
     SFOptions,
     SimOptions,
     SPHOptions,
@@ -306,6 +309,12 @@ class Scene(RBC):
             self._is_built = False
 
     @overload
+    def add_entity(self, *, options: RigidEntityOptions) -> "RigidEntity": ...
+
+    @overload
+    def add_entity(self, *, options: KinematicEntityOptions) -> KinematicEntity: ...
+
+    @overload
     def add_entity(
         self,
         morph: Morph | Iterable[Morph],
@@ -330,12 +339,14 @@ class Scene(RBC):
     @gs.assert_unbuilt
     def add_entity(
         self,
-        morph: Morph | Iterable[Morph],
+        morph: Morph | Iterable[Morph] | None = None,
         material: Material | None = None,
         surface: Surface | None = None,
-        visualize_contact: bool = False,
+        visualize_contact: bool | None = None,
         vis_mode: str | None = None,
         name: str | None = None,
+        *,
+        options: EntityOptions | None = None,
     ) -> "Entity":
         """
         Add an entity to the scene.
@@ -350,21 +361,40 @@ class Scene(RBC):
             The material of the entity. If None, use ``gs.materials.Rigid()``.
         surface : gs.surfaces.Surface | None, optional
             The surface of the entity. If None, use ``gs.surfaces.Default()``.
-        visualize_contact : bool
+        visualize_contact : bool | None, optional
             Whether to visualize contact forces applied to this entity as arrows in the viewer and rendered images.
-            Note that this will not be displayed in images rendered by camera using the `RayTracer` renderer.
+            If None, defaults to False. Contact forces are omitted from images rendered by the `RayTracer` renderer.
         vis_mode : str | None, optional
             The visualization mode of the entity. This is a handy shortcut for setting `surface.vis_mode` without
             explicitly creating a surface object.
         name : str | None, optional
             User-specified name for the entity. If not provided, an auto-generated name will be assigned
             based on the morph type and entity UID (e.g., "box_a1b2c3d4"). Must be unique within the scene.
+        options : EntityOptions | None, optional
+            Typed construction options selecting a rigid or kinematic entity. Supply these alone.
+            The scene copies them before resolving defaults, so they can be reused.
 
         Returns
         -------
         entity : genesis.Entity
             The created entity.
         """
+        if options is not None:
+            if any(value is not None for value in (morph, material, surface, visualize_contact, vis_mode, name)):
+                gs.raise_exception("Pass either entity options or individual entity arguments, never both.")
+            if not isinstance(options, (RigidEntityOptions, KinematicEntityOptions)):
+                gs.raise_exception("Use RigidEntityOptions or KinematicEntityOptions to select an entity family.")
+            options = type(options).model_validate(options).model_copy(deep=True)
+            morph = options.morph
+            material = options.material
+            surface = options.surface
+            visualize_contact = options.visualize_contact
+            vis_mode = options.vis_mode
+            name = options.name
+        if morph is None:
+            gs.raise_exception("Entity construction requires a morph.")
+        if visualize_contact is None:
+            visualize_contact = False
         if material is None:
             material = gs.materials.Rigid()
 

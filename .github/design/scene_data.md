@@ -66,6 +66,32 @@ Each PR targets the preceding branch on the fork. The first targets a fork main 
 Intermediate PRs state their coverage explicitly. A staged conversion does not imply every solver already implements
 the final contract. Existing coupling behavior is retained, and no new coupling algorithm is part of this stack.
 
+## Initial reviewable stages
+
+The first three PRs provide protected references, rigid/kinematic records, and rigid/kinematic typed construction.
+For example:
+
+```python
+entity = scene.add_entity(
+    options=gs.options.RigidEntityOptions(
+        morph=gs.morphs.Box(
+            size=(0.2, 0.2, 0.2),
+        ),
+    ),
+)
+scene.build()
+position = entity.geoms[0].data.pos.read()
+live_position = entity.geoms[0].data.pos.read(copy=False)
+```
+
+`KinematicEntityOptions` selects visualization-only entities. The concrete options validate compatible materials and
+are copied before scene-specific defaults are resolved. Existing flat construction remains available while its
+nonrigid callers migrate in later stages. The material names and scoped link/geom/joint options described above are
+planned stages. Querying scene data for an unsupported active solver currently raises explicitly.
+
+Primitive geometry parameters are available as `geom.shape_data`. The name `geom.data` denotes the scene record.
+The existing native runtime getters also serve collision initialization before the scene registry is available.
+
 ## Validation
 
 Exercise ordinary writes, `out=`, nested tensor mutation, aliases, independent copies, and public export routes.
