@@ -265,7 +265,6 @@ class Scene(RBC):
 
         self._uid = gs.UID()
         self._is_built = False
-        self.__dict__.pop("_desc_digest", None)
         self._pre_step_callbacks: list = []
 
         gs.logger.info(f"Scene ~~~<{self._uid}>~~~ created.")
