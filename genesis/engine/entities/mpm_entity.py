@@ -84,10 +84,6 @@ class MPMEntity(ParticleEntity):
             desc=desc,
         )
 
-    @property
-    def desc(self) -> ParticleEntityDescription:
-        return self._desc
-
     def init_tgt_keys(self):
         """
         Initialize target keys used for buffer-based state tracking.

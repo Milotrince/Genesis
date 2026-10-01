@@ -1,7 +1,7 @@
 import math
-from typing import TYPE_CHECKING
 
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
@@ -13,16 +13,15 @@ from genesis.engine.entities import (
     PBDFreeParticleEntity,
     PBDParticleEntity,
 )
-from genesis.engine.entities.pbd_entity import PBDTetEntity
+from genesis.engine.entities.particle_entity import ParticleEntityDescription
+from genesis.engine.entities.pbd_entity import PBDMeshDescription, PBDTetEntity
 from genesis.engine.materials import PBD
+from genesis.engine.solver_data.pbd import PBDData, PBDDescription, PBDGeomData
 from genesis.engine.states.solvers import PBDSolverState
 from genesis.utils.array_class import LinksState
 from genesis.utils.geom import SpatialHasher
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
-
-if TYPE_CHECKING:
-    from genesis.engine.entities import PBD2DEntity, PBD3DEntity, PBDFreeParticleEntity, PBDParticleEntity
 
 
 @qd.data_oriented
@@ -114,91 +113,11 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
         # Triangle face indices for visual mesh (static)
         self.vfaces_indices = qd.field(dtype=gs.qd_ivec3, shape=(max(self._n_vfaces, 1),))
 
-    def init_particle_fields(self):
-        # particles information (static)
-        struct_particle_info = qd.types.struct(
-            mass=gs.qd_float,
-            pos_rest=gs.qd_vec3,
-            rho_rest=gs.qd_float,
-            material_type=gs.qd_int,
-            mu_s=gs.qd_float,
-            mu_k=gs.qd_float,
-            air_resistance=gs.qd_float,
-            density_relaxation=gs.qd_float,
-            viscosity_relaxation=gs.qd_float,
-        )
-        # particles state (dynamic)
-        struct_particle_state = qd.types.struct(
-            free=gs.qd_bool,  # if not free, the particle is not affected by internal forces and solely controlled by external user until released
-            pos=gs.qd_vec3,  # position
-            ipos=gs.qd_vec3,  # initial position
-            dpos=gs.qd_vec3,  # delta position
-            vel=gs.qd_vec3,  # velocity
-            lam=gs.qd_float,
-            rho=gs.qd_float,
-        )
-
-        # dynamic particle state without gradient
-        struct_particle_state_ng = qd.types.struct(
-            reordered_idx=gs.qd_int,
-            active=gs.qd_bool,
-        )
-
-        # single frame particle state for rendering
-        struct_particle_state_render = qd.types.struct(
-            pos=gs.qd_vec3,
-            vel=gs.qd_vec3,
-            active=gs.qd_bool,
-        )
-
-        self.particles_info = struct_particle_info.field(shape=(self._n_particles,), layout=qd.Layout.SOA)
-        self.particles_info_reordered = struct_particle_info.field(
-            shape=(self._n_particles, self._B), layout=qd.Layout.SOA
-        )
-        self.particles = struct_particle_state.field(shape=(self._n_particles, self._B), layout=qd.Layout.SOA)
-        self.particles_reordered = struct_particle_state.field(shape=(self._n_particles, self._B), layout=qd.Layout.SOA)
-        self.particles_ng = struct_particle_state_ng.field(shape=(self._n_particles, self._B), layout=qd.Layout.SOA)
-        self.particles_ng_reordered = struct_particle_state_ng.field(
-            shape=(self._n_particles, self._B), layout=qd.Layout.SOA
-        )
+    def init_particle_render_fields(self):
+        struct_particle_state_render = qd.types.struct(pos=gs.qd_vec3, vel=gs.qd_vec3, active=gs.qd_bool)
         self.particles_render = struct_particle_state_render.field(
             shape=(self._n_particles, self._B), layout=qd.Layout.SOA
         )
-
-    def init_edge_fields(self):
-        # edges information for stretch. edge: (v1, v2)
-        struct_edge_info = qd.types.struct(
-            len_rest=gs.qd_float,
-            stretch_compliance=gs.qd_float,
-            stretch_relaxation=gs.qd_float,
-            v1=gs.qd_int,
-            v2=gs.qd_int,
-        )
-        self.edges_info = struct_edge_info.field(shape=(max(1, self._n_edges),), layout=qd.Layout.SOA)
-
-        # inner edges information for bending. edge: (v1, v2), adjacent faces: (v1, v2, v3) and (v1, v2, v4)
-        struct_inner_edge_info = qd.types.struct(
-            len_rest=gs.qd_float,
-            bending_compliance=gs.qd_float,
-            bending_relaxation=gs.qd_float,
-            v1=gs.qd_int,
-            v2=gs.qd_int,
-            v3=gs.qd_int,
-            v4=gs.qd_int,
-        )
-        self.inner_edges_info = struct_inner_edge_info.field(shape=(max(self._n_inner_edges, 1),), layout=qd.Layout.SOA)
-
-    def init_elem_fields(self):
-        struct_elem_info = qd.types.struct(
-            vol_rest=gs.qd_float,
-            volume_compliance=gs.qd_float,
-            volume_relaxation=gs.qd_float,
-            v1=gs.qd_int,
-            v2=gs.qd_int,
-            v3=gs.qd_int,
-            v4=gs.qd_int,
-        )
-        self.elems_info = struct_elem_info.field(shape=(max(self._n_elems, 1),), layout=qd.Layout.SOA)
 
     def init_ckpt(self):
         self._ckpt = dict()
@@ -206,8 +125,8 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
     def reset_grad(self):
         pass
 
-    def build(self):
-        super().build()
+    def prepare(self):
+        super().prepare()
 
         self._B = self._sim._B
         self._n_particles = self.n_particles
@@ -218,12 +137,58 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
         self._n_vverts = self.n_vverts
         self._n_vfaces = self.n_vfaces
 
+    def describe(self) -> PBDDescription | None:
+        if not self.is_active:
+            return None
+        return PBDDescription(
+            n_particles=self.n_particles,
+            n_envs=self._B,
+            n_edges=self.n_edges,
+            n_inner_edges=self.n_inner_edges,
+            n_elems=self.n_elems,
+        )
+
+    def bind(self):
+        if not self.is_active:
+            return
+        assert isinstance(self._solver_data, PBDData)
+        self.particles_info = self._solver_data.particles_info
+        self.particles_info_reordered = self._solver_data.particles_info_reordered
+        self.particles = self._solver_data.particles
+        self.particles_reordered = self._solver_data.particles_reordered
+        self.particles_ng = self._solver_data.particles_ng
+        self.particles_ng_reordered = self._solver_data.particles_ng_reordered
+        self.edges_info = self._solver_data.edges_info
+        self.inner_edges_info = self._solver_data.inner_edges_info
+        self.elems_info = self._solver_data.elems_info
+        edge_start = inner_edge_start = elem_start = 0
+        for entity in self.entities:
+            edge_end = edge_start + (entity.n_edges if isinstance(entity, PBDTetEntity) else 0)
+            inner_edge_end = inner_edge_start + (entity.n_inner_edges if isinstance(entity, PBD2DEntity) else 0)
+            elem_end = elem_start + (entity.n_elems if isinstance(entity, PBD3DEntity) else 0)
+            self.sim._solver_data.add(
+                PBDGeomData(
+                    owner=self,
+                    idx=entity.idx,
+                    entity_idx=entity.idx,
+                    data=self._solver_data,
+                    particle_start=entity.particle_start,
+                    particle_end=entity.particle_start + entity.n_particles,
+                    edge_start=edge_start,
+                    edge_end=edge_end,
+                    inner_edge_start=inner_edge_start,
+                    inner_edge_end=inner_edge_end,
+                    elem_start=elem_start,
+                    elem_end=elem_end,
+                )
+            )
+            edge_start, inner_edge_start, elem_start = edge_end, inner_edge_end, elem_end
+
+    def build(self):
         if self.is_active:
             self.sh.build(self._B)
 
-            self.init_particle_fields()
-            self.init_edge_fields()
-            self.init_elem_fields()
+            self.init_particle_render_fields()
             self.init_vvert_fields()
 
             self.init_ckpt()
@@ -245,6 +210,15 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
     ) -> "PBD2DEntity | PBD3DEntity | PBDParticleEntity | PBDFreeParticleEntity":
+        if desc is None:
+            if isinstance(material, (gs.materials.PBD.Cloth, gs.materials.PBD.Elastic)):
+                desc = PBDMeshDescription.resolve(material, morph, surface, self._particle_size, name)
+            else:
+                desc = ParticleEntityDescription.resolve(
+                    material, morph, surface, self._particle_size, name, self.boundary, has_skinning=False
+                )
+        assert isinstance(desc, ParticleEntityDescription)
+        material = desc.material
         if isinstance(material, gs.materials.PBD.Cloth):
             entity = PBD2DEntity(
                 scene=self.scene,
@@ -260,6 +234,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                 vvert_start=self.n_vverts,
                 vface_start=self.n_vfaces,
                 name=name,
+                desc=desc,
             )
 
         elif isinstance(material, gs.materials.PBD.Elastic):
@@ -277,6 +252,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                 vvert_start=self.n_vverts,
                 vface_start=self.n_vfaces,
                 name=name,
+                desc=desc,
             )
 
         elif isinstance(material, gs.materials.PBD.Liquid):
@@ -290,6 +266,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                 idx=idx,
                 particle_start=self.n_particles,
                 name=name,
+                desc=desc,
             )
 
         elif isinstance(material, gs.materials.PBD.Particle):
@@ -303,6 +280,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
                 idx=idx,
                 particle_start=self.n_particles,
                 name=name,
+                desc=desc,
             )
 
         else:

@@ -58,10 +58,6 @@ class SPHEntity(ParticleEntity):
             desc=desc,
         )
 
-    @property
-    def desc(self) -> ParticleEntityDescription:
-        return self._desc
-
     def _add_particles_to_solver(self):
         self._solver._kernel_add_particles(
             self._sim.cur_substep_local,

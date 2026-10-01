@@ -143,3 +143,8 @@ SPH uses `ParticleEntityDescription` for resolved sampling and `SPHDescription` 
 `SPHData` keeps original-order and reordered particle state, material properties, and reorder maps
 together. `SPHGeomData` identifies entity ranges in original order; coupling uses the reordered buffers
 during substeps. Spatial hashing and render buffers remain solver-owned.
+
+PBD cloth and elastic entities use `PBDMeshDescription` for remeshed vertices, edges, bending pairs,
+and tetrahedral rest volumes. Liquids and free particles use `ParticleEntityDescription`.
+`PBDDescription` allocates original-order and reordered particle buffers plus rest topology;
+`PBDGeomData` records each entity's particle, edge, bending-edge, and element ranges.

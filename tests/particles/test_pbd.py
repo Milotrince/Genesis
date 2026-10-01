@@ -1,8 +1,9 @@
-import pytest
 import numpy as np
+import pytest
 import torch
 
 import genesis as gs
+from genesis.engine.scene import SCENE_FORMAT
 
 from ..utils.assertions import assert_allclose
 
@@ -52,7 +53,7 @@ def test_maxvolume(pbd_material, show_viewer, box_obj_path):
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_get_mass(n_envs, show_viewer, tol):
+def test_get_mass(n_envs, tmp_path, show_viewer, tol):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=4e-3,
@@ -69,12 +70,17 @@ def test_get_mass(n_envs, show_viewer, tol):
         ),
         material=gs.materials.PBD.Cloth(),
     )
+    expected_mass = cloth.vmesh.area * cloth.material.rho
+    exported = tmp_path / f"cloth{SCENE_FORMAT}"
+    scene.export(exported)
+    scene = gs.Scene.load(exported, show_viewer=show_viewer)
+    cloth = scene.entities[1]
     scene.build(n_envs=n_envs)
 
     mass = cloth.get_mass()
     expected_n = max(n_envs, 1)
     assert mass.shape == (expected_n,), f"Expected shape ({expected_n},), got {mass.shape}"
-    assert (mass > 0).all(), f"Expected positive mass, got {mass}"
+    assert_allclose(mass, expected_mass, tol=tol)
 
 
 @pytest.mark.required

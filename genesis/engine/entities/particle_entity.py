@@ -27,7 +27,7 @@ class ParticleEntityDescription(VerticesDescription, EntityDescription):
     name: str | None
     particle_size: float
     has_skinning: bool
-    sampler: str
+    sampler: str | None
     origin: np.ndarray
     vmesh: gs.Mesh | None
     vverts: np.ndarray
@@ -182,13 +182,13 @@ class ParticleEntity(Entity):
         vface_start=None,
         need_skinning=True,
         name: str | None = None,
-        desc: ParticleEntityDescription | None = None,
+        *,
+        desc: ParticleEntityDescription,
     ):
-        if desc is not None:
-            morph, material, surface, name = desc.morph, desc.material, desc.surface, desc.name
-            particle_size, need_skinning = desc.particle_size, desc.has_skinning
+        morph, material, surface, name = desc.morph, desc.material, desc.surface, desc.name
+        particle_size, need_skinning = desc.particle_size, desc.has_skinning
         super().__init__(idx, scene, morph, solver, material, surface, name=name)
-        self._desc: ParticleEntityDescription | None = desc
+        self._desc = desc
 
         self._particle_size = particle_size
         self._particle_start = particle_start
@@ -201,15 +201,7 @@ class ParticleEntity(Entity):
             self._vvert_start = -1
             self._vface_start = -1
 
-        if desc is None:
-            self._vmesh = ParticleEntityDescription.resolve_mesh(morph, surface)
-            if isinstance(morph, gs.options.morphs.MeshSet):
-                self._surface = self._vmesh[0].surface
-            elif self._vmesh is not None:
-                self._surface = self._vmesh.surface
-            self.sample()
-        else:
-            self._apply_description(desc)
+        self._apply_description(desc)
 
         self.init_tgt_vars()
         self.init_ckpt()
@@ -310,18 +302,9 @@ class ParticleEntity(Entity):
             for j in range(self.solver._n_vvert_supports):
                 self.solver.vverts_info.support_idxs[i_vv][j] = support_idxs_local[i_vv_, j] + self._particle_start
 
-    def sample(self):
-        desc = ParticleEntityDescription.resolve(
-            self.material,
-            self.morph,
-            self.surface,
-            self._particle_size,
-            self.name,
-            self.solver.boundary,
-            has_skinning=self._need_skinning,
-            vmesh=self._vmesh,
-        )
-        self._apply_description(desc)
+    @property
+    def desc(self) -> ParticleEntityDescription:
+        return self._desc
 
     def _apply_description(self, desc):
         self._desc = desc
