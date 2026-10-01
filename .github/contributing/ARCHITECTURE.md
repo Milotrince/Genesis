@@ -119,7 +119,7 @@ The build phases are:
 4. `bind()` stores native buffer references and registers geometry and joint records with their ranges.
 5. The collection closes registration, and `build()` initializes state and private workspaces.
 
-Rigid and kinematic solvers use `ArticulatedDescription` for their shared native arrays. `LinksData`, `JointsData` and `VisualGeomData` identify ranges within those arrays. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly. Checkpoint iteration includes each shared allocation once; range records hold references to it. Scratch and adjoint workspaces remain owned by the solver's data manager.
+Rigid and kinematic solvers use `ArticulatedDescription` for their shared native arrays. `LinksData`, `JointsData` and `VisualGeomData` identify ranges within those arrays. The articulated record also owns joint configuration, rest configuration, gravity, and mean inertia; `RigidInfo` references those allocations for native kernels. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly. Checkpoint iteration includes each shared allocation once; range records hold references to it. Scratch and adjoint workspaces remain owned by the solver's data manager.
 
 FEM entities resolve a `FEMEntityDescription` containing simulation vertices, element topology, visual meshes and optional hydroelastic pressure. `FEMDescription` allocates the time-indexed state, material arrays and surface data. `FEMGeomData` maps each entity into that storage. The finite element solver keeps its iterative solve, rendering and constraint workspaces locally. Scene export includes the resolved geometry and serializable material options.
 

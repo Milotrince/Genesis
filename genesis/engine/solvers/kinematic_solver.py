@@ -380,6 +380,7 @@ class KinematicSolver(Solver):
         return ArticulatedDescription(
             n_envs=self._B,
             n_dofs_=self.n_dofs_,
+            n_qs_=self.n_qs_,
             n_links_=self.n_links_,
             n_joints_=self.n_joints_,
             n_entities_=self.n_entities_,
@@ -427,6 +428,8 @@ class KinematicSolver(Solver):
                     state=self.dyn_state.joints,
                     dofs_info=self.dyn_info.dofs,
                     dofs_state=self.dyn_state.dofs,
+                    qpos=self._solver_data.qpos,
+                    qpos0=self._solver_data.qpos0,
                     joint_start=entity.joint_start,
                     joint_end=entity.joint_end,
                     dof_start=entity.dof_start,

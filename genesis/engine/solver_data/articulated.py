@@ -2,6 +2,9 @@
 
 from dataclasses import dataclass
 
+import quadrants as qd
+
+import genesis as gs
 from genesis.utils import array_class
 
 from . import SolverData, SolverDescription
@@ -11,6 +14,10 @@ from . import SolverData, SolverDescription
 class ArticulatedData(SolverData):
     info: array_class.DynInfo
     state: array_class.DynState
+    qpos: qd.Tensor
+    qpos0: qd.Tensor
+    gravity: qd.Tensor
+    meaninertia: qd.Tensor
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -27,6 +34,8 @@ class JointsData(SolverData):
     state: array_class.JointsState
     dofs_info: array_class.DofsInfo
     dofs_state: array_class.DofsState
+    qpos: qd.Tensor
+    qpos0: qd.Tensor
     joint_start: int
     joint_end: int
     dof_start: int
@@ -72,6 +81,7 @@ class RigidGeomData(GeomData):
 class ArticulatedDescription(SolverDescription[ArticulatedData]):
     n_envs: int
     n_dofs_: int
+    n_qs_: int
     n_links_: int
     n_joints_: int
     n_entities_: int
@@ -149,4 +159,14 @@ class ArticulatedDescription(SolverDescription[ArticulatedData]):
             vgeoms=vgeoms_state,
         )
 
-        return ArticulatedData(owner=owner, info=info, state=state)
+        return ArticulatedData(
+            owner=owner,
+            info=info,
+            state=state,
+            qpos=array_class.V(
+                dtype=gs.qd_float, shape=(self.n_qs_, self.n_envs), needs_grad=self.has_grad and self.is_dynamic
+            ),
+            qpos0=array_class.V(dtype=gs.qd_float, shape=(self.n_qs_, self.n_envs)),
+            gravity=array_class.V_VEC(3, dtype=gs.qd_float, shape=(self.n_envs,) if self.is_dynamic else ()),
+            meaninertia=array_class.V(dtype=gs.qd_float, shape=(self.n_envs,) if self.is_dynamic else ()),
+        )

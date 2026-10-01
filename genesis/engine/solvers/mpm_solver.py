@@ -13,6 +13,7 @@ from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import HybridEntity, MPMEntity
 from genesis.engine.entities.particle_entity import ParticleEntityDescription
 from genesis.engine.materials import MPM
+from genesis.engine.solver_data.articulated import ArticulatedData
 from genesis.engine.solver_data.hybrid import HybridDescription
 from genesis.engine.solver_data.mpm import MPMData, MPMDescription, MPMGeomData
 from genesis.engine.states.solvers import MPMSolverState
@@ -43,6 +44,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         self._lower_bound = np.array(options.lower_bound)
         self._enable_CPIC = options.enable_CPIC
         self._constraints_initialized = False
+        self._rigid_data: ArticulatedData | None = None
 
         self._n_vvert_supports = self.scene.options.vis.n_support_neighbors
 
@@ -194,6 +196,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     def bind(self):
         if not self.is_active:
             return
+        self._rigid_data = self.sim._solver_data.get(ArticulatedData, self.sim.rigid_solver)
         assert isinstance(self._solver_data, MPMData)
         self.particles = self._solver_data.particles
         self.particles_ng = self._solver_data.particles_ng
@@ -583,9 +586,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                 self.compute_F_tmp_only(f)
         self.p2g(
             f,
-            self.sim.coupler.rigid_solver.dyn_state.geoms,
-            self.sim.coupler.rigid_solver.dyn_info.geoms,
-            self.sim.coupler.rigid_solver.dyn_state.links,
+            self._rigid_data.state.geoms,
+            self._rigid_data.info.geoms,
+            self._rigid_data.state.links,
             self.sim.coupler.rigid_solver.rigid_info,
             self.sim.coupler.rigid_solver.collider._sdf._sdf_info,
             self.sim.coupler.rigid_solver.collider.collider_config,
@@ -594,9 +597,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     def substep_pre_coupling_grad(self, f):
         self.p2g.grad(
             f,
-            self.sim.coupler.rigid_solver.dyn_state.geoms,
-            self.sim.coupler.rigid_solver.dyn_info.geoms,
-            self.sim.coupler.rigid_solver.dyn_state.links,
+            self._rigid_data.state.geoms,
+            self._rigid_data.info.geoms,
+            self._rigid_data.state.links,
             self.sim.coupler.rigid_solver.rigid_info,
             self.sim.coupler.rigid_solver.collider._sdf._sdf_info,
             self.sim.coupler.rigid_solver.collider.collider_config,
@@ -607,14 +610,14 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     def substep_post_coupling(self, f):
         self.g2p(
             f,
-            self.sim.coupler.rigid_solver.dyn_info.geoms,
-            self.sim.coupler.rigid_solver.dyn_state.links,
+            self._rigid_data.info.geoms,
+            self._rigid_data.state.links,
             self.sim.coupler.rigid_solver.rigid_info,
         )
 
         # Apply particle constraints after g2p
         if self._constraints_initialized:
-            self.apply_particle_constraints(f, self.sim.coupler.rigid_solver.dyn_state.links)
+            self.apply_particle_constraints(f, self._rigid_data.state.links)
 
         # Eager sparse reset: zero only the cells p2g touched this substep, across all envs, then clear the global
         # dirty count so the next substep starts fresh. The grid is no longer read after g2p / constraints, so it is
@@ -640,8 +643,8 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     def substep_post_coupling_grad(self, f):
         self.g2p.grad(
             f,
-            self.sim.coupler.rigid_solver.dyn_info.geoms,
-            self.sim.coupler.rigid_solver.dyn_state.links,
+            self._rigid_data.info.geoms,
+            self._rigid_data.state.links,
             self.sim.coupler.rigid_solver.rigid_info,
         )
 
