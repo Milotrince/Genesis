@@ -194,10 +194,9 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             ),
         )
 
-    def bind(self):
+    def register_data(self):
         if not self.is_active:
             return
-        self._rigid_data = self.sim._solver_data.get(ArticulatedData, self.sim.rigid_solver)
         assert isinstance(self._solver_data, MPMData)
         self.particles = self._solver_data.particles
         self.particles_ng = self._solver_data.particles_ng
@@ -216,6 +215,10 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                     particle_end=entity.particle_start + entity.n_particles,
                 )
             )
+
+    def bind(self):
+        if self.is_active:
+            self._rigid_data = self.sim._solver_data.get(ArticulatedData, self.sim.rigid_solver)
 
     def build(self):
         if self.is_active:

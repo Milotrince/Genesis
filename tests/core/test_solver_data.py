@@ -9,6 +9,7 @@ from genesis.engine.solver_data.fem import FEMGeomData
 from genesis.engine.solver_data.mpm import MPMGeomData
 from genesis.engine.solver_data.pbd import PBDGeomData
 from genesis.engine.solver_data.sph import SPHGeomData
+from genesis.recorders.trajectory import TRAJECTORY_FORMAT, Trajectory
 from genesis.utils.misc import qd_to_torch
 
 from ..utils.assertions import assert_allclose
@@ -186,3 +187,90 @@ def test_shared_binding(n_envs, tmp_path, show_viewer, tol):
             (0.5, 0.5, 0.5),
             tol=tol,
         )
+
+
+@pytest.mark.required
+@pytest.mark.parametrize("n_envs", [0, 2])
+def test_plugin_lifecycle(n_envs, solver_plugin, tmp_path, show_viewer, tol):
+    primary, secondary = solver_plugin.primary, solver_plugin.secondary
+    with pytest.raises(TypeError, match="concrete SolverOptions subclass"):
+
+        class InvalidSolver(primary.Solver, options_cls=gs.options.RigidOptions):
+            pass
+
+    with pytest.raises(ValueError, match="already registered"):
+
+        class DuplicateSolver(primary.Solver, options_cls=primary.Options):
+            pass
+
+    with pytest.raises(gs.GenesisException, match="overlaps"):
+        gs.Scene(additional_solver_options=(primary.OverlappingOptions(entity_name="first", speed=1.0),))
+    with pytest.raises(gs.GenesisException, match="Import a solver registered"):
+        gs.Scene(additional_solver_options=(primary.UnregisteredOptions(entity_name="first", speed=1.0),))
+    with pytest.raises(gs.GenesisException, match="Duplicate additional solver"):
+        gs.Scene(additional_solver_options=(primary.Options(entity_name="first", speed=1.0),) * 2)
+    with pytest.raises(gs.GenesisException, match="does not support differentiable"):
+        gs.Scene(
+            sim_options=gs.options.SimOptions(
+                requires_grad=True,
+            ),
+            additional_solver_options=(primary.Options(entity_name="first", speed=1.0),),
+        )
+    scene = gs.Scene(
+        sim_options=gs.options.SimOptions(
+            dt=0.01,
+        ),
+        viewer_options=gs.options.ViewerOptions(
+            camera_pos=(1.0, -1.0, 0.8),
+            camera_lookat=(0.0, 0.0, 0.0),
+        ),
+        show_viewer=show_viewer,
+        additional_solver_options=(
+            primary.Options(entity_name="first", speed=1.0),
+            secondary.Options(entity_name="second", speed=2.0),
+        ),
+    )
+    for name, y in (("first", -0.2), ("second", 0.2)):
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.0, y, 0.0),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=gs.materials.Kinematic(),
+            name=name,
+        )
+    exported = tmp_path / f"plugin{SCENE_FORMAT}"
+    scene.export(exported)
+    scene = gs.Scene.load(exported, show_viewer=show_viewer)
+    path = tmp_path / f"plugin{TRAJECTORY_FORMAT}"
+    scene.start_recording(gs.recorders.TrajectoryFile(filename=str(path), exact=True))
+    scene.build(n_envs=n_envs)
+    scene.step()
+    scene.step()
+    scene.stop_recording()
+    checkpoint = scene.__getstate__()
+    scene.step()
+    scene.__setstate__(checkpoint)
+    for options_cls, name, speed in ((primary.Options, "first", 1.0), (secondary.Options, "second", 2.0)):
+        entity = scene.get_entity(name)
+        plugin = scene.get_solver(options_cls)
+        assert_allclose(entity.get_pos()[..., 0], speed * scene.dt * 2, tol=tol)
+        assert_allclose(plugin.get_positions()[:, 0], entity.get_pos(), tol=tol)
+        plugin.get_positions().zero_()
+        assert_allclose(plugin.get_positions()[:, 0], entity.get_pos(), tol=tol)
+    trajectory = Trajectory(path, scene=scene)
+    trajectory.seek(1)
+    for options_cls, name, speed in ((primary.Options, "first", 1.0), (secondary.Options, "second", 2.0)):
+        entity = scene.get_entity(name)
+        assert_allclose(entity.get_pos()[..., 0], speed * scene.dt, tol=tol)
+        assert_allclose(scene.get_solver(options_cls).get_positions()[:, 0], entity.get_pos(), tol=tol)
+    scene.reset(envs_idx=0 if n_envs else None)
+    for options_cls, speed in ((primary.Options, 1.0), (secondary.Options, 2.0)):
+        assert_allclose(
+            scene.get_solver(options_cls).get_positions()[:, 0, 0],
+            [0.0, speed * scene.dt] if n_envs else [0.0],
+            tol=tol,
+        )
+    scene.reset()
+    for options_cls in (primary.Options, secondary.Options):
+        assert_allclose(scene.get_solver(options_cls).get_positions()[..., 0], 0.0, tol=tol)

@@ -149,7 +149,7 @@ class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
             n_elems=self.n_elems,
         )
 
-    def bind(self):
+    def register_data(self):
         if not self.is_active:
             return
         assert isinstance(self._solver_data, PBDData)

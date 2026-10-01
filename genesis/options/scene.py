@@ -17,6 +17,7 @@ from .solvers import (
     RigidOptions,
     SFOptions,
     SimOptions,
+    SolverOptions,
     SPHOptions,
     ToolOptions,
 )
@@ -44,6 +45,7 @@ class SceneOptions(Options):
     fem: FEMOptions = Field(default_factory=FEMOptions)
     sf: SFOptions = Field(default_factory=SFOptions)
     pbd: PBDOptions = Field(default_factory=PBDOptions)
+    additional_solvers: tuple[SolverOptions, ...] = Field(default=(), strict=False)
     coupler: BaseCouplerOptions = Field(default_factory=LegacyCouplerOptions)
     vis: VisOptions = Field(default_factory=VisOptions)
     viewer: ViewerOptions = Field(default_factory=ViewerOptions)
@@ -84,5 +86,7 @@ class SceneOptions(Options):
         # Each option inherits from the simulation options the values it leaves unset, on fields it declares.
         # 'model_copy_from' fills only fields both sides declare, so one loop covers every option by name.
         for name, option in dict(self).items():
-            if name != "sim":
+            if name == "additional_solvers":
+                self.additional_solvers = tuple(item.model_copy_from(self.sim) for item in option)
+            elif name != "sim":
                 self.__dict__[name] = option.model_copy_from(self.sim)

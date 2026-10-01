@@ -43,7 +43,7 @@ class ToolSolver(TimeBasedMixin, Solver):
             substeps_local=self.sim.substeps_local,
         )
 
-    def bind(self):
+    def register_data(self):
         if not self.is_active:
             return
         assert isinstance(self._solver_data, ToolData)

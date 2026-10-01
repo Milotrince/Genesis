@@ -56,7 +56,7 @@ class SFSolver(TimeBasedMixin, Solver):
             return None
         return SFDescription(res=self.res, n_channels=len(self.jets), cell_size=self.dx)
 
-    def bind(self):
+    def register_data(self):
         if self.is_active:
             assert isinstance(self._solver_data, SFData)
             self.grid = self._solver_data.grid
