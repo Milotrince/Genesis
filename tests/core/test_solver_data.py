@@ -1,7 +1,9 @@
 import pytest
 
 import genesis as gs
+from genesis.engine.scene import SCENE_FORMAT
 from genesis.engine.solver_data.articulated import JointsData, LinksData, RigidGeomData, VisualGeomData
+from genesis.engine.solver_data.fem import FEMGeomData
 from genesis.utils.misc import qd_to_torch
 
 from ..utils.assertions import assert_allclose
@@ -9,7 +11,7 @@ from ..utils.assertions import assert_allclose
 
 @pytest.mark.required
 @pytest.mark.parametrize("n_envs", [0, 2])
-def test_articulated_binding(n_envs, show_viewer, tol):
+def test_shared_binding(n_envs, tmp_path, show_viewer, tol):
     scene = gs.Scene(
         show_viewer=show_viewer,
     )
@@ -24,6 +26,18 @@ def test_articulated_binding(n_envs, show_viewer, tol):
                 material=material,
             )
         )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(3.0, 0.0, 1.0),
+            size=(0.2, 0.2, 0.2),
+        ),
+        material=gs.materials.FEM.Elastic(),
+    )
+    exported = tmp_path / f"shared_data{SCENE_FORMAT}"
+    scene.export(exported)
+    scene = gs.Scene.load(exported, show_viewer=show_viewer)
+    entities = scene.entities[:2]
+    fem_entity = scene.entities[2]
     scene.build(n_envs=n_envs)
 
     for entity in entities:
@@ -58,3 +72,14 @@ def test_articulated_binding(n_envs, show_viewer, tol):
     scene.reset()
     for entity, pos in zip(entities, ((0.0, 0.0, 1.0), (1.0, 0.0, 1.0))):
         assert_allclose(entity.get_pos(), pos, tol=tol)
+
+    fem_geom = scene.sim._solver_data.get(FEMGeomData, fem_entity.solver, fem_entity.idx)
+    state = fem_entity.get_state()
+    assert_allclose((state.pos.amin(dim=-2) + state.pos.amax(dim=-2)) / 2, (3.0, 0.0, 1.0), tol=tol)
+    assert_allclose(
+        qd_to_torch(fem_geom.data.elements_v.pos, col_mask=0, keepdim=False, transpose=True)[
+            :, fem_geom.vert_start : fem_geom.vert_end
+        ],
+        state.pos,
+        tol=tol,
+    )

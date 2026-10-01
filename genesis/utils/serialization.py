@@ -177,7 +177,7 @@ def _resolve_quoted(hint, namespace: dict):
 def _declared_fields(cls: type) -> dict[str, type]:
     """Return the declared type of each field of a class. Those types drive how a value loads back."""
     if issubclass(cls, Options):
-        return {name: info.annotation for name, info in cls.model_fields.items()}
+        return {name: info.annotation for name, info in cls.model_fields.items() if info.exclude is not True}
     hints = typing.get_type_hints(cls)
     if sys.version_info < (3, 11):
         namespace = vars(sys.modules[cls.__module__])
@@ -405,7 +405,7 @@ def _export_value(value, expect, exported: "Exported"):
         if issubclass(type(value), Options):
             # An option object carries the names of the fields the user gave, since rebuilding one needs them. They
             # are sorted, so exporting the same scene twice gives the same file.
-            values = {"values": values, "given": sorted(value.model_fields_set)}
+            values = {"values": values, "given": sorted(value.model_fields_set & values.keys())}
         return values if _accepted_classes(expect) == (type(value),) else {"@": type(value).__name__, **values}
     expect = _deduce_union(expect, value)
     origin = typing.get_origin(expect)

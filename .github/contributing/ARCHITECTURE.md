@@ -121,6 +121,8 @@ The build phases are:
 
 Rigid and kinematic solvers use `ArticulatedDescription` for their shared native arrays. `LinksData`, `JointsData` and `VisualGeomData` identify ranges within those arrays. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly. Checkpoint iteration includes each shared allocation once; range records hold references to it. Scratch and adjoint workspaces remain owned by the solver's data manager.
 
+FEM entities resolve a `FEMEntityDescription` containing simulation vertices, element topology, visual meshes and optional hydroelastic pressure. `FEMDescription` allocates the time-indexed state, material arrays and surface data. `FEMGeomData` maps each entity into that storage. The finite element solver keeps its iterative solve, rendering and constraint workspaces locally. Scene export includes the resolved geometry and serializable material options.
+
 ## Key Files Reference
 
 | File | Purpose |
