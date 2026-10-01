@@ -297,8 +297,8 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
         if self.n_vertices_max > 0 and self._enable_vertex_constraints and not self._constraints_initialized:
             self.init_constraints()
 
-        # Kernels of this solver take the solver itself, so gravity has to be a field for them.
-        self._build_gravity(as_field=True)
+        if self.is_active:
+            self._build_gravity(self._solver_data.gravity)
 
     @property
     def is_active(self):

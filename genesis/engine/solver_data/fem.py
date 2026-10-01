@@ -9,10 +9,11 @@ import quadrants as qd
 import genesis as gs
 
 from . import SolverData, SolverDescription
+from .gravity import GravityData, GravityDescription
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
-class FEMData(SolverData):
+class FEMData(GravityData):
     """Element mass_scaled and V_scaled are multiplied by vol_scale."""
 
     vol_scale: float
@@ -39,9 +40,8 @@ class FEMGeomData(SolverData):
 
 
 @dataclass(frozen=True, kw_only=True)
-class FEMDescription(SolverDescription[FEMData]):
+class FEMDescription(GravityDescription, SolverDescription[FEMData]):
     vol_scale: float
-    n_envs: int
     substeps_local: int
     n_vertices: int
     n_elements: int
@@ -92,6 +92,7 @@ class FEMDescription(SolverDescription[FEMData]):
         surface_vert_mass.from_numpy(self.surface_vert_mass)
         return FEMData(
             owner=owner,
+            gravity=self.allocate_gravity(),
             vol_scale=self.vol_scale,
             elements_v=elements_v,
             elements_el=elements_el,

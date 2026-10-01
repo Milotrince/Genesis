@@ -7,10 +7,11 @@ import quadrants as qd
 import genesis as gs
 
 from . import SolverData, SolverDescription
+from .gravity import GravityData, GravityDescription
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
-class PBDData(SolverData):
+class PBDData(GravityData):
     particles_info: qd.Field
     particles_info_reordered: qd.Field
     particles: qd.Field
@@ -36,9 +37,8 @@ class PBDGeomData(SolverData):
 
 
 @dataclass(frozen=True, kw_only=True)
-class PBDDescription(SolverDescription[PBDData]):
+class PBDDescription(GravityDescription, SolverDescription[PBDData]):
     n_particles: int
-    n_envs: int
     n_edges: int
     n_inner_edges: int
     n_elems: int
@@ -112,6 +112,7 @@ class PBDDescription(SolverDescription[PBDData]):
         elems_info = struct_elem_info.field(shape=(max(self.n_elems, 1),), layout=qd.Layout.SOA)
         return PBDData(
             owner=owner,
+            gravity=self.allocate_gravity(),
             particles_info=particles_info,
             particles_info_reordered=particles_info_reordered,
             particles=particles,

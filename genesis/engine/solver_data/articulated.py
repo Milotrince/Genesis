@@ -8,15 +8,15 @@ import genesis as gs
 from genesis.utils import array_class
 
 from . import SolverData, SolverDescription
+from .gravity import GravityData
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
-class ArticulatedData(SolverData):
+class ArticulatedData(GravityData):
     info: array_class.DynInfo
     state: array_class.DynState
     qpos: qd.Tensor
     qpos0: qd.Tensor
-    gravity: qd.Tensor
     meaninertia: qd.Tensor
 
 
