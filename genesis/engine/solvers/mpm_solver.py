@@ -1,8 +1,9 @@
 from typing import TYPE_CHECKING
 
 import numpy as np
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 import genesis.utils.array_class as array_class
@@ -10,7 +11,9 @@ import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import MPMEntity
+from genesis.engine.entities.particle_entity import ParticleEntityDescription
 from genesis.engine.materials import MPM
+from genesis.engine.solver_data.mpm import MPMData, MPMDescription, MPMGeomData
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.options.solvers import MPMOptions
 from genesis.utils.misc import DeprecationError, qd_to_torch
@@ -18,9 +21,7 @@ from genesis.utils.misc import DeprecationError, qd_to_torch
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
 if TYPE_CHECKING:
-    from genesis.engine.entities import MPMEntity
     from genesis.engine.scene import Scene
-    from genesis.engine.solvers.base_solver import Solver
     from genesis.engine.simulator import Simulator
 
 
@@ -80,64 +81,16 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             lower=self._lower_bound + self.boundary_padding, upper=self._upper_bound - self.boundary_padding
         )
 
-    def init_particle_fields(self):
-        # dynamic particle state
-        struct_particle_state = qd.types.struct(
-            pos=gs.qd_vec3,  # position
-            vel=gs.qd_vec3,  # velocity
-            C=gs.qd_mat3,  # affine velocity field
-            F=gs.qd_mat3,  # deformation gradient
-            F_tmp=gs.qd_mat3,  # temp deformation gradient
-            U=gs.qd_mat3,  # SVD
-            V=gs.qd_mat3,  # SVD
-            S=gs.qd_mat3,  # SVD
-            actu=gs.qd_float,  # actuation
-            Jp=gs.qd_float,  # volume ratio
-        )
-
-        # dynamic particle state without gradient
-        struct_particle_state_ng = qd.types.struct(active=gs.qd_bool)
-
-        # static particle info
-        struct_particle_info = qd.types.struct(
-            material_idx=gs.qd_int,
-            mass=gs.qd_float,
-            default_Jp=gs.qd_float,
-            free=gs.qd_bool,
-            # for muscle
-            muscle_group=gs.qd_int,
-            muscle_direction=gs.qd_vec3,
-        )
-
+    def init_particle_render_fields(self):
         # single frame particle state for rendering
         struct_particle_state_render = qd.types.struct(pos=gs.qd_vec3, vel=gs.qd_vec3, active=gs.qd_bool)
 
         # construct fields
-        self.particles = struct_particle_state.field(
-            shape=(self._sim.substeps_local + 1, self._n_particles, self._B), needs_grad=True, layout=qd.Layout.SOA
-        )
-        self.particles_ng = struct_particle_state_ng.field(
-            shape=(self._sim.substeps_local + 1, self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
-        )
-        self.particles_info = struct_particle_info.field(
-            shape=self._n_particles, needs_grad=False, layout=qd.Layout.SOA
-        )
         self.particles_render = struct_particle_state_render.field(
             shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
         )
 
-    def init_grid_fields(self):
-        grid_cell_state = qd.types.struct(
-            mass=gs.qd_float,  # mass
-            vel_in=gs.qd_vec3,  # input momentum/velocity
-            vel_out=gs.qd_vec3,  # output momentum/velocity
-        )
-        # Grid is only ever indexed at [f] (never [f+1]) in p2g/g2p/reset/coupler, so substeps_local frames are enough.
-        # Particles still need substeps_local + 1 because g2p writes the next-frame state at [f+1].
-        self.grid = grid_cell_state.field(
-            shape=(self._sim.substeps_local, *self._grid_res, self._B), needs_grad=True, layout=qd.Layout.SOA
-        )
-
+    def init_grid_scratch(self):
         # Sparse-reset bookkeeping for forward-only mode. A single global dirty list captures unique cells touched by
         # p2g across all envs in the current substep; reset_dirty_cells zeroes those cells across all envs immediately
         # after g2p, so the grid is always zero at the start of each substep and no per-substep state has to outlive a
@@ -202,8 +155,8 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         for entity in self._entities:
             entity.reset_grad()
 
-    def build(self):
-        super().build()
+    def prepare(self):
+        super().prepare()
 
         # particles and entities
         self._B = self._sim._B
@@ -219,6 +172,38 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         # TODO: validate the J = det(F_tmp) shortcut composes with quadrants autograd before enabling it there.
         self.needs_svd = self._sim.requires_grad or any(m.needs_svd for m in self._materials)
 
+    def describe(self) -> MPMDescription | None:
+        if not self.is_active:
+            return None
+        return MPMDescription(
+            n_particles=self.n_particles,
+            n_envs=self._B,
+            substeps_local=self.sim.substeps_local,
+            grid_res=tuple(self._grid_res),
+            particle_volume_scale=self._particle_volume_scale,
+        )
+
+    def bind(self):
+        if not self.is_active:
+            return
+        assert isinstance(self._solver_data, MPMData)
+        self.particles = self._solver_data.particles
+        self.particles_ng = self._solver_data.particles_ng
+        self.particles_info = self._solver_data.particles_info
+        self.grid = self._solver_data.grid
+        for entity in self.entities:
+            self.sim._solver_data.add(
+                MPMGeomData(
+                    owner=self,
+                    idx=entity.idx,
+                    entity_idx=entity.idx,
+                    data=self._solver_data,
+                    particle_start=entity.particle_start,
+                    particle_end=entity.particle_start + entity.n_particles,
+                )
+            )
+
+    def build(self):
         if self.is_active:
             if self._enable_CPIC and self._sim.requires_grad:
                 gs.raise_exception(
@@ -228,8 +213,8 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             if self._enable_CPIC and self.sim.rigid_solver.is_active and self.sim.rigid_solver.n_geoms:
                 self.sim.rigid_solver.collider._sdf.activate()
 
-            self.init_particle_fields()
-            self.init_grid_fields()
+            self.init_particle_render_fields()
+            self.init_grid_scratch()
             self.init_vvert_fields()
             self.init_ckpt()
 
@@ -258,6 +243,20 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
     ) -> "MPMEntity":
+        if desc is None:
+            desc = ParticleEntityDescription.resolve(
+                material,
+                morph,
+                surface,
+                self._particle_size,
+                name,
+                self.boundary,
+                has_skinning=not isinstance(
+                    material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
+                ),
+            )
+        assert isinstance(desc, ParticleEntityDescription)
+        material = desc.material
         self.add_material(material)
 
         # create entity
@@ -273,6 +272,7 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             vvert_start=self.n_vverts,
             vface_start=self.n_vfaces,
             name=name,
+            desc=desc,
         )
         self._entities.append(entity)
 

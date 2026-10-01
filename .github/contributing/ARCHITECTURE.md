@@ -132,3 +132,9 @@ FEM entities resolve a `FEMEntityDescription` containing simulation vertices, el
 | `genesis/engine/simulator.py` | `Simulator` - manages all solvers |
 | `genesis/options/morphs.py` | Shape/geometry definitions |
 | `genesis/options/solvers.py` | Solver option classes |
+
+MPM resolves particle samples and visual meshes into `ParticleEntityDescription`, which shares the
+`VerticesDescription` mixin with FEM. `MPMDescription` allocates particle history and the coupling grid;
+`MPMGeomData` identifies each entity's particle range. Grid reset bookkeeping and render buffers stay
+solver-owned. Serialized type identifiers use qualified names so material classes with the same short
+name remain distinct when several solver modalities share a scene.
