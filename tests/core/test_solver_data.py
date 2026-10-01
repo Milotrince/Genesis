@@ -1,7 +1,7 @@
 import pytest
 
 import genesis as gs
-from genesis.engine.solver_data.articulated import JointsData, LinksData, VisualGeomData
+from genesis.engine.solver_data.articulated import JointsData, LinksData, RigidGeomData, VisualGeomData
 from genesis.utils.misc import qd_to_torch
 
 from ..utils.assertions import assert_allclose
@@ -44,6 +44,16 @@ def test_articulated_binding(n_envs, show_viewer, tol):
         assert_allclose(entity.get_vverts().mean(dim=-2), (2.0, 3.0, 4.0), tol=tol)
         geom = scene.sim._solver_data.get(VisualGeomData, entity.solver)
         assert_allclose(qd_to_torch(geom.state.pos, transpose=True)[:, geom.idx], (2.0, 3.0, 4.0), tol=tol)
+
+    geom = scene.sim._solver_data.get(RigidGeomData, entities[0].solver)
+    assert_allclose(entities[0].geoms[0].get_pos(), (2.0, 3.0, 4.0), tol=tol)
+    assert_allclose(qd_to_torch(geom.state.pos, transpose=True)[:, geom.idx], (2.0, 3.0, 4.0), tol=tol)
+    verts = entities[0].geoms[0].get_verts()
+    assert_allclose(
+        qd_to_torch(geom.verts_state.pos, transpose=True)[:, geom.verts_state_start : geom.verts_state_end],
+        verts,
+        tol=tol,
+    )
 
     scene.reset()
     for entity, pos in zip(entities, ((0.0, 0.0, 1.0), (1.0, 0.0, 1.0))):
