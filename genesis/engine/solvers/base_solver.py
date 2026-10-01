@@ -15,6 +15,7 @@ from genesis.engine.entities.base_entity import Entity
 from genesis.engine.materials.base import Material
 from genesis.engine.solver_data import SolverData, SolverDescription
 from genesis.engine.states import QueriedStates, SolverCheckpoint
+from genesis.options.solvers import SolverOptions
 from genesis.repr_base import RBC
 from genesis.utils.misc import (
     assign_indexed_tensor,
@@ -316,6 +317,18 @@ class Solver(RBC):
     # The material of the entities this solver simulates, None for a solver holding no entity of its own
     material_cls: type[Material] | None = None
     coupling_fields: tuple[str, ...] = ()
+    is_differentiable: bool = False
+    _registered_solvers: dict[type[SolverOptions], type["Solver"]] = {}
+
+    def __init_subclass__(cls, *, options_cls: type[SolverOptions] | None = None, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if options_cls is None:
+            return
+        if not issubclass(options_cls, SolverOptions) or options_cls is SolverOptions:
+            raise TypeError("Additional solvers require a concrete SolverOptions subclass.")
+        if options_cls in Solver._registered_solvers:
+            raise ValueError(f"A solver is already registered for {options_cls.__module__}.{options_cls.__qualname__}.")
+        Solver._registered_solvers[options_cls] = cls
 
     def __init__(self, scene: "Scene", sim: "Simulator", options):
         self._uid = gs.UID()
@@ -366,6 +379,9 @@ class Solver(RBC):
     def describe(self) -> SolverDescription | None:
         return None
 
+    def register_data(self):
+        pass
+
     def bind(self):
         pass
 
@@ -380,6 +396,46 @@ class Solver(RBC):
 
     def build(self):
         self._B = self._sim._B
+
+    def process_input(self, in_backward):
+        pass
+
+    def substep_pre_coupling(self, f):
+        pass
+
+    def substep_post_coupling(self, f):
+        pass
+
+    def get_state(self, f):
+        gs.raise_exception(f"{type(self).__name__} must implement scene-state snapshots.")
+
+    def set_state(self, f, state, envs_idx=None):
+        gs.raise_exception(f"{type(self).__name__} must implement scene-state restoration.")
+
+    def reset_grad(self):
+        pass
+
+    def process_input_grad(self):
+        raise NotImplementedError
+
+    def substep_pre_coupling_grad(self, f):
+        raise NotImplementedError
+
+    def substep_post_coupling_grad(self, f):
+        raise NotImplementedError
+
+    def collect_output_grads(self):
+        raise NotImplementedError
+
+    def add_grad_from_state(self, state):
+        raise NotImplementedError
+
+    def save_ckpt(self, ckpt_name):
+        if self.sim.requires_grad:
+            raise NotImplementedError
+
+    def load_ckpt(self, ckpt_name):
+        raise NotImplementedError
 
     @property
     def data(self) -> Iterator[array_class.DataItem]:

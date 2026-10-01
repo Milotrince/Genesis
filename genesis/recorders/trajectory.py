@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 TRAJECTORY_FORMAT = ".gstraj"
-MAGIC = b"GSTRAJ1\n"
+MAGIC = b"GSTRAJ2\n"
 CHUNK_MAGIC = b"CHNK"
 # A chunk record: frame count, payload length, payload checksum.
 CHUNK_HEADER = struct.Struct("<IQI")
@@ -59,7 +59,7 @@ EXACT_KINDS = CHECKPOINT_KINDS
 CHECKPOINT_FILE_KINDS = frozenset(DataKind) - {DataKind.CONFIG, DataKind.CONSTANT}
 # The per-environment step counts and the forward-kinematics flags of a solver, which follow the arrays in a frame.
 STEPS_FIELD = "steps"
-FLAGS_SUFFIX = ".forward_flags"
+FLAGS_SUFFIX = ":forward_flags"
 
 
 class FrameField(NamedTuple):
@@ -125,7 +125,7 @@ def _frame_fields(sim: "Simulator", kinds: frozenset[DataKind]) -> list[FrameFie
     offset += steps.nbytes
     for solver in sim.active_solvers:
         if isinstance(solver, KinematicSolver):
-            name = f"{type(solver).__name__}{FLAGS_SUFFIX}"
+            name = f"{serialization.class_name(type(solver))}{FLAGS_SUFFIX}"
             fields.append(FrameField(name, DataKind.STATE, (2,), "|u1", offset, 2))
             offset += 2
     return fields
@@ -521,7 +521,7 @@ class Trajectory:
         for name, value in values.items():
             if name == STEPS_FIELD:
                 continue
-            solver_name, array_name = name.split(".", 1)
+            solver_name, array_name = name.split(":", 1)
             if name.endswith(FLAGS_SUFFIX):
                 # Native booleans: the step hands these to kernels as template arguments.
                 flags[solver_name] = tuple(map(bool, value))

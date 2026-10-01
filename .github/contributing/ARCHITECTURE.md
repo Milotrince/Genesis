@@ -116,8 +116,9 @@ The build phases are:
 1. `prepare()` resolves entity ranges and static configuration.
 2. `describe()` returns the dimensions and inputs for shared allocation.
 3. The simulator allocates every description into its data collection.
-4. `bind()` stores native buffer references and registers geometry and joint records with their ranges.
-5. The collection closes registration, and `build()` initializes state and private workspaces.
+4. `register_data()` stores native references and registers geometry and joint records with their ranges.
+5. The collection closes registration, then every solver runs `bind()` to resolve peers.
+6. `build()` initializes state and private workspaces.
 
 Rigid and kinematic solvers use `ArticulatedDescription` for their shared native arrays. `LinksData`, `JointsData` and `VisualGeomData` identify ranges within those arrays. The articulated record also owns joint configuration, rest configuration, gravity, and mean inertia; `RigidInfo` references those allocations for native kernels. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly. Checkpoint iteration includes each shared allocation once; range records hold references to it. Scratch and adjoint workspaces remain owned by the solver's data manager.
 
@@ -173,7 +174,7 @@ results. Hybrid composition currently supports rigid links and MPM particles.
 for a `JointsData` record binds the owning solver's setter to its entity range. `binding.commit(value,
 envs_idx=...)` applies that setter, including forward kinematics, contact invalidation, wake-up, and
 state-change notifications. Unsupported operations and records from another scene raise during binding.
-Bindings expire when their scene is destroyed.
+Commits reject records from a destroyed scene.
 
 Native substep coupling declares exact written field paths with `bind_coupling`. Each solver lists its
 supported coupling fields. These writes target substep history or reordered buffers in the existing
@@ -184,3 +185,40 @@ rigid-step consumption and wake-up behavior. IPC uses its existing owner setters
 
 The collection and bindings are internal developer interfaces. Raw native buffers remain trusted
 solver/coupler storage; public entity getters return isolated tensors and public writes use setters.
+
+### Additional solvers
+
+An imported package registers its solver with an exact options class:
+
+```python
+class CustomOptions(gs.options.SolverOptions):
+    gain: float = 1.0
+
+
+class CustomSolver(Solver, options_cls=CustomOptions):
+    ...
+```
+
+Pass instances through `Scene(additional_solver_options=(CustomOptions(),))` or
+`SceneOptions(additional_solvers=(CustomOptions(),))`. `scene.get_solver(CustomOptions)` returns the
+instance for its public getters and setters. Registration rejects duplicate options classes; scene
+construction rejects unregistered or repeated options and material ownership overlapping an existing
+solver. A plugin's options may inherit the time and gravity option mixins when those parameters apply.
+
+A solver implements `is_active`, `describe`, `get_state`, and `set_state`, plus the build and substep
+hooks its computation needs. `register_data` publishes its domain records before any solver binds
+peers. `bind` retains references to other records and owner write operations. Integration uses the
+existing pre-coupling and post-coupling hooks in scene order. Solvers owning particle/history windows
+implement `save_ckpt` to roll those windows; differentiable plugins declare `is_differentiable=True`
+and implement the backward and checkpoint-replay hooks. Other plugins are rejected in gradient scenes.
+
+`get_state` and `set_state` cover scene warm-up and reset, including environment selection. A solver's
+`data` iterator opts it into serialized checkpoints and trajectories by yielding native `DataItem`s.
+Scene files preserve plugin options and resolved entity descriptions; import the plugin before loading
+its scene. Loading resolves already-imported types. It never imports a package named by the file.
+
+Solver checkpoint keys use `module.qualname`; trajectory field keys use `module.qualname:field.path`.
+The trajectory format marker is `GSTRAJ2`. Scene exports and trajectory recordings from earlier
+formats must be regenerated with this version. The external package under `tests/core/fixtures/solver_data_plugin` exercises
+two same-named solver classes, geometry reads, owner-bound joint writes, copied getters, scene export,
+partial reset, checkpoints, and trajectory replay.

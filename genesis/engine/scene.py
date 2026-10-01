@@ -9,7 +9,7 @@ import sys
 import weakref
 import zipfile
 from collections import Counter
-from typing import BinaryIO, Callable, Iterable, Literal, NamedTuple, TYPE_CHECKING, overload
+from typing import TYPE_CHECKING, BinaryIO, Callable, Iterable, Literal, NamedTuple, overload
 
 import numpy as np
 import torch
@@ -25,7 +25,6 @@ from genesis.engine.force_fields import ForceField
 from genesis.engine.materials.base import EntityT, Material
 from genesis.engine.states.solvers import SimState, SimulatorCheckpoint
 from genesis.options import (
-    SceneOptions,
     BaseCouplerOptions,
     FEMOptions,
     KinematicOptions,
@@ -33,14 +32,17 @@ from genesis.options import (
     PBDOptions,
     ProfilingOptions,
     RigidOptions,
+    SceneOptions,
     SFOptions,
     SimOptions,
+    SolverOptions,
     SPHOptions,
     ToolOptions,
     ViewerOptions,
     VisOptions,
 )
 from genesis.options.morphs import Morph
+from genesis.options.options import Options
 from genesis.options.recorders import RecorderOptions, TrajectoryFile
 from genesis.options.renderers import RendererOptions
 from genesis.options.surfaces import Surface
@@ -50,7 +52,7 @@ from genesis.repr_base import RBC
 from genesis.utils import serialization
 from genesis.utils.array_class import check_data
 from genesis.utils.misc import sanitize_index, tensor_to_array
-from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME, pixel_less_textures
+from genesis.utils.serialization import ARRAY_MEMBER, MANIFEST_NAME, class_name, pixel_less_textures
 from genesis.utils.warnings import warn_once
 from genesis.vis import Visualizer
 
@@ -59,6 +61,7 @@ if TYPE_CHECKING:
     from genesis.engine.entities.rigid_entity import RigidEntity
     from genesis.engine.sensors.base_sensor import Sensor
     from genesis.engine.simulator import Simulator
+    from genesis.engine.solvers.base_solver import Solver
     from genesis.options.sensors.options import SensorOptions, SensorT
     from genesis.recorders import Recorder
 
@@ -169,6 +172,8 @@ class Scene(RBC):
         Whether to show the interactive viewer. Set it to False if you only need headless rendering.
     show_FPS : bool
         Whether to show the FPS in the terminal.
+    additional_solver_options : tuple[SolverOptions, ...], optional
+        Options for imported plugin solvers. Each exact options class selects one additional solver.
     options : SceneOptions
         Every option above as one object, which is how a scene holds them. It is given alone, and passing another
         scene's ``options`` here creates a scene from what that scene was created with.
@@ -193,6 +198,7 @@ class Scene(RBC):
         show_viewer: bool | None = None,
         show_FPS: bool | None = None,  # deprecated, use Scene.options.profiling.show_FPS instead
         options: SceneOptions | None = None,
+        additional_solver_options: tuple[SolverOptions, ...] | None = None,
     ):
         # Delay simulator import to allow specifying Quadrants array type at init
         from genesis.engine.simulator import Simulator
@@ -212,6 +218,7 @@ class Scene(RBC):
             viewer_options,
             profiling_options,
             renderer,
+            additional_solver_options,
         )
         if options is not None:
             if any(option is not None for option in individual_options):
@@ -228,6 +235,7 @@ class Scene(RBC):
                 fem=fem_options,
                 sf=sf_options,
                 pbd=pbd_options,
+                additional_solvers=additional_solver_options,
                 coupler=coupler_options,
                 vis=vis_options,
                 viewer=viewer_options,
@@ -1537,6 +1545,13 @@ class Scene(RBC):
     # ----------------------------------- utilities --------------------------------------
     # ------------------------------------------------------------------------------------
 
+    def get_solver(self, options_cls: type[Options]) -> "Solver":
+        """Return the solver configured by the exact options class, including additional solvers."""
+        for solver in self._sim.solvers:
+            if type(solver._options) is options_cls:
+                return solver
+        gs.raise_exception(f"This scene has no solver configured by {class_name(options_cls)}.")
+
     def _reject_unexportable(self) -> None:
         """Raise when the scene holds an entity, an emitter or a force field no description covers, and warn about what
         'export' leaves out.
@@ -1810,7 +1825,7 @@ class Scene(RBC):
             gs.raise_exception("The state was read from another scene: its entities or physics options differ.")
         # Every solver checks its record before anything is touched, so a record from another scene leaves this one as
         # it was, the recorders included
-        solvers = {type(solver).__name__: solver for solver in self._sim.active_solvers}
+        solvers = {class_name(type(solver)): solver for solver in self._sim.active_solvers}
         if set(state.sim.solvers) != set(solvers):
             gs.raise_exception(
                 f"The checkpoint holds {sorted(state.sim.solvers)} where this scene simulates {sorted(solvers)}."

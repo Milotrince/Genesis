@@ -9,6 +9,7 @@ from genesis.options.solvers import IPCCouplerOptions, LegacyCouplerOptions, SAP
 from genesis.repr_base import RBC
 from genesis.utils.array_class import DataItem, DataKind
 from genesis.utils.misc import indices_to_mask
+from genesis.utils.serialization import class_name
 from genesis.utils.tools import FPSTracker
 
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
@@ -25,7 +26,7 @@ from .solvers import (
     SPHSolver,
     ToolSolver,
 )
-from .solvers.base_solver import GravityMixin, TimeBasedMixin
+from .solvers.base_solver import GravityMixin, Solver, TimeBasedMixin
 from .states.cache import QueriedStates
 from .states.solvers import SimState, SimulatorCheckpoint
 
@@ -33,8 +34,6 @@ if TYPE_CHECKING:
     from genesis.engine.entities.base_entity import Entity, EntityDescription
     from genesis.engine.scene import Scene
     from genesis.options.scene import SceneOptions
-
-    from .solvers.base_solver import Solver
 
 
 RATE_CHECK_ERRNO = 10
@@ -100,6 +99,28 @@ class Simulator(RBC):
                 self.sf_solver,
             ]
         )
+
+        seen_options = set()
+        for solver_options in options.additional_solvers:
+            options_cls = type(solver_options)
+            if options_cls in seen_options:
+                gs.raise_exception(f"Duplicate additional solver options: {class_name(options_cls)}.")
+            seen_options.add(options_cls)
+            solver_cls = Solver._registered_solvers.get(options_cls)
+            if solver_cls is None:
+                gs.raise_exception(
+                    f"Import a solver registered for {class_name(options_cls)} before creating the scene."
+                )
+            if self._requires_grad and not solver_cls.is_differentiable:
+                gs.raise_exception(f"{class_name(solver_cls)} does not support differentiable simulation.")
+            if solver_cls.material_cls is not None:
+                for existing in self._solvers:
+                    if existing.material_cls is not None and (
+                        issubclass(solver_cls.material_cls, existing.material_cls)
+                        or issubclass(existing.material_cls, solver_cls.material_cls)
+                    ):
+                        gs.raise_exception(f"{class_name(solver_cls)} overlaps {class_name(type(existing))} materials.")
+            self._solvers.append(solver_cls(self.scene, self, solver_options))
 
         self._active_solvers: list["Solver"] = gs.List()
 
@@ -228,13 +249,15 @@ class Simulator(RBC):
             if solver._data_description is not None:
                 solver._solver_data = self._solver_data.allocate(solver, solver._data_description)
         for solver in self._solvers:
+            solver.register_data()
+        self._solver_data.build()
+        for solver in self._solvers:
             solver.bind()
         for entity in self.entities:
             if isinstance(entity, HybridEntity):
                 entity.bind()
                 if entity.desc.association is not None:
                     self._hybrids_by_solver.setdefault(entity.solver_soft, []).append(entity)
-        self._solver_data.build()
 
         # solvers
         # IPCCoupler needs full substep flow for pre/post coupling phases
@@ -294,10 +317,10 @@ class Simulator(RBC):
                 "A scene coupled by IPC cannot be checkpointed yet: the IPC world holds state of its own."
             )
         for solver in self._active_solvers:
-            prefix = type(solver).__name__
+            prefix = class_name(type(solver))
             for name, value, kind in solver.data:
                 if kind in kinds:
-                    yield DataItem(f"{prefix}.{name}", value, kind)
+                    yield DataItem(f"{prefix}:{name}", value, kind)
 
     def __getstate__(self) -> SimulatorCheckpoint:
         """Return a SimulatorCheckpoint of the simulation, for '__setstate__' to restore."""
@@ -307,7 +330,7 @@ class Simulator(RBC):
             )
         return SimulatorCheckpoint(
             steps=self._steps.clone(),
-            solvers={type(solver).__name__: solver.__getstate__() for solver in self._active_solvers},
+            solvers={class_name(type(solver)): solver.__getstate__() for solver in self._active_solvers},
         )
 
     def __setstate__(self, state: SimulatorCheckpoint) -> None:
@@ -322,7 +345,7 @@ class Simulator(RBC):
         # state, whose gradients it would zero otherwise.
         self._restart()
         for solver in self._active_solvers:
-            solver.__setstate__(state.solvers[type(solver).__name__])
+            solver.__setstate__(state.solvers[class_name(type(solver))])
         self._steps[:] = torch.as_tensor(state.steps, device=gs.device)
         # Flush the zero-copy writes of fill_data on Metal.
         if gs.use_zerocopy and gs.backend == gs.metal:

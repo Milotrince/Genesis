@@ -412,7 +412,7 @@ class KinematicSolver(Solver):
                 return partial(self.set_dofs_velocity, dofs_idx=slice(data.dof_start, data.dof_end))
         return super().bind_data_write(data, write)
 
-    def bind(self):
+    def register_data(self):
         assert isinstance(self._solver_data, ArticulatedData)
         self.dyn_info = self._solver_data.info
         self.dyn_state = self._solver_data.state

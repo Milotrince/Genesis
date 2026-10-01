@@ -358,8 +358,8 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             is_dynamic=True,
         )
 
-    def bind(self):
-        super().bind()
+    def register_data(self):
+        super().register_data()
         for entity in self.entities:
             for link in entity.links:
                 for geom in link.geoms:

@@ -621,7 +621,9 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
     read_box_pos = box.get_pos()
     read_arm_qpos = arm.get_qpos()
     if requires_grad:
-        qpos_grad = checkpoint.sim.solvers["RigidSolver"].arrays["rigid_info.qpos.grad"]
+        qpos_grad = checkpoint.sim.solvers["genesis.engine.solvers.rigid.rigid_solver.RigidSolver"].arrays[
+            "rigid_info.qpos.grad"
+        ]
         assert_equal((tensor_to_array(qpos_grad) != 0.0).any(), True)
         scene.__setstate__(checkpoint)
     for _ in range(10):
@@ -676,10 +678,13 @@ def test_pickle_resume(n_envs, requires_grad, checkpoint_scene, tmp_path, show_v
 
     # A record names every array, so a restore raises on a missing or extra array and names the difference. A restore
     # of a record with another 'n_envs' raises and names both counts.
-    rigid = checkpoint.sim.solvers["RigidSolver"]
+    rigid = checkpoint.sim.solvers["genesis.engine.solvers.rigid.rigid_solver.RigidSolver"]
     dropped_name, *_ = rigid.arrays
     arrays = {name: array for name, array in rigid.arrays.items() if name != dropped_name}
-    solvers = {**checkpoint.sim.solvers, "RigidSolver": dataclasses.replace(rigid, arrays=arrays)}
+    solvers = {
+        **checkpoint.sim.solvers,
+        "genesis.engine.solvers.rigid.rigid_solver.RigidSolver": dataclasses.replace(rigid, arrays=arrays),
+    }
     with pytest.raises(gs.GenesisException, match=f"do not share \\['{dropped_name}'\\]"):
         scene.__setstate__(dataclasses.replace(checkpoint, sim=dataclasses.replace(checkpoint.sim, solvers=solvers)))
     with pytest.raises(gs.GenesisException, match="built with EnvironmentLayout\\(n_envs=3"):
@@ -774,7 +779,9 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, capl
         assert_equal(replay_scene.entities[1].get_contacts()["force_a"], force)
         assert_equal(replay_scene.get_time(), time)
         assert_equal(exact_trajectory.time(index), time)
-        ctrl_pos = exact_trajectory.frame(index)["RigidSolver.dyn_state.dofs.ctrl_pos"]
+        ctrl_pos = exact_trajectory.frame(index)[
+            "genesis.engine.solvers.rigid.rigid_solver.RigidSolver:dyn_state.dofs.ctrl_pos"
+        ]
         assert_allclose(ctrl_pos[arm.dof_start], 0.3 + 0.001 * index, tol=gs.EPS)
         # A compressed frame puts back the state and leaves the poses to forward kinematics, which the mode documents
         # as lossy at the last bits
@@ -796,7 +803,7 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, capl
     assert_equal(replay_scene.entities[1].get_contacts()["force_a"], final_force)
     # The frame after the run is the state the reset left behind, and seeking it puts the scene where the run ended
     assert_equal(
-        exact_trajectory.frame(N_STEPS)["RigidSolver.rigid_info.qpos"],
+        exact_trajectory.frame(N_STEPS)["genesis.engine.solvers.rigid.rigid_solver.RigidSolver:rigid_info.qpos"],
         tensor_to_array(final_state.qpos).T,
     )
     compressed_trajectory.seek(N_STEPS)
@@ -806,7 +813,10 @@ def test_trajectory_replay(n_envs, checkpoint_scene, tmp_path, show_viewer, capl
     # scratch of the solvers comes beside the kinds the other frames hold
     for trajectory in (exact_trajectory, compressed_trajectory):
         assert set(trajectory.frame(-1)) > set(trajectory.frame(-2))
-        assert_equal(trajectory.frame(-1)["RigidSolver.rigid_info.qpos"], tensor_to_array(reset_state.qpos).T)
+        assert_equal(
+            trajectory.frame(-1)["genesis.engine.solvers.rigid.rigid_solver.RigidSolver:rigid_info.qpos"],
+            tensor_to_array(reset_state.qpos).T,
+        )
     exact_trajectory.seek(-1)
     assert_equal(replay_scene.sim.rigid_solver.get_state().qpos, reset_state.qpos)
     assert_equal(replay_scene.get_time(), 0.0)
@@ -853,10 +863,16 @@ def test_trajectory_replay_across_backends(n_envs, trajectory_snapshot, show_vie
         trajectory.seek(index)
         frame = trajectory.frame(index)
         state = replay_scene.sim.rigid_solver.get_state()
-        assert_equal(tensor_to_array(state.qpos).T, frame["RigidSolver.rigid_info.qpos"])
-        assert_equal(tensor_to_array(state.dofs_vel).T, frame["RigidSolver.dyn_state.dofs.vel"])
+        assert_equal(
+            tensor_to_array(state.qpos).T,
+            frame["genesis.engine.solvers.rigid.rigid_solver.RigidSolver:rigid_info.qpos"],
+        )
+        assert_equal(
+            tensor_to_array(state.dofs_vel).T,
+            frame["genesis.engine.solvers.rigid.rigid_solver.RigidSolver:dyn_state.dofs.vel"],
+        )
         # The frame holds the arrays as the solver lays them out, links first and environments second
-        links_pos = frame["RigidSolver.dyn_state.links.pos"]
+        links_pos = frame["genesis.engine.solvers.rigid.rigid_solver.RigidSolver:dyn_state.links.pos"]
         assert_equal(tensor_to_array(state.links_pos).reshape(-1, *links_pos.shape[::2]).swapaxes(0, 1), links_pos)
         # This log comes from a CPU fp32 run. One step after a seek, on the current backend and precision, matches the
         # next recorded frame within the suite's tolerance.
@@ -864,9 +880,13 @@ def test_trajectory_replay_across_backends(n_envs, trajectory_snapshot, show_vie
             replay_scene.step()
             following_frame = trajectory.frame(index + 1)
             state = replay_scene.sim.rigid_solver.get_state()
-            assert_allclose(tensor_to_array(state.qpos).T, following_frame["RigidSolver.rigid_info.qpos"], tol=tol)
+            assert_allclose(
+                tensor_to_array(state.qpos).T,
+                following_frame["genesis.engine.solvers.rigid.rigid_solver.RigidSolver:rigid_info.qpos"],
+                tol=tol,
+            )
             assert_allclose(
                 tensor_to_array(state.dofs_vel).T,
-                following_frame["RigidSolver.dyn_state.dofs.vel"],
+                following_frame["genesis.engine.solvers.rigid.rigid_solver.RigidSolver:dyn_state.dofs.vel"],
                 tol=tol,
             )

@@ -208,7 +208,7 @@ def _accepted_classes(expect) -> tuple:
     return (expect,)
 
 
-def _class_name(cls: type) -> str:
+def class_name(cls: type) -> str:
     return f"{cls.__module__}.{cls.__qualname__}"
 
 
@@ -222,7 +222,7 @@ def _classes_by_name(expect) -> dict[str, type]:
     classes = [_unwrap_annotation(arg) for arg in _accepted_classes(expect)]
     while classes:
         cls = classes.pop()
-        by_name[_class_name(cls)] = cls
+        by_name[class_name(cls)] = cls
         classes.extend(cls.__subclasses__())
     return by_name
 
@@ -274,7 +274,7 @@ def schema(classes: set[type]) -> dict:
     that gained a field since keeps loading while one whose fields moved is rejected by name. Sorted by name, so what
     a file holds follows from the classes alone rather than from the order they are met in.
     """
-    return {_class_name(cls): _layout(cls) for cls in sorted(classes, key=_class_name)}
+    return {class_name(cls): _layout(cls) for cls in sorted(classes, key=class_name)}
 
 
 def declared_schema(expect: dict) -> dict:
@@ -295,13 +295,13 @@ def declared_schema(expect: dict) -> dict:
                 continue
             seen.add(declared)
             if issubclass(declared, IntEnum):
-                layout[_class_name(declared)] = _layout(declared)
+                layout[class_name(declared)] = _layout(declared)
             elif _has_declared_fields(declared):
                 for cls in _classes_by_name(declared).values():
                     if cls in seen and cls is not declared:
                         continue
                     seen.add(cls)
-                    layout[_class_name(cls)] = _layout(cls)
+                    layout[class_name(cls)] = _layout(cls)
                     declarations.extend(_declared_fields(cls).values())
     return layout
 
@@ -396,7 +396,7 @@ def _export_value(value, expect, exported: "Exported"):
         # A class saying how it travels may stand where its base is declared, so the file names which one it is.
         if held is None or _accepted_classes(expect) == (type(value),):
             return held
-        return {"@class": _class_name(type(value)), "raw": held}
+        return {"@class": class_name(type(value)), "raw": held}
     if _has_declared_fields(expect):
         exported.classes.add(type(value))
         given = vars(value)
@@ -408,7 +408,7 @@ def _export_value(value, expect, exported: "Exported"):
             # An option object carries the names of the fields the user gave, since rebuilding one needs them. They
             # are sorted, so exporting the same scene twice gives the same file.
             values = {"values": values, "given": sorted(value.model_fields_set & values.keys())}
-        return values if _accepted_classes(expect) == (type(value),) else {"@": _class_name(type(value)), **values}
+        return values if _accepted_classes(expect) == (type(value),) else {"@": class_name(type(value)), **values}
     expect = _deduce_union(expect, value)
     origin = typing.get_origin(expect)
     if _is_sequence(origin):
@@ -444,7 +444,7 @@ def _export_any(value, exported: "Exported"):
     # it received rather than a path to read them from.
     codec = _class_codec(type(value))
     if codec is not None:
-        return {"@class": _class_name(type(value)), "raw": codec[0](value, _exporting_into(exported))}
+        return {"@class": class_name(type(value)), "raw": codec[0](value, _exporting_into(exported))}
     gs.raise_exception(f"A Genesis file cannot hold {type(value).__name__} where 'Any' was declared.")
 
 
@@ -461,7 +461,7 @@ def _load_any(raw, loaded: "Loaded"):
         while classes:
             cls = classes.pop()
             classes.extend(cls.__subclasses__())
-            if _class_name(cls) == raw["@class"]:
+            if class_name(cls) == raw["@class"]:
                 return _class_codec(cls)[1](raw["raw"], _loading_from(loaded))
         gs.raise_exception(f"A Genesis file holds a '{raw['@class']}', which no class says how it is loaded.")
     gs.raise_exception(f"A Genesis file holds a value this version cannot load where 'Any' stands: {sorted(raw)}.")

@@ -78,6 +78,10 @@ class SimOptions(Options):
             self._steps_local = None
 
 
+class SolverOptions(Options):
+    """Options for an additional solver registered by its exact options class."""
+
+
 class BaseCouplerOptions(Options):
     """
     Base class for all coupler options.

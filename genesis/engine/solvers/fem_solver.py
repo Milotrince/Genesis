@@ -241,7 +241,7 @@ class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
             surface_vert_mass=surface_vert_mass.astype(gs.np_float, copy=False),
         )
 
-    def bind(self):
+    def register_data(self):
         if not self.is_active:
             return
         assert isinstance(self._solver_data, FEMData)
