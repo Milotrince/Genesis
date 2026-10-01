@@ -5,6 +5,7 @@ from genesis.engine.scene import SCENE_FORMAT
 from genesis.engine.solver_data.articulated import JointsData, LinksData, RigidGeomData, VisualGeomData
 from genesis.engine.solver_data.fem import FEMGeomData
 from genesis.engine.solver_data.mpm import MPMGeomData
+from genesis.engine.solver_data.pbd import PBDGeomData
 from genesis.engine.solver_data.sph import SPHGeomData
 from genesis.utils.misc import qd_to_torch
 
@@ -22,6 +23,9 @@ def test_shared_binding(n_envs, tmp_path, show_viewer, tol):
             upper_bound=(1.0, 1.0, 1.0),
         ),
         sph_options=gs.options.SPHOptions(
+            particle_size=0.05,
+        ),
+        pbd_options=gs.options.PBDOptions(
             particle_size=0.05,
         ),
         show_viewer=show_viewer,
@@ -62,6 +66,20 @@ def test_shared_binding(n_envs, tmp_path, show_viewer, tol):
             sampler="regular",
         ),
     )
+    for i, material in enumerate(
+        (
+            gs.materials.PBD.Elastic(),
+            gs.materials.PBD.Liquid(sampler="regular"),
+            gs.materials.PBD.Particle(sampler="regular"),
+        )
+    ):
+        scene.add_entity(
+            morph=gs.morphs.Box(
+                pos=(0.25 + 0.25 * i, 0.75, 0.75),
+                size=(0.1, 0.1, 0.1),
+            ),
+            material=material,
+        )
     exported = tmp_path / f"shared_data{SCENE_FORMAT}"
     scene.export(exported)
     scene = gs.Scene.load(exported, show_viewer=show_viewer)
@@ -132,3 +150,14 @@ def test_shared_binding(n_envs, tmp_path, show_viewer, tol):
         sph_entity.get_particles_pos(),
         tol=tol,
     )
+
+    for i, entity in enumerate(scene.entities[5:]):
+        geom = scene.sim._solver_data.get(PBDGeomData, entity.solver, entity.idx)
+        pos = entity.get_particles_pos()
+        assert_allclose((pos.amin(dim=-2) + pos.amax(dim=-2)) / 2, (0.25 + 0.25 * i, 0.75, 0.75), tol=tol)
+        entity.set_particles_pos((0.5, 0.5, 0.5))
+        assert_allclose(
+            qd_to_torch(geom.data.particles.pos, transpose=True)[:, geom.particle_start : geom.particle_end],
+            (0.5, 0.5, 0.5),
+            tol=tol,
+        )
