@@ -422,10 +422,12 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["32"])
-@pytest.mark.parametrize("n_envs", [0, 2])
-def test_box_box_face_contact_under_yaw(n_envs, show_viewer):
-    # A thin box resting flat on a larger one, the two differing by a yaw rotation. One edge-edge separating axis then
-    # coincides with the face normal, and in single precision it ties with the face axis to within rounding.
+def test_box_box_face_contact_under_yaw(show_viewer):
+    N_ENVS = 16
+    N_STEPS = 50
+
+    # Thin boxes resting flat on a larger one at random yaws. One edge-edge separating axis then coincides with the face
+    # normal, and in single precision it ties with the face axis to within rounding.
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
@@ -434,30 +436,36 @@ def test_box_box_face_contact_under_yaw(n_envs, show_viewer):
             box_box_detection=True,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.2, -1.0, 1.2),
-            camera_lookat=(0.66, -0.1, 0.76),
+            camera_pos=(0.0, -1.8, 2.0),
+            camera_lookat=(0.0, 0.0, 0.76),
         ),
         show_viewer=show_viewer,
     )
     scene.add_entity(
         gs.morphs.Box(
-            pos=(0.6, 0.0, 0.38),
-            quat=(0.7071068, 0.0, 0.0, 0.7071068),
+            pos=(0.0, 0.0, 0.38),
             size=(1.4, 0.8, 0.76),
             fixed=True,
         ),
     )
-    box = scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.66421324, -0.09583829, 0.76246744),
-            quat=(0.9843725, -3.1977099e-05, -5.7170637e-06, 0.176099),
-            size=(0.314, 0.19, 0.005),
-        ),
-    )
-    scene.build(n_envs=n_envs)
+    boxes = [
+        scene.add_entity(
+            gs.morphs.Box(
+                pos=(x, y, 0.76248),
+                size=(0.314, 0.19, 0.005),
+            ),
+        )
+        for x, y in product((-0.3, 0.3), (-0.2, 0.2))
+    ]
+    scene.build(n_envs=N_ENVS)
 
-    scene.step()
-    assert_allclose(box.get_dofs_velocity(), 0.0, atol=1e-2)
+    for box in boxes:
+        angle_yaw = np.random.uniform(low=-np.pi, high=np.pi, size=(N_ENVS, 1))
+        box.set_quat(gu.xyz_to_quat(np.concatenate([np.zeros((N_ENVS, 2)), angle_yaw], axis=-1), rpy=True))
+    for _ in range(N_STEPS):
+        scene.step()
+        for box in boxes:
+            assert_allclose(box.get_dofs_velocity(), 0.0, atol=1e-2)
 
 
 @pytest.mark.required
