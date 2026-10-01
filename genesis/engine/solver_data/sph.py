@@ -7,10 +7,11 @@ import quadrants as qd
 import genesis as gs
 
 from . import SolverData, SolverDescription
+from .gravity import GravityData, GravityDescription
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
-class SPHData(SolverData):
+class SPHData(GravityData):
     particles: qd.Field
     particles_ng: qd.Field
     particles_info: qd.Field
@@ -27,9 +28,8 @@ class SPHGeomData(SolverData):
 
 
 @dataclass(frozen=True, kw_only=True)
-class SPHDescription(SolverDescription[SPHData]):
+class SPHDescription(GravityDescription, SolverDescription[SPHData]):
     n_particles: int
-    n_envs: int
 
     def allocate(self, owner) -> SPHData:
         struct_particle_state = qd.types.struct(
@@ -75,6 +75,7 @@ class SPHDescription(SolverDescription[SPHData]):
 
         return SPHData(
             owner=owner,
+            gravity=self.allocate_gravity(),
             particles=particles,
             particles_ng=particles_ng,
             particles_info=particles_info,

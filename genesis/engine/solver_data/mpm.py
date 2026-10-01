@@ -7,11 +7,12 @@ import quadrants as qd
 import genesis as gs
 
 from . import SolverData, SolverDescription
+from .gravity import GravityData, GravityDescription
 from .hybrid import HybridData, HybridDescription
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
-class MPMData(SolverData):
+class MPMData(GravityData):
     hybrids: tuple[HybridData, ...]
     particles: qd.Field
     particles_ng: qd.Field
@@ -28,9 +29,8 @@ class MPMGeomData(SolverData):
 
 
 @dataclass(frozen=True, kw_only=True)
-class MPMDescription(SolverDescription[MPMData]):
+class MPMDescription(GravityDescription, SolverDescription[MPMData]):
     n_particles: int
-    n_envs: int
     substeps_local: int
     grid_res: tuple[int, int, int]
     particle_volume_scale: float
@@ -73,6 +73,7 @@ class MPMDescription(SolverDescription[MPMData]):
         )
         return MPMData(
             owner=owner,
+            gravity=self.allocate_gravity(),
             hybrids=tuple(description.allocate(owner) for description in self.hybrids),
             particles=particles,
             particles_ng=particles_ng,

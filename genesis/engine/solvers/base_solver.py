@@ -238,28 +238,10 @@ class GravityMixin:
 
     _gravity: "qd.Tensor | None" = None
 
-    def _build_gravity(self, gravity=None, *, as_field: bool = False):
-        """Allocate the buffer storing this solver's gravity and fill it with the value from the options.
-
-        Called once, at build time, every environment getting the same value. Pass `gravity` to reuse a buffer the
-        solver already declares among its own arrays, as the rigid solver does with `RigidInfo.gravity`, so that
-        `set_gravity` and the kernels read the same memory. Leave it out to have one allocated here. Pass
-        `as_field=True` for a solver whose kernels access gravity as an attribute of the solver object, which quadrants
-        supports for a field only. A solver holding no entity gets no buffer, and its accessors then raise.
-        """
-        # FIXME: a field is what a kernel taking the solver as a template can read, since Quadrants resolves no
-        # ndarray attribute of a @qd.data_oriented class in kernel scope. Two ways out, either of which retires the
-        # as_field flag: adding ndarray support to that resolution, or migrating the solver to a frozen dataclass so
-        # its ndarrays are predeclared. Until then the buffer is only allocated for a solver with an entity, since a
-        # field costs an SNode tree that Quadrants never gives back short of qd.reset().
+    def _build_gravity(self, gravity):
+        """Bind the described gravity buffer and initialize every environment from solver options."""
         if not self.is_active:
             return
-        shape = (self._B,)
-        if gravity is None:
-            if as_field:
-                gravity = qd.tensor(gs.qd_vec3, shape, backend=qd.Backend.FIELD)
-            else:
-                gravity = array_class.V(gs.qd_vec3, shape)
         self._gravity = gravity
         self._gravity.from_numpy(np.tile(np.array(self._options.gravity, dtype=gs.np_float), (self._B, 1)))
 
@@ -504,8 +486,7 @@ class Solver(RBC):
 
 @qd.kernel
 def kernel_set_gravity(tensor: qd.types.ndarray(), envs_idx: qd.types.ndarray(), gravity: qd.Tensor):
-    # The qd.Tensor annotation accepts both forms the buffer is allocated in: a field, for a solver whose kernels
-    # reach gravity through the solver itself, and an ndarray for every other one (see _build_gravity).
+    # GravityDescription uses fields; articulated descriptions follow the configured tensor backend.
     for i_b_ in range(envs_idx.shape[0]):
         for j in qd.static(range(3)):
             gravity[envs_idx[i_b_]][j] = tensor[i_b_, j]

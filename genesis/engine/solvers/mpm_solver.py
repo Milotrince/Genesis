@@ -246,8 +246,8 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
                     "calculated based on `grid_density`). Simulation might be unstable."
                 )
 
-        # Kernels of this solver take the solver itself, so gravity has to be a field for them.
-        self._build_gravity(as_field=True)
+        if self.is_active:
+            self._build_gravity(self._solver_data.gravity)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------

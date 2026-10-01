@@ -6,9 +6,11 @@ import genesis as gs
 from genesis.engine.scene import SCENE_FORMAT
 from genesis.engine.solver_data.articulated import JointsData, LinksData, RigidGeomData, VisualGeomData
 from genesis.engine.solver_data.fem import FEMGeomData
+from genesis.engine.solver_data.gravity import GravityData
 from genesis.engine.solver_data.mpm import MPMGeomData
 from genesis.engine.solver_data.pbd import PBDGeomData
 from genesis.engine.solver_data.sph import SPHGeomData
+from genesis.engine.solvers.base_solver import GravityMixin
 from genesis.recorders.trajectory import TRAJECTORY_FORMAT, Trajectory
 from genesis.utils.misc import qd_to_torch
 
@@ -89,6 +91,17 @@ def test_shared_binding(n_envs, tmp_path, show_viewer, tol):
     entities = scene.entities[:2]
     fem_entity = scene.entities[2]
     scene.build(n_envs=n_envs)
+
+    for data in scene.sim._solver_data.select(GravityData):
+        if not isinstance(data.owner, GravityMixin) or not data.owner.is_active:
+            continue
+        data.owner.set_gravity((0.0, 0.0, -3.0))
+        data.owner.set_gravity((0.0, 0.0, -1.0), envs_idx=0 if n_envs else None)
+        data.owner.get_gravity().zero_()
+        assert_allclose(data.owner.get_gravity(envs_idx=0), (0.0, 0.0, -1.0), tol=tol)
+        assert_allclose(qd_to_torch(data.gravity, transpose=True)[0], (0.0, 0.0, -1.0), tol=tol)
+        if n_envs:
+            assert_allclose(data.owner.get_gravity(envs_idx=1), (0.0, 0.0, -3.0), tol=tol)
 
     for entity in entities:
         links = scene.sim._solver_data.get(LinksData, entity.solver, entity.idx)

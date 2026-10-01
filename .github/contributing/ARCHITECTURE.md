@@ -168,6 +168,10 @@ simulator applies each association after its soft solver completes the post-coup
 order. Authoring callbacks are consumed when resolving descriptions; loaded scenes use those resolved
 results. Hybrid composition currently supports rigid links and MPM particles.
 
+`GravityDescription` supplies per-environment gravity allocation for FEM, MPM, SPH, and PBD. Their
+records and articulated records expose the same buffer used by gravity getters, setters, and kernels.
+The gravity solver mixin initializes this described allocation from resolved options.
+
 ### Shared writes
 
 `SolverDataArray.bind(record)` retains read access. Passing `write="qpos"` or `write="dofs_velocity"`

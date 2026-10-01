@@ -137,8 +137,8 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
             # TODO: Support per-particle density
             self._density0 = self.entities[0].material.rho
 
-        # Kernels of this solver take the solver itself, so gravity has to be a field for them.
-        self._build_gravity(as_field=True)
+        if self.is_active:
+            self._build_gravity(self._solver_data.gravity)
 
     # ------------------------------------------------------------------------------------
     # -------------------------------------- misc ----------------------------------------
