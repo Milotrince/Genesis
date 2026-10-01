@@ -497,7 +497,7 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
         members = {name: archive.read(name) for name in archive.namelist()}
     original = json.loads(members[MANIFEST_NAME])
     manifest = deepcopy(original)
-    manifest["schema"]["RigidLinkDescription"].append("inertial_frame")
+    manifest["schema"]["genesis.engine.entities.rigid_entity.description.RigidLinkDescription"].append("inertial_frame")
     members[MANIFEST_NAME] = json.dumps(manifest).encode()
     with zipfile.ZipFile(exported, "w") as archive:
         for name, content in members.items():
@@ -507,7 +507,7 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
 
     # An enumeration member whose value moved means every value written under it names something else.
     manifest = deepcopy(original)
-    manifest["schema"]["JOINT_TYPE"]["REVOLUTE"] = 7
+    manifest["schema"]["genesis.constants.JOINT_TYPE"]["REVOLUTE"] = 7
     members[MANIFEST_NAME] = json.dumps(manifest).encode()
     with zipfile.ZipFile(exported, "w") as archive:
         for name, content in members.items():
@@ -518,7 +518,7 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
     # A field a class gained since is not a mismatch: an option states which of its fields were given, and a
     # description field a file leaves out stands at the default it declares.
     manifest = deepcopy(original)
-    manifest["schema"]["RigidLinkDescription"].remove("invweight")
+    manifest["schema"]["genesis.engine.entities.rigid_entity.description.RigidLinkDescription"].remove("invweight")
     members[MANIFEST_NAME] = json.dumps(manifest).encode()
     with zipfile.ZipFile(exported, "w") as archive:
         for name, content in members.items():
@@ -579,13 +579,12 @@ def test_load_rejects_damaged_file(checkpoint_scene, tmp_path):
 
 @pytest.mark.required
 def test_export_rejects_unsupported_physics(checkpoint_scene, tmp_path):
-    # A scene holding what alters the simulation is rejected by name, since a file leaving it out would restore
-    # other physics. No description carries a particle entity either.
+    # Omitting force fields would change the restored physics.
     checkpoint_scene.add_entity(
         morph=gs.morphs.Box(pos=(0.5, 0.5, 0.8), size=(0.1, 0.1, 0.1)), material=gs.materials.MPM.Elastic()
     )
     checkpoint_scene.add_force_field(gs.force_fields.Wind(direction=(1.0, 0.0, 0.0)))
-    with pytest.raises(gs.GenesisException, match="1 MPMEntity, 1 Wind cannot be exported"):
+    with pytest.raises(gs.GenesisException, match="1 Wind cannot be exported"):
         checkpoint_scene.export(tmp_path / f"wind{SCENE_FORMAT}")
 
 

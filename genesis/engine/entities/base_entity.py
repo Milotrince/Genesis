@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
 import genesis as gs
@@ -22,6 +23,11 @@ class EntityDescription:
     """
 
     material: Material
+
+
+@dataclass(kw_only=True)
+class VerticesDescription:
+    init_positions: np.ndarray
 
 
 class Entity(RBC):

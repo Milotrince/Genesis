@@ -1,13 +1,14 @@
 import functools
 
-import quadrants as qd
 import torch
+
+import quadrants as qd
 
 import genesis as gs
 from genesis.engine.states.entities import MPMEntityState
 from genesis.utils.misc import to_gs_tensor
 
-from .particle_entity import assert_active, ParticleEntity
+from .particle_entity import ParticleEntity, ParticleEntityDescription, assert_active
 
 
 def assert_muscle(method):
@@ -62,6 +63,7 @@ class MPMEntity(ParticleEntity):
         vvert_start,
         vface_start,
         name: str | None = None,
+        desc: ParticleEntityDescription | None = None,
     ):
         need_skinning = not isinstance(
             material, (gs.materials.MPM.Liquid, gs.materials.MPM.Sand, gs.materials.MPM.Snow)
@@ -79,7 +81,12 @@ class MPMEntity(ParticleEntity):
             vface_start,
             need_skinning=need_skinning,
             name=name,
+            desc=desc,
         )
+
+    @property
+    def desc(self) -> ParticleEntityDescription:
+        return self._desc
 
     def init_tgt_keys(self):
         """
