@@ -10,9 +10,10 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.sdf as sdf
 from genesis.engine.boundaries import CubeBoundary
-from genesis.engine.entities import MPMEntity
+from genesis.engine.entities import HybridEntity, MPMEntity
 from genesis.engine.entities.particle_entity import ParticleEntityDescription
 from genesis.engine.materials import MPM
+from genesis.engine.solver_data.hybrid import HybridDescription
 from genesis.engine.solver_data.mpm import MPMData, MPMDescription, MPMGeomData
 from genesis.engine.states.solvers import MPMSolverState
 from genesis.options.solvers import MPMOptions
@@ -181,6 +182,13 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
             substeps_local=self.sim.substeps_local,
             grid_res=tuple(self._grid_res),
             particle_volume_scale=self._particle_volume_scale,
+            hybrids=tuple(
+                HybridDescription(
+                    entity_idx=entity.idx, entity=entity.desc, init_positions=entity.part_soft.init_particles
+                )
+                for entity in self.sim.entities
+                if isinstance(entity, HybridEntity) and entity.solver_soft is self
+            ),
         )
 
     def bind(self):
@@ -191,6 +199,8 @@ class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
         self.particles_ng = self._solver_data.particles_ng
         self.particles_info = self._solver_data.particles_info
         self.grid = self._solver_data.grid
+        for data in self._solver_data.hybrids:
+            self.sim._solver_data.add(data)
         for entity in self.entities:
             self.sim._solver_data.add(
                 MPMGeomData(

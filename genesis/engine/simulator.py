@@ -121,6 +121,7 @@ class Simulator(RBC):
 
         # entities
         self._entities: list["Entity"] = gs.List()
+        self._hybrids_by_solver: dict["Solver", list[HybridEntity]] = {}
 
         # sensors
         self._sensor_manager = SensorManager(self)
@@ -140,7 +141,7 @@ class Simulator(RBC):
             gs.raise_exception("'visualize_contact' only applies to rigid entities.")
         if isinstance(material, gs.materials.Hybrid):
             # Note that adding to solver is handled in the hybrid entity
-            entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name)
+            entity = HybridEntity(self.n_entities, self.scene, material, morph, surface, name=name, desc=desc)
         else:
             # Several solvers may declare a class the material belongs to, since 'Rigid' derives from 'Kinematic'. The
             # one declaring the most derived class simulates it (see 'Solver.material_cls').
@@ -228,6 +229,11 @@ class Simulator(RBC):
                 solver._solver_data = self._solver_data.allocate(solver, solver._data_description)
         for solver in self._solvers:
             solver.bind()
+        for entity in self.entities:
+            if isinstance(entity, HybridEntity):
+                entity.bind()
+                if entity.desc.association is not None:
+                    self._hybrids_by_solver.setdefault(entity.solver_soft, []).append(entity)
         self._solver_data.build()
 
         # solvers
@@ -256,6 +262,7 @@ class Simulator(RBC):
     def destroy(self):
         self._sensor_manager.destroy()
         self._solver_data.clear()
+        self._hybrids_by_solver.clear()
 
     def reset(self, state: SimState, envs_idx=None):
         for solver, solver_state in zip(self._solvers, state):
@@ -436,6 +443,8 @@ class Simulator(RBC):
     def substep_post_coupling(self, f):
         for solver in self._active_solvers:
             solver.substep_post_coupling(f)
+            for entity in self._hybrids_by_solver.get(solver, ()):
+                entity.update_soft_part(f)
 
     def substep_post_coupling_grad(self, f):
         for solver in reversed(self._active_solvers):

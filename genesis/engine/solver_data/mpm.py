@@ -7,10 +7,12 @@ import quadrants as qd
 import genesis as gs
 
 from . import SolverData, SolverDescription
+from .hybrid import HybridData, HybridDescription
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
 class MPMData(SolverData):
+    hybrids: tuple[HybridData, ...]
     particles: qd.Field
     particles_ng: qd.Field
     particles_info: qd.Field
@@ -32,6 +34,8 @@ class MPMDescription(SolverDescription[MPMData]):
     substeps_local: int
     grid_res: tuple[int, int, int]
     particle_volume_scale: float
+
+    hybrids: tuple[HybridDescription, ...] = ()
 
     def allocate(self, owner) -> MPMData:
         struct_particle_state = qd.types.struct(
@@ -69,6 +73,7 @@ class MPMDescription(SolverDescription[MPMData]):
         )
         return MPMData(
             owner=owner,
+            hybrids=tuple(description.allocate(owner) for description in self.hybrids),
             particles=particles,
             particles_ng=particles_ng,
             particles_info=particles_info,
