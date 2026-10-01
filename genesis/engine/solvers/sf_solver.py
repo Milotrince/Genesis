@@ -1,6 +1,9 @@
 import quadrants as qd
 
 import genesis as gs
+from genesis.engine.solver_data.sf import SFData, SFDescription
+from genesis.engine.states.solvers import SFSolverState
+from genesis.utils.misc import qd_to_torch
 
 from .base_solver import Solver, TimeBasedMixin
 
@@ -32,19 +35,7 @@ class SFSolver(TimeBasedMixin, Solver):
 
         self.jets = ()
 
-    def setup_fields(self):
-        assert self.jets
-
-        cell_state = qd.types.struct(
-            v=gs.qd_vec3,
-            v_tmp=gs.qd_vec3,
-            div=gs.qd_float,
-            p=gs.qd_float,
-            q=qd.types.vector(len(self.jets), gs.qd_float),
-        )
-
-        self.grid = cell_state.field(shape=self.res, layout=qd.Layout.SOA)
-
+    def setup_pressure_fields(self):
         # swap area for pressure projection solver
         self.p_swap = TexPair(
             cur=qd.field(dtype=gs.qd_float, shape=self.res),
@@ -60,12 +51,20 @@ class SFSolver(TimeBasedMixin, Solver):
     def reset_grad(self):
         pass
 
-    def build(self):
-        super().build()
+    def describe(self) -> SFDescription | None:
+        if not self.is_active:
+            return None
+        return SFDescription(res=self.res, n_channels=len(self.jets), cell_size=self.dx)
 
+    def bind(self):
+        if self.is_active:
+            assert isinstance(self._solver_data, SFData)
+            self.grid = self._solver_data.grid
+
+    def build(self):
         if self.is_active:
             self.t = 0.0
-            self.setup_fields()
+            self.setup_pressure_fields()
             self.init_fields()
 
     # ------------------------------------------------------------------------------------
@@ -76,6 +75,7 @@ class SFSolver(TimeBasedMixin, Solver):
     def is_active(self):
         return bool(self.jets)
 
+    @gs.assert_unbuilt
     def set_jets(self, jets):
         assert isinstance(jets, (list, tuple))
         self.jets = tuple(jets)
@@ -282,11 +282,37 @@ class SFSolver(TimeBasedMixin, Solver):
     # --------------------------------------- io -----------------------------------------
     # ------------------------------------------------------------------------------------
 
+    @gs.assert_built
+    def get_grid_velocity(self):
+        """Return a copied velocity tensor with shape (res, res, res, 3), ordered by x, y, z, component."""
+        if not self.is_active:
+            gs.raise_exception("Configure jets before building the scene to query the fluid grid.")
+        return qd_to_torch(self.grid.v, transpose=True, copy=True).movedim(0, 2)
+
+    @gs.assert_built
+    def get_grid_density(self):
+        """Return copied jet concentrations with shape (res, res, res, n_jets), ordered by x, y, z, jet."""
+        if not self.is_active:
+            gs.raise_exception("Configure jets before building the scene to query the fluid grid.")
+        return qd_to_torch(self.grid.q, transpose=True, copy=True).movedim(0, 2)
+
     def get_state(self, f):
-        pass
+        if not self.is_active:
+            return None
+        return SFSolverState(
+            vel=qd_to_torch(self.grid.v, transpose=True, copy=True).movedim(0, 2),
+            pressure=qd_to_torch(self.grid.p, transpose=True, copy=True).movedim(0, 2),
+            density=qd_to_torch(self.grid.q, transpose=True, copy=True).movedim(0, 2),
+            time=self.t,
+        )
 
     def set_state(self, f, state, envs_idx=None):
-        pass
+        if state is None or (envs_idx is not None and len(envs_idx) == 0):
+            return
+        self.grid.v.from_torch(state.vel)
+        self.grid.p.from_torch(state.pressure)
+        self.grid.q.from_torch(state.density)
+        self.t = state.time
 
     def save_ckpt(self, ckpt_name):
         pass

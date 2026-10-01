@@ -324,3 +324,11 @@ class FEMSolverState:
     @property
     def active(self):
         return self._active
+
+
+@dataclasses.dataclass
+class SFSolverState:
+    vel: torch.Tensor
+    pressure: torch.Tensor
+    density: torch.Tensor
+    time: float
