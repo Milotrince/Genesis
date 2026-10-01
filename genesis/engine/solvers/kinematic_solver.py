@@ -9,6 +9,13 @@ import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity import KinematicEntity
 from genesis.engine.materials import Kinematic
+from genesis.engine.solver_data.articulated import (
+    ArticulatedData,
+    ArticulatedDescription,
+    JointsData,
+    LinksData,
+    VisualGeomData,
+)
 from genesis.engine.solvers.rigid.abd.inverse_kinematics import (
     kernel_forward_kinematics_query,
     kernel_get_jacobian,
@@ -224,8 +231,8 @@ class KinematicSolver(Solver):
     # ------------------------------------ build -----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def build(self):
-        super().build()
+    def prepare(self):
+        super().prepare()
 
         self.n_envs = self.sim.n_envs
         self._B = self.sim._B
@@ -368,6 +375,87 @@ class KinematicSolver(Solver):
             self._options.batch_links_info = True
 
         self._build_static_config()
+
+    def describe(self) -> ArticulatedDescription:
+        return ArticulatedDescription(
+            n_envs=self._B,
+            n_dofs_=self.n_dofs_,
+            n_links_=self.n_links_,
+            n_joints_=self.n_joints_,
+            n_entities_=self.n_entities_,
+            n_vverts_=self.n_vverts_,
+            n_custom_vverts_=self.n_custom_vverts_,
+            n_vfaces_=self.n_vfaces_,
+            n_vgeoms_=self.n_vgeoms_,
+            n_geoms_=1,
+            n_verts_=1,
+            n_faces_=1,
+            n_edges_=1,
+            n_free_verts_=1,
+            n_fixed_verts_=1,
+            n_candidate_equalities_=1,
+            n_joints_per_link=max((link.n_joints for link in self.links), default=0),
+            is_dynamic=False,
+            has_grad=self._requires_grad,
+            is_batch_links_info=self.rigid_config.batch_links_info,
+            is_batch_dofs_info=self.rigid_config.batch_dofs_info,
+            is_batch_joints_info=self.rigid_config.batch_joints_info,
+        )
+
+    def bind(self):
+        assert isinstance(self._solver_data, ArticulatedData)
+        self.dyn_info = self._solver_data.info
+        self.dyn_state = self._solver_data.state
+        for entity in self.entities:
+            self.sim._solver_data.add(
+                LinksData(
+                    owner=self,
+                    idx=entity.idx,
+                    entity_idx=entity.idx,
+                    info=self.dyn_info.links,
+                    state=self.dyn_state.links,
+                    link_start=entity.link_start,
+                    link_end=entity.link_end,
+                )
+            )
+            self.sim._solver_data.add(
+                JointsData(
+                    owner=self,
+                    idx=entity.idx,
+                    entity_idx=entity.idx,
+                    info=self.dyn_info.joints,
+                    state=self.dyn_state.joints,
+                    dofs_info=self.dyn_info.dofs,
+                    dofs_state=self.dyn_state.dofs,
+                    joint_start=entity.joint_start,
+                    joint_end=entity.joint_end,
+                    dof_start=entity.dof_start,
+                    dof_end=entity.dof_end,
+                    q_start=entity.q_start,
+                    q_end=entity.q_end,
+                )
+            )
+            for link in entity.links:
+                for geom in link.vgeoms:
+                    self.sim._solver_data.add(
+                        VisualGeomData(
+                            owner=self,
+                            idx=geom.idx,
+                            entity_idx=entity.idx,
+                            info=self.dyn_info.vgeoms,
+                            state=self.dyn_state.vgeoms,
+                            verts_info=self.dyn_info.vverts,
+                            verts_state=self.dyn_state.vverts,
+                            faces_info=self.dyn_info.vfaces,
+                            link_idx=link.idx,
+                            vert_start=geom.vvert_start,
+                            vert_end=geom.vvert_end,
+                            face_start=geom.vface_start,
+                            face_end=geom.vface_end,
+                        )
+                    )
+
+    def build(self):
         self._create_data_manager()
 
         self._init_dof_fields()
@@ -420,19 +508,18 @@ class KinematicSolver(Solver):
         self.data_manager = array_class.DataManager(self, kinematic_only=True)
         self.rigid_info = self.data_manager.rigid_info
         self._rigid_adjoint_cache = self.data_manager.rigid_adjoint_cache
-        self.dyn_info = self.data_manager.dyn_info
-        self.dyn_state = self.data_manager.dyn_state
         self.kinematics_scratch = self.data_manager.kinematics_scratch
 
     @property
     def data(self) -> Iterator[array_class.DataItem]:
         yield from array_class.iter_data(self.rigid_config, "rigid_config")
         yield from array_class.iter_data(self.data_manager.errno, "errno", array_class.DataKind.STATE)
-        structs = ["rigid_info", "dyn_info", "dyn_state", "rigid_adjoint_cache"]
+        yield from array_class.iter_data(self.rigid_info, "rigid_info")
+        yield from array_class.iter_data(self.dyn_info, "dyn_info")
+        yield from array_class.iter_data(self.dyn_state, "dyn_state")
+        yield from array_class.iter_data(self._rigid_adjoint_cache, "rigid_adjoint_cache")
         if self.rigid_config.requires_grad:
-            structs.append("dyn_state_adjoint_cache")
-        for name in structs:
-            yield from array_class.iter_data(getattr(self.data_manager, name), name)
+            yield from array_class.iter_data(self.data_manager.dyn_state_adjoint_cache, "dyn_state_adjoint_cache")
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- hook methods -------------------------------------

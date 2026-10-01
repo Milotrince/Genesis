@@ -14,6 +14,7 @@ from genesis.utils.tools import FPSTracker
 from .couplers import IPCCoupler, LegacyCoupler, SAPCoupler
 from .entities import HybridEntity
 from .sensors import SensorManager
+from .solver_data import SolverDataArray
 from .solvers import (
     FEMSolver,
     KinematicSolver,
@@ -74,6 +75,8 @@ class Simulator(RBC):
         self._steps_local: int | None = self.options._steps_local
 
         self._cur_substep_global = 0
+
+        self._solver_data = SolverDataArray()
 
         # solvers
         self.tool_solver = ToolSolver(self.scene, self, options.tool)
@@ -217,6 +220,16 @@ class Simulator(RBC):
         # Counted per environment to support per-env reset, as steps rather than seconds to avoid drifting over time.
         self._steps = torch.zeros((self._B,), dtype=gs.tc_int, device=gs.device)
 
+        for solver in self._solvers:
+            solver.prepare()
+            solver._data_description = solver.describe()
+        for solver in self._solvers:
+            if solver._data_description is not None:
+                solver._solver_data = self._solver_data.allocate(solver, solver._data_description)
+        for solver in self._solvers:
+            solver.bind()
+        self._solver_data.build()
+
         # solvers
         # IPCCoupler needs full substep flow for pre/post coupling phases
         self._rigid_only = self.rigid_solver.is_active and not isinstance(self._coupler, (SAPCoupler, IPCCoupler))
@@ -242,6 +255,7 @@ class Simulator(RBC):
 
     def destroy(self):
         self._sensor_manager.destroy()
+        self._solver_data.clear()
 
     def reset(self, state: SimState, envs_idx=None):
         for solver, solver_state in zip(self._solvers, state):
