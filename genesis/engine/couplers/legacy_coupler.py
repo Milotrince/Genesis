@@ -9,6 +9,7 @@ import genesis.utils.sdf as sdf
 from genesis.engine.solver_data.articulated import ArticulatedData
 from genesis.engine.solver_data.fem import FEMData
 from genesis.engine.solver_data.mpm import MPMData
+from genesis.engine.solver_data.sph import SPHData
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils import array_class
@@ -41,12 +42,15 @@ class LegacyCoupler(RBC):
         self.mpm_solver = self.sim.mpm_solver
         self._mpm_data: MPMData | None = None
         self.sph_solver = self.sim.sph_solver
+        self._sph_data: SPHData | None = None
         self.pbd_solver = self.sim.pbd_solver
         self.fem_solver = self.sim.fem_solver
         self._fem_data: FEMData | None = None
         self.sf_solver = self.sim.sf_solver
 
     def build(self) -> None:
+        if self.sph_solver.is_active:
+            self._sph_data = self.sim._solver_data.get(SPHData, self.sph_solver)
         if self.mpm_solver.is_active:
             self._mpm_data = self.sim._solver_data.get(MPMData, self.mpm_solver)
         self._rigid_data = self.sim._solver_data.get(ArticulatedData, self.rigid_solver)
@@ -393,10 +397,10 @@ class LegacyCoupler(RBC):
                             self.sph_solver.sh.slot_start[slot_idx, i_b] + self.sph_solver.sh.slot_size[slot_idx, i_b],
                         ):
                             if (
-                                qd.abs(pos - self.sph_solver.particles_reordered.pos[i, i_b]).max()
+                                qd.abs(pos - self._sph_data.particles_reordered.pos[i, i_b]).max()
                                 < self.mpm_solver.dx * 0.5
                             ):
-                                sph_vel += self.sph_solver.particles_reordered.vel[i, i_b]
+                                sph_vel += self._sph_data.particles_reordered.vel[i, i_b]
                                 colliding_particles += 1
                     if colliding_particles > 0:
                         vel_old = vel_mpm
@@ -415,12 +419,12 @@ class LegacyCoupler(RBC):
                                 + self.sph_solver.sh.slot_size[slot_idx, i_b],
                             ):
                                 if (
-                                    qd.abs(pos - self.sph_solver.particles_reordered.pos[i, i_b]).max()
+                                    qd.abs(pos - self._sph_data.particles_reordered.pos[i, i_b]).max()
                                     < self.mpm_solver.dx * 0.5
                                 ):
-                                    self.sph_solver.particles_reordered[i, i_b].vel = (
-                                        self.sph_solver.particles_reordered[i, i_b].vel
-                                        - delta_mv / self.sph_solver.particles_info_reordered[i, i_b].mass
+                                    self._sph_data.particles_reordered[i, i_b].vel = (
+                                        self._sph_data.particles_reordered[i, i_b].vel
+                                        - delta_mv / self._sph_data.particles_info_reordered[i, i_b].mass
                                     )
 
                 #################### MPM <-> PBD ####################
@@ -631,8 +635,8 @@ class LegacyCoupler(RBC):
                                 self.sph_solver.sh.slot_start[slot_idx, i_b]
                                 + self.sph_solver.sh.slot_size[slot_idx, i_b],
                             ):
-                                if qd.abs(pos - self.sph_solver.particles_reordered.pos[k, i_b]).max() < dx * 0.5:
-                                    sph_vel += self.sph_solver.particles_reordered.vel[k, i_b]
+                                if qd.abs(pos - self._sph_data.particles_reordered.pos[k, i_b]).max() < dx * 0.5:
+                                    sph_vel += self._sph_data.particles_reordered.vel[k, i_b]
                                     colliding_particles += 1
 
                         if colliding_particles > 0:
@@ -652,10 +656,10 @@ class LegacyCoupler(RBC):
                                     self.sph_solver.sh.slot_start[slot_idx, i_b]
                                     + self.sph_solver.sh.slot_size[slot_idx, i_b],
                                 ):
-                                    if qd.abs(pos - self.sph_solver.particles_reordered.pos[k, i_b]).max() < dx * 0.5:
-                                        self.sph_solver.particles_reordered[k, i_b].vel = (
-                                            self.sph_solver.particles_reordered[k, i_b].vel
-                                            - delta_mv / self.sph_solver.particles_info_reordered[k, i_b].mass
+                                    if qd.abs(pos - self._sph_data.particles_reordered.pos[k, i_b]).max() < dx * 0.5:
+                                        self._sph_data.particles_reordered[k, i_b].vel = (
+                                            self._sph_data.particles_reordered[k, i_b].vel
+                                            - delta_mv / self._sph_data.particles_info_reordered[k, i_b].mass
                                         )
 
                             self._fem_data.elements_v[f + 1, iv, i_b].vel = vel_fem_sv
@@ -686,17 +690,17 @@ class LegacyCoupler(RBC):
         collider_static_config: qd.template(),
     ):
         for i_p, i_b in qd.ndrange(self.sph_solver._n_particles, self.sph_solver._B):
-            if self.sph_solver.particles_ng_reordered[i_p, i_b].active:
+            if self._sph_data.particles_ng_reordered[i_p, i_b].active:
                 for i_g in range(self.rigid_solver.n_geoms):
                     if geoms_info.needs_coup[i_g]:
                         (
-                            self.sph_solver.particles_reordered[i_p, i_b].vel,
+                            self._sph_data.particles_reordered[i_p, i_b].vel,
                             self.sph_rigid_normal_reordered[i_p, i_g, i_b],
                         ) = self._func_collide_with_rigid_geom_robust(
-                            self.sph_solver.particles_reordered[i_p, i_b].pos,
-                            self.sph_solver.particles_reordered[i_p, i_b].vel,
-                            self.sph_solver.particles_info_reordered[i_p, i_b].mass,
-                            self.sph_solver.particles_reordered[i_p, i_b].p,
+                            self._sph_data.particles_reordered[i_p, i_b].pos,
+                            self._sph_data.particles_reordered[i_p, i_b].vel,
+                            self._sph_data.particles_info_reordered[i_p, i_b].mass,
+                            self._sph_data.particles_reordered[i_p, i_b].p,
                             self.sph_rigid_normal_reordered[i_p, i_g, i_b],
                             i_g,
                             i_b,
