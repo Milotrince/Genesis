@@ -138,3 +138,8 @@ MPM resolves particle samples and visual meshes into `ParticleEntityDescription`
 `MPMGeomData` identifies each entity's particle range. Grid reset bookkeeping and render buffers stay
 solver-owned. Serialized type identifiers use qualified names so material classes with the same short
 name remain distinct when several solver modalities share a scene.
+
+SPH uses `ParticleEntityDescription` for resolved sampling and `SPHDescription` for allocation.
+`SPHData` keeps original-order and reordered particle state, material properties, and reorder maps
+together. `SPHGeomData` identifies entity ranges in original order; coupling uses the reordered buffers
+during substeps. Spatial hashing and render buffers remain solver-owned.

@@ -1,19 +1,18 @@
-from typing import TYPE_CHECKING
-
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.boundaries import CubeBoundary
 from genesis.engine.entities import SPHEntity
+from genesis.engine.entities.particle_entity import ParticleEntityDescription
 from genesis.engine.materials import SPH
+from genesis.engine.solver_data.sph import SPHData, SPHDescription, SPHGeomData
 from genesis.engine.states.solvers import SPHSolverState
+from genesis.utils.misc import qd_to_numpy
 
 from .base_solver import GravityMixin, Solver, TimeBasedMixin
-
-if TYPE_CHECKING:
-    from genesis.engine.entities import SPHEntity
 
 
 @qd.data_oriented
@@ -61,61 +60,8 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
             # restitution=0.5,
         )
 
-    def init_particle_fields(self):
-        # dynamic particle state
-        struct_particle_state = qd.types.struct(
-            pos=gs.qd_vec3,  # position
-            vel=gs.qd_vec3,  # velocity
-            acc=gs.qd_vec3,  # acceleration
-            rho=gs.qd_float,  # density
-            p=gs.qd_float,  # pressure
-            dfsph_factor=gs.qd_float,  # DFSPH use: Factor for Divergence and density solver
-            drho=gs.qd_float,  # density deritivate
-        )
-
-        # dynamic particle state without gradient
-        struct_particle_state_ng = qd.types.struct(
-            reordered_idx=gs.qd_int,
-            active=gs.qd_bool,
-        )
-
-        # static particle info
-        struct_particle_info = qd.types.struct(
-            rho=gs.qd_float,  # rest density
-            mass=gs.qd_float,  # mass
-            stiffness=gs.qd_float,
-            exponent=gs.qd_float,
-            mu=gs.qd_float,  # viscosity
-            gamma=gs.qd_float,  # surface tension
-        )
-
-        # single frame particle state for rendering
-        struct_particle_state_render = qd.types.struct(
-            pos=gs.qd_vec3,
-            vel=gs.qd_vec3,
-            active=gs.qd_bool,
-        )
-
-        # construct fields
-        self.particles = struct_particle_state.field(
-            shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
-        )
-        self.particles_ng = struct_particle_state_ng.field(
-            shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
-        )
-        self.particles_info = struct_particle_info.field(
-            shape=(self._n_particles,), needs_grad=False, layout=qd.Layout.SOA
-        )
-        self.particles_reordered = struct_particle_state.field(
-            shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
-        )
-        self.particles_ng_reordered = struct_particle_state_ng.field(
-            shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
-        )
-        self.particles_info_reordered = struct_particle_info.field(
-            shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
-        )
-
+    def init_particle_render_fields(self):
+        struct_particle_state_render = qd.types.struct(pos=gs.qd_vec3, vel=gs.qd_vec3, active=gs.qd_bool)
         self.particles_render = struct_particle_state_render.field(
             shape=(self._n_particles, self._B), needs_grad=False, layout=qd.Layout.SOA
         )
@@ -126,8 +72,8 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
     def reset_grad(self):
         pass
 
-    def build(self):
-        super().build()
+    def prepare(self):
+        super().prepare()
 
         self._B = self._sim._B
 
@@ -136,9 +82,37 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
 
         self._coupler = self.sim._coupler
 
+    def describe(self) -> SPHDescription | None:
+        if not self.is_active:
+            return None
+        return SPHDescription(n_particles=self.n_particles, n_envs=self._B)
+
+    def bind(self):
+        if not self.is_active:
+            return
+        assert isinstance(self._solver_data, SPHData)
+        self.particles = self._solver_data.particles
+        self.particles_ng = self._solver_data.particles_ng
+        self.particles_info = self._solver_data.particles_info
+        self.particles_reordered = self._solver_data.particles_reordered
+        self.particles_ng_reordered = self._solver_data.particles_ng_reordered
+        self.particles_info_reordered = self._solver_data.particles_info_reordered
+        for entity in self.entities:
+            self.sim._solver_data.add(
+                SPHGeomData(
+                    owner=self,
+                    idx=entity.idx,
+                    entity_idx=entity.idx,
+                    data=self._solver_data,
+                    particle_start=entity.particle_start,
+                    particle_end=entity.particle_start + entity.n_particles,
+                )
+            )
+
+    def build(self):
         if self.is_active:
             self.sh.build(self._B)
-            self.init_particle_fields()
+            self.init_particle_render_fields()
             self.init_ckpt()
 
             for entity in self.entities:
@@ -148,7 +122,9 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
             # if the current timestep is larger than the stable timestep. This formula is derived from
             # [_task_compute_non_pressure_forces] function, which computes the acceleration due to non-pressure forces.
             stable_dt = (
-                self._stable_dt_coef * (0.01 * self._support_radius**2) / self.particles_info.mu.to_numpy().max()
+                self._stable_dt_coef
+                * (0.01 * self._support_radius**2)
+                / qd_to_numpy(self.particles_info.mu, transpose=True).max()
             )
             if self.substep_dt > stable_dt:
                 gs.logger.warning(
@@ -158,7 +134,7 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
                 )
 
             # TODO: Support per-particle density
-            self._density0 = self.particles_info[0].rho
+            self._density0 = self.entities[0].material.rho
 
         # Kernels of this solver take the solver itself, so gravity has to be a field for them.
         self._build_gravity(as_field=True)
@@ -174,6 +150,11 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
     ) -> "SPHEntity":
+        if desc is None:
+            desc = ParticleEntityDescription.resolve(
+                material, morph, surface, self._particle_size, name, self.boundary, has_skinning=False
+            )
+        assert isinstance(desc, ParticleEntityDescription)
         entity = SPHEntity(
             scene=self.scene,
             solver=self,
@@ -184,6 +165,7 @@ class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
             idx=idx,
             particle_start=self.n_particles,
             name=name,
+            desc=desc,
         )
 
         self.entities.append(entity)

@@ -5,6 +5,7 @@ from genesis.engine.scene import SCENE_FORMAT
 from genesis.engine.solver_data.articulated import JointsData, LinksData, RigidGeomData, VisualGeomData
 from genesis.engine.solver_data.fem import FEMGeomData
 from genesis.engine.solver_data.mpm import MPMGeomData
+from genesis.engine.solver_data.sph import SPHGeomData
 from genesis.utils.misc import qd_to_torch
 
 from ..utils.assertions import assert_allclose
@@ -19,6 +20,9 @@ def test_shared_binding(n_envs, tmp_path, show_viewer, tol):
             particle_size=0.05,
             lower_bound=(0.0, 0.0, 0.0),
             upper_bound=(1.0, 1.0, 1.0),
+        ),
+        sph_options=gs.options.SPHOptions(
+            particle_size=0.05,
         ),
         show_viewer=show_viewer,
     )
@@ -46,6 +50,15 @@ def test_shared_binding(n_envs, tmp_path, show_viewer, tol):
             size=(0.2, 0.2, 0.2),
         ),
         material=gs.materials.MPM.Elastic(
+            sampler="regular",
+        ),
+    )
+    scene.add_entity(
+        morph=gs.morphs.Box(
+            pos=(0.75, 0.75, 0.5),
+            size=(0.2, 0.2, 0.2),
+        ),
+        material=gs.materials.SPH.Liquid(
             sampler="regular",
         ),
     )
@@ -108,5 +121,14 @@ def test_shared_binding(n_envs, tmp_path, show_viewer, tol):
             :, mpm_geom.particle_start : mpm_geom.particle_end
         ],
         mpm_entity.get_particles_pos(),
+        tol=tol,
+    )
+
+    sph_entity = scene.entities[4]
+    sph_geom = scene.sim._solver_data.get(SPHGeomData, sph_entity.solver, sph_entity.idx)
+    assert_allclose(sph_entity.get_particles_pos().mean(dim=-2), (0.75, 0.75, 0.5), tol=tol)
+    assert_allclose(
+        qd_to_torch(sph_geom.data.particles.pos, transpose=True)[:, sph_geom.particle_start : sph_geom.particle_end],
+        sph_entity.get_particles_pos(),
         tol=tol,
     )

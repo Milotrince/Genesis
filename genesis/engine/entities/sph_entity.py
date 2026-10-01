@@ -3,7 +3,7 @@ import quadrants as qd
 import genesis as gs
 from genesis.engine.states.entities import SPHEntityState
 
-from .particle_entity import ParticleEntity
+from .particle_entity import ParticleEntity, ParticleEntityDescription
 
 
 @qd.data_oriented
@@ -32,11 +32,35 @@ class SPHEntity(ParticleEntity):
     """
 
     def __init__(
-        self, scene, solver, material, morph, surface, particle_size, idx, particle_start, name: str | None = None
+        self,
+        scene,
+        solver,
+        material,
+        morph,
+        surface,
+        particle_size,
+        idx,
+        particle_start,
+        name: str | None = None,
+        desc: ParticleEntityDescription | None = None,
     ):
         super().__init__(
-            scene, solver, material, morph, surface, particle_size, idx, particle_start, need_skinning=False, name=name
+            scene,
+            solver,
+            material,
+            morph,
+            surface,
+            particle_size,
+            idx,
+            particle_start,
+            need_skinning=False,
+            name=name,
+            desc=desc,
         )
+
+    @property
+    def desc(self) -> ParticleEntityDescription:
+        return self._desc
 
     def _add_particles_to_solver(self):
         self._solver._kernel_add_particles(
