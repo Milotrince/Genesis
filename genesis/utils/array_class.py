@@ -1268,7 +1268,7 @@ class ContactCache:
 
 def get_contact_cache(solver, n_possible_pairs, active):
     # Only the convex-convex detection reads the cache, so the other scenes keep it empty
-    shape = maybe_shape((n_possible_pairs, solver._B), active)
+    shape = maybe_shape((max(n_possible_pairs, 1), solver._B), active)
     return ContactCache(
         normal=V_VEC(3, dtype=gs.qd_float, shape=shape),
         penetration=V(dtype=gs.qd_float, shape=shape),
@@ -1412,7 +1412,7 @@ def get_collider_state(
         # A pair holds its first contact and its four perturbed ones (see N_PERTURBATIONS in narrowphase.py), or its
         # first contact alone under the contact patch (see NarrowphaseWorkQueues)
         narrowphase_work_queues=get_narrowphase_work_queues(
-            max_collision_pairs_broad * _B, 1 if solver._options.enable_contact_patch else 5, split_narrowphase
+            max(max_collision_pairs_broad, 1) * _B, 1 if solver._options.enable_contact_patch else 5, split_narrowphase
         ),
         contact_sort_key=V(dtype=gs.qd_float, shape=(max(max_candidate_contacts, 1), _B)),
         contact_sort_idx=V(dtype=gs.qd_int, shape=(max(max_candidate_contacts, 1), _B)),
@@ -1451,25 +1451,15 @@ def get_verts_spatial_grid(solver):
 @qd.data_oriented
 class ColliderStaticConfig(metaclass=AutoInitMeta):
     has_terrain: bool
-    # True when the scene has convex-convex collision pairs not handled by
-    # func_narrow_phase_convex_specializations (box-box, plane-box). Computed once
-    # at scene build time by iterating all geom pairs in collider._init_static_config().
-    # On GPU, the split narrowphase path runs (contact0 + multicontact + sort).
-    # On CPU, falls back to the monolithic func_narrow_phase_convex_vs_convex.
+    # True when a convex-convex pair escapes func_narrow_phase_convex_specializations (box-box, plane-box) and reaches
+    # the general narrowphase: the split narrowphase on GPU (contact0 + multicontact + sort), the monolithic
+    # func_narrow_phase_convex_vs_convex on CPU. Also gates the deterministic contact sort (see func_sort_contacts),
+    # which orders the contacts independently of the racy narrowphase layout. See its resolution in collider.py.
     has_non_box_plane_convex_convex: bool
     has_convex_specialization: bool
     has_nonconvex_nonterrain: bool
-    # True when link-pair contact pruning can ever do useful work. False when every link has at most one convex geom and
-    # no terrain is present (each (link_a, link_b) bucket then holds at most one geom-pair's contacts, capped at
-    # n_contacts_per_convex_pair, so the 2D hull is at best a marginal reduction). Lets us skip the pruning kernel call
-    # and its scratch buffers entirely. Composes with contact islands: pruning writes a logical permutation into
-    # contact_sort_idx and the island construction reads contacts through it, so pruning collapses the contacts first.
+    # Whether the link-pair contact pruning pass is compiled in, see its resolution in collider.py
     has_prunable_contacts: bool
-    # True when contacts are ordered deterministically by position in add_inequality_constraints, making the contact
-    # order independent of the racy atomic_add narrowphase layout. Only meaningful when has_non_box_plane_convex_convex
-    # on GPU; disabled in autodiff (the gradient writeback indexes contacts by physical layout, so a non-identity
-    # permutation would misattach gradients).
-    spatial_sort_supported: bool
     # maximum number of contact pairs per collision pair
     n_contacts_per_convex_pair: int
     # maximum number of contact pairs per nonconvex (vertex-vs-SDF) collision pair; >= n_contacts_per_convex_pair

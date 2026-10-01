@@ -524,23 +524,21 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             and self._options.constraint_solver == gs.constraint_solver.Newton
         )
 
-        # The layout-flippable constraint-state tensors are stored batch-first either for the GPU cooperative kernels or
-        # under serialized execution, where the env loop is outermost and per-env rows must be contiguous to avoid
-        # stride-n_envs access. Batched sweeps key their iteration-axis order on the same flag, so that iteration order
-        # always follows the physical layout.
-        #
-        # The tiled per-island seed of the factor (see enable_tiled_island_seed in array_class.py) runs on GPU at any
-        # env count: the scalar per-island seed it replaces is a per-env thread walking O(n^3) dependent loads, which
-        # above the core count costs more than the whole Newton iteration body. The subgroup-cooperative body kernels
-        # (and the batch-first layout they expect, also the layout the decomposed solve arm requires) win when per-env
-        # compute density amortizes the warp-per-env overhead and lose once the env dimension alone saturates the GPU,
-        # so they add the get_gpu_core_count() env bound (the threshold envs_undersaturate uses below), winning from
-        # ~4096 envs at n_dofs >= ~18. Sparse solve is excluded from both (the cooperative qfrc kernel and the
-        # flipped-layout jac readers are dense-only).
+        # The tiled per-island seed (see enable_tiled_island_seed in array_class.py) replaces a per-env thread walking
+        # O(n^3) dependent loads, slower than the whole Newton iteration above the core count. The cooperative body
+        # kernels run one warp per env, which pays off once an env carries enough dofs to keep its lanes busy, and stops
+        # paying once the envs alone saturate the GPU. Both are dense-only. Outside performance mode the ndarray kernels
+        # serve every scene shape, so the static config drops the scene bounds whose generic value costs little.
+        is_generic = gs.use_ndarray
         enable_tiled_island_seed = (
-            gs.backend != gs.cpu and not self.sim.options.requires_grad and not sparse_solve and self.n_dofs >= 16
+            gs.backend != gs.cpu
+            and not self.sim.options.requires_grad
+            and not sparse_solve
+            and (self.n_dofs >= 16 or (is_generic and self.n_dofs > 0))
         )
-        enable_cooperative_constraint_kernels = enable_tiled_island_seed and self._sim._B <= get_gpu_core_count()
+        enable_cooperative_constraint_kernels = enable_tiled_island_seed and (
+            is_generic or self._sim._B <= get_gpu_core_count()
+        )
         # The noslip sweep of an island is the last one-thread process of the cooperative regime, so its block-per-island
         # variant takes the same bound (see func_noslip in noslip.py).
         enable_cooperative_noslip = enable_cooperative_constraint_kernels and self._options.noslip_iterations > 0
@@ -551,7 +549,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         trees_n_dofs = np.bincount(
             self._links_tree_root_idx[tree_links], np.array([link.n_dofs for link in self.links])[tree_links]
         )
-        is_single_island = self._n_trees == 1
+        is_single_island = self._n_trees == 1 and not is_generic
         # Above the cooperative bound one thread per env saturates the GPU, where the scalar dense Cholesky of an env's
         # one block beats the tiled factor, so the seed kernel assembles the block and the monolith factors it.
         has_scalar_seed_factor = (
@@ -568,7 +566,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         # cores times the longest group. Past that bound it only adds instructions to a busy GPU, whether the links are
         # grouped by tree or by root.
         enable_level_sweep = gs.backend != gs.cpu and not self.sim.options.requires_grad
-        if enable_level_sweep:
+        if enable_level_sweep and not is_generic:
             n_lanes_per_env = array_class.RigidSimStaticConfig.level_sweep_n_lanes_per_env
             for links_group_idx, links_level in (
                 (self._links_tree_root_idx, self._links_tree_level),
@@ -607,7 +605,9 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             broadphase_traversal=self._resolve_broadphase_traversal(),
             # Parallelize init over (constraints, envs) when envs alone don't saturate the GPU.
             parallel_init=(
-                gs.backend != gs.cpu and not self.sim.options.requires_grad and self.n_envs <= get_gpu_core_count()
+                gs.backend != gs.cpu
+                and not self.sim.options.requires_grad
+                and (is_generic or self.n_envs <= get_gpu_core_count())
             ),
             enable_level_sweep=enable_level_sweep,
             enable_tiled_island_seed=enable_tiled_island_seed,
@@ -661,12 +661,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
                 # Register tile of the mass-matrix Cholesky kernels and unit of the island tile caps, see
                 # cholesky_tile_size_for in array_class.py.
-                cholesky_tile_size = array_class.cholesky_tile_size_for(self.n_dofs)
+                cholesky_tile_size = 32 if is_generic else array_class.cholesky_tile_size_for(self.n_dofs)
 
                 # A shared tile holds the dofs it factors rounded up to the next size of get_gpu_shared_tile_sizes,
                 # which bounds the sizes compiled while keeping the occupancy of the tightest fit. A mass block above
                 # the largest size factors outside the shared tile, which leaves the tile size unused.
-                shared_tile_sizes = get_gpu_shared_tile_sizes()
+                shared_tile_sizes = get_gpu_shared_tile_sizes(2 if is_generic else 8)
                 mass_matrix_fits_shared = max_block_dofs <= shared_tile_sizes[-1]
                 tiled_n_dofs_per_block = min(
                     (size for size in shared_tile_sizes if size >= max_block_dofs), default=shared_tile_sizes[-1]
@@ -687,9 +687,12 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
                 # The cooperative in-place LDL^T has no cap; the shared-memory tile is faster but capped. Same env logic
                 # as the Hessian: tile from the largest block >= 8 DOFs, drop the env guard above the cap where the
-                # scalar O(n_block_dofs^3) per-(block, env) factor is always worse.
-                enable_tiled_cholesky_mass_matrix = max_block_dofs >= 8 and (
-                    not mass_matrix_fits_shared or envs_undersaturate
+                # scalar O(n_block_dofs^3) per-(block, env) factor is always worse. Outside performance mode every scene
+                # holding dofs takes the tiled factor, whatever its block size and env count.
+                enable_tiled_cholesky_mass_matrix = (
+                    max_block_dofs > 0
+                    if is_generic
+                    else max_block_dofs >= 8 and (not mass_matrix_fits_shared or envs_undersaturate)
                 )
 
                 # Register-streaming tiled mass factor for the >shared-cap forward GPU path: factors each mass
