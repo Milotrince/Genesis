@@ -1,11 +1,12 @@
 from typing import TYPE_CHECKING
 
 import numpy as np
+
 import quadrants as qd
 
 import genesis as gs
 import genesis.utils.sdf as sdf
-
+from genesis.engine.solver_data.articulated import ArticulatedData
 from genesis.options.solvers import LegacyCouplerOptions
 from genesis.repr_base import RBC
 from genesis.utils import array_class
@@ -34,6 +35,7 @@ class LegacyCoupler(RBC):
 
         self.tool_solver = self.sim.tool_solver
         self.rigid_solver = self.sim.rigid_solver
+        self._rigid_data: ArticulatedData | None = None
         self.mpm_solver = self.sim.mpm_solver
         self.sph_solver = self.sim.sph_solver
         self.pbd_solver = self.sim.pbd_solver
@@ -41,6 +43,7 @@ class LegacyCoupler(RBC):
         self.sf_solver = self.sim.sf_solver
 
     def build(self) -> None:
+        self._rigid_data = self.sim._solver_data.get(ArticulatedData, self.rigid_solver)
         self._rigid_mpm = self.rigid_solver.is_active and self.mpm_solver.is_active and self.options.rigid_mpm
         self._rigid_sph = self.rigid_solver.is_active and self.sph_solver.is_active and self.options.rigid_sph
         self._rigid_pbd = self.rigid_solver.is_active and self.pbd_solver.is_active and self.options.rigid_pbd
@@ -493,7 +496,7 @@ class LegacyCoupler(RBC):
 
     def fem_rigid_link_constraints(self):
         if self.fem_solver._constraints_initialized and self.rigid_solver.is_active:
-            self.fem_solver._kernel_update_linked_vertex_constraints(self.rigid_solver.dyn_state.links)
+            self.fem_solver._kernel_update_linked_vertex_constraints(self._rigid_data.state.links)
 
     @qd.kernel
     def fem_surface_force(
@@ -876,8 +879,8 @@ class LegacyCoupler(RBC):
         if self._rigid_mpm and self.mpm_solver.enable_CPIC:
             self.mpm_surface_to_particle(
                 f,
-                self.rigid_solver.dyn_state.geoms,
-                self.rigid_solver.dyn_info.geoms,
+                self._rigid_data.state.geoms,
+                self._rigid_data.info.geoms,
                 self.rigid_solver.collider._sdf._sdf_info,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider.collider_config,
@@ -889,9 +892,9 @@ class LegacyCoupler(RBC):
             self.mpm_grid_op(
                 f,
                 self.sim.cur_t,
-                geoms_state=self.rigid_solver.dyn_state.geoms,
-                geoms_info=self.rigid_solver.dyn_info.geoms,
-                links_state=self.rigid_solver.dyn_state.links,
+                geoms_state=self._rigid_data.state.geoms,
+                geoms_info=self._rigid_data.info.geoms,
+                links_state=self._rigid_data.state.links,
                 rigid_info=self.rigid_solver.rigid_info,
                 sdf_info=self.rigid_solver.collider._sdf._sdf_info,
                 collider_static_config=self.rigid_solver.collider.collider_config,
@@ -901,10 +904,10 @@ class LegacyCoupler(RBC):
         if self._rigid_sph:
             self.sph_rigid(
                 f,
-                self.rigid_solver.dyn_state.geoms,
-                self.rigid_solver.dyn_info.geoms,
-                self.rigid_solver.dyn_state.links,
-                self.rigid_solver.dyn_info.links,
+                self._rigid_data.state.geoms,
+                self._rigid_data.info.geoms,
+                self._rigid_data.state.links,
+                self._rigid_data.info.links,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider._sdf._sdf_info,
                 self.rigid_solver.collider.collider_config,
@@ -913,9 +916,9 @@ class LegacyCoupler(RBC):
         # PBD <-> Rigid
         if self._rigid_pbd:
             self.kernel_pbd_rigid_collide(
-                geoms_state=self.rigid_solver.dyn_state.geoms,
-                geoms_info=self.rigid_solver.dyn_info.geoms,
-                links_state=self.rigid_solver.dyn_state.links,
+                geoms_state=self._rigid_data.state.geoms,
+                geoms_info=self._rigid_data.info.geoms,
+                links_state=self._rigid_data.state.links,
                 sdf_info=self.rigid_solver.collider._sdf._sdf_info,
                 rigid_info=self.rigid_solver.rigid_info,
                 collider_static_config=self.rigid_solver.collider.collider_config,
@@ -924,14 +927,14 @@ class LegacyCoupler(RBC):
             # 1-way: animate particles by links, over the substep interval and no faster than the clamp allows.
             substep_inv_dt = 1.0 / self.pbd_solver.substep_dt
             clamped_inv_dt = min(substep_inv_dt, CLAMPED_INV_DT)
-            self.kernel_pbd_rigid_solve_animate_particles_by_link(clamped_inv_dt, self.rigid_solver.dyn_state.links)
+            self.kernel_pbd_rigid_solve_animate_particles_by_link(clamped_inv_dt, self._rigid_data.state.links)
 
         if self.fem_solver.is_active:
             self.fem_surface_force(
                 f,
-                self.rigid_solver.dyn_state.geoms,
-                self.rigid_solver.dyn_info.geoms,
-                self.rigid_solver.dyn_state.links,
+                self._rigid_data.state.geoms,
+                self._rigid_data.info.geoms,
+                self._rigid_data.state.links,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider._sdf._sdf_info,
                 self.rigid_solver.collider.collider_config,
@@ -942,9 +945,9 @@ class LegacyCoupler(RBC):
         if self.fem_solver.is_active:
             self.fem_surface_force.grad(
                 f,
-                self.rigid_solver.dyn_state.geoms,
-                self.rigid_solver.dyn_info.geoms,
-                self.rigid_solver.dyn_state.links,
+                self._rigid_data.state.geoms,
+                self._rigid_data.info.geoms,
+                self._rigid_data.state.links,
                 self.rigid_solver.rigid_info,
                 self.rigid_solver.collider._sdf._sdf_info,
                 self.rigid_solver.collider.collider_config,
@@ -953,9 +956,9 @@ class LegacyCoupler(RBC):
             self.mpm_grid_op.grad(
                 f,
                 self.sim.cur_t,
-                geoms_state=self.rigid_solver.dyn_state.geoms,
-                geoms_info=self.rigid_solver.dyn_info.geoms,
-                links_state=self.rigid_solver.dyn_state.links,
+                geoms_state=self._rigid_data.state.geoms,
+                geoms_info=self._rigid_data.info.geoms,
+                links_state=self._rigid_data.state.links,
                 rigid_info=self.rigid_solver.rigid_info,
                 sdf_info=self.rigid_solver.collider._sdf._sdf_info,
                 collider_static_config=self.rigid_solver.collider.collider_config,

@@ -36,17 +36,36 @@ class JointsData(SolverData):
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
-class VisualGeomData(SolverData):
-    info: array_class.VGeomsInfo
-    state: array_class.VGeomsState
-    verts_info: array_class.VVertsInfo
-    verts_state: array_class.VVertsState
-    faces_info: array_class.VFacesInfo
+class GeomData(SolverData):
     link_idx: int
     vert_start: int
     vert_end: int
     face_start: int
     face_end: int
+
+
+@dataclass(frozen=True, kw_only=True, eq=False)
+class VisualGeomData(GeomData):
+    info: array_class.VGeomsInfo
+    state: array_class.VGeomsState
+    verts_info: array_class.VVertsInfo
+    verts_state: array_class.VVertsState
+    faces_info: array_class.VFacesInfo
+
+
+@dataclass(frozen=True, kw_only=True, eq=False)
+class RigidGeomData(GeomData):
+    info: array_class.GeomsInfo
+    state: array_class.GeomsState
+    verts_info: array_class.VertsInfo
+    verts_state: array_class.VertsState
+    faces_info: array_class.FacesInfo
+    edges_info: array_class.EdgesInfo
+    verts_state_start: int
+    verts_state_end: int
+    edge_start: int
+    edge_end: int
+    has_batched_verts: bool
 
 
 @dataclass(frozen=True, kw_only=True)

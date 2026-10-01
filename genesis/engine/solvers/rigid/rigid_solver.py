@@ -14,6 +14,7 @@ import genesis.utils.geom as gu
 from genesis.constants import link_ref_frame
 from genesis.engine.entities import DroneEntity, RigidEntity, TerrainEntity
 from genesis.engine.materials import Rigid
+from genesis.engine.solver_data.articulated import RigidGeomData
 from genesis.engine.states import KinematicSolverCheckpoint, RigidSolverState
 from genesis.options.morphs import Drone, Morph, Terrain
 from genesis.options.solvers import RigidOptions
@@ -355,6 +356,36 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             n_candidate_equalities_=self.n_candidate_equalities_,
             is_dynamic=True,
         )
+
+    def bind(self):
+        super().bind()
+        for entity in self.entities:
+            for link in entity.links:
+                for geom in link.geoms:
+                    has_batched_verts = not geom.is_fixed or entity._batch_fixed_verts
+                    self.sim._solver_data.add(
+                        RigidGeomData(
+                            owner=self,
+                            idx=geom.idx,
+                            entity_idx=entity.idx,
+                            link_idx=link.idx,
+                            info=self.dyn_info.geoms,
+                            state=self.dyn_state.geoms,
+                            verts_info=self.dyn_info.verts,
+                            verts_state=self.dyn_state.free_verts if has_batched_verts else self.dyn_state.fixed_verts,
+                            faces_info=self.dyn_info.faces,
+                            edges_info=self.dyn_info.edges,
+                            vert_start=geom.vert_start,
+                            vert_end=geom.vert_end,
+                            face_start=geom.face_start,
+                            face_end=geom.face_end,
+                            verts_state_start=geom.verts_state_start,
+                            verts_state_end=geom.verts_state_end,
+                            edge_start=geom.edge_start,
+                            edge_end=geom.edge_end,
+                            has_batched_verts=has_batched_verts,
+                        )
+                    )
 
     def build(self):
         super().build()

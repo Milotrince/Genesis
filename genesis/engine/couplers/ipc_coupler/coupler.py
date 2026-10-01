@@ -12,6 +12,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT
 from genesis.engine.materials.FEM.cloth import Cloth
+from genesis.engine.solver_data.articulated import ArticulatedData
 from genesis.options.solvers import IPCCouplerOptions, RigidOptions
 from genesis.repr_base import RBC
 from genesis.utils.misc import geometric_mean, harmonic_mean, qd_to_numpy, tensor_to_array
@@ -45,7 +46,7 @@ if TYPE_CHECKING or UIPC_AVAILABLE:
         StableNeoHookean,
         StrainLimitingBaraffWitkinShell,
     )
-    from uipc.core import Engine, World, Scene, AffineBodyStateAccessorFeature, ContactElement, SubsceneElement
+    from uipc.core import AffineBodyStateAccessorFeature, ContactElement, Engine, Scene, SubsceneElement, World
     from uipc.geometry import GeometrySlot, SimplicialComplex, SimplicialComplexSlot
     from uipc.gui import SceneGUI
 
@@ -120,6 +121,7 @@ class IPCCoupler(RBC):
 
         # Define some proxies for convenience
         self.rigid_solver: "RigidSolver" = self.sim.rigid_solver
+        self._rigid_data: ArticulatedData | None = None
         self.fem_solver: "FEMSolver" = self.sim.fem_solver
 
         # ==== IPC System Infrastructure ====
@@ -183,6 +185,7 @@ class IPCCoupler(RBC):
 
     def build(self) -> None:
         """Build IPC system"""
+        self._rigid_data = self.sim._solver_data.get(ArticulatedData, self.rigid_solver)
         # IPC coupler builds a single IPC scene shared across all envs, so it requires
         # identical geometry topology (links, joints, geoms) across environments.
         # Batched info options allow per-env topology which is incompatible.
@@ -427,8 +430,8 @@ class IPCCoupler(RBC):
                 gs.logger.debug(f"Fixed-merge: link {link.idx} ({link.name}) -> {target_link.idx} ({target_link.name})")
 
         # ========== Process each environment ==========
-        links_pos = qd_to_numpy(self.rigid_solver.dyn_state.links.pos, transpose=True)
-        links_quat = qd_to_numpy(self.rigid_solver.dyn_state.links.quat, transpose=True)
+        links_pos = qd_to_numpy(self._rigid_data.state.links.pos, transpose=True)
+        links_quat = qd_to_numpy(self._rigid_data.state.links.quat, transpose=True)
 
         for env_idx in range(self.sim._B):
             for target_link, source_links in target_groups.items():
@@ -587,8 +590,8 @@ class IPCCoupler(RBC):
         self._ipc_eac = ExternalArticulationConstraint()
         self._ipc_constitution_tabular.insert(self._ipc_eac)
 
-        joints_xaxis = qd_to_numpy(self.rigid_solver.dyn_state.joints.xaxis, transpose=True)
-        joints_xanchor = qd_to_numpy(self.rigid_solver.dyn_state.joints.xanchor, transpose=True)
+        joints_xaxis = qd_to_numpy(self._rigid_data.state.joints.xaxis, transpose=True)
+        joints_xanchor = qd_to_numpy(self._rigid_data.state.joints.xanchor, transpose=True)
 
         # Process each rigid entity with external_articulation coupling type
         for i_e, entity in enumerate(cast(list["RigidEntity"], self.rigid_solver.entities)):
@@ -1119,8 +1122,8 @@ class IPCCoupler(RBC):
             articulation_data.qpos_stored[:] = entities_qpos[..., entity.q_start : entity.q_end]
 
         # Store transforms for all rigid links
-        links_pos = qd_to_numpy(self.rigid_solver.dyn_state.links.pos, transpose=True)
-        links_quat = qd_to_numpy(self.rigid_solver.dyn_state.links.quat, transpose=True)
+        links_pos = qd_to_numpy(self._rigid_data.state.links.pos, transpose=True)
+        links_quat = qd_to_numpy(self._rigid_data.state.links.quat, transpose=True)
         links_transform = cast(np.ndarray, gu.trans_quat_to_T(links_pos, links_quat))
         for link, transforms in self._abd_transforms_by_link.items():
             for env_idx in range(self.sim._B):
