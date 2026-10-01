@@ -2536,7 +2536,6 @@ def func_island_assemble_factor_solve_tiled(
     i_island: int,
     tid: int,
     sh_L,
-    sh_v,
     constraint_state: array_class.ConstraintState,
     dyn_info: array_class.DynInfo,
     rigid_info: array_class.RigidInfo,
@@ -2653,49 +2652,53 @@ def func_island_assemble_factor_solve_tiled(
             sh_L[k_blk_lo:k_blk_hi, k_blk_lo:k_blk_hi] = L_kk
 
         # --- Triangular solve grad -> Mgrad from sh_L (local indices; grad/Mgrad global through dof_id) ---
-        i_d_local = tid
-        while i_d_local < n:
-            i_d = i_d_local
-            if qd.static(not rigid_config.is_single_island):
-                i_d = constraint_state.island.dof_id[dof_base + i_d_local, i_b]
-            sh_v[i_d_local] = constraint_state.grad[i_d, i_b]
-            # L factors the scaled block, so the solve wraps with nt_jacobi (see array_class.py).
-            if qd.static(rigid_config.enable_jacobi_equilibration):
-                sh_v[i_d_local] = sh_v[i_d_local] * constraint_state.nt_jacobi[i_d, i_b]
-            i_d_local = i_d_local + T
+        # Column-oriented substitutions on registers: lane tid holds rows tid + k * T of the vector, the lane owning row
+        # j solves it and broadcasts it, and every lane removes its contribution from the rows it holds. A step costs
+        # one broadcast and one multiply-add per row held, the substitutions being latency-bound at this size.
+        N_ROWS_PER_LANE = qd.static((max_dofs + T - 1) // T)
+        v = qd.Vector.zero(gs.qd_float, N_ROWS_PER_LANE)
+        for k in qd.static(range(N_ROWS_PER_LANE)):
+            i_d_local = k * T + tid
+            if i_d_local < n:
+                i_d = i_d_local
+                if qd.static(not rigid_config.is_single_island):
+                    i_d = constraint_state.island.dof_id[dof_base + i_d_local, i_b]
+                v[k] = constraint_state.grad[i_d, i_b]
+                # L factors the scaled block, so the solve wraps with nt_jacobi (see array_class.py).
+                if qd.static(rigid_config.enable_jacobi_equilibration):
+                    v[k] = v[k] * constraint_state.nt_jacobi[i_d, i_b]
+        # The substitutions read rows of sh_L the factor wrote from other lanes
         qd.simt.block.sync()
-        for i_r in range(n):
-            dot = gs.qd_float(0.0)
-            j_d_local = tid
-            while j_d_local < i_r:
-                dot = dot + sh_L[i_r, j_d_local] * sh_v[j_d_local]
-                j_d_local = j_d_local + T
-            dot = su.qd_block_sum(dot, LOG2_T)
-            if tid == 0:
-                sh_v[i_r] = (sh_v[i_r] - dot) / sh_L[i_r, i_r]
-            qd.simt.block.sync()
-        for i_rev in range(n):
-            i_r = n - 1 - i_rev
-            dot = gs.qd_float(0.0)
-            j_d_local = i_r + 1 + tid
-            while j_d_local < n:
-                dot = dot + sh_L[j_d_local, i_r] * sh_v[j_d_local]
-                j_d_local = j_d_local + T
-            dot = su.qd_block_sum(dot, LOG2_T)
-            if tid == 0:
-                sh_v[i_r] = (sh_v[i_r] - dot) / sh_L[i_r, i_r]
-            qd.simt.block.sync()
+        # Forward substitution L y = grad, then backward substitution L^T x = y, the direction resolved at compile time
+        # so that each step carries a single update.
+        for i_pass in qd.static(range(2)):
+            for j_step in range(n):
+                j_d_local = j_step
+                if qd.static(i_pass == 1):
+                    j_d_local = n - 1 - j_step
+                x_j = su.qd_lane_vector_get(v, j_d_local, T) / sh_L[j_d_local, j_d_local]
+                for k in qd.static(range(N_ROWS_PER_LANE)):
+                    i_d_local = k * T + tid
+                    if i_d_local == j_d_local:
+                        v[k] = x_j
+                    else:
+                        if qd.static(i_pass == 0):
+                            if j_d_local < i_d_local and i_d_local < n:
+                                v[k] = v[k] - sh_L[i_d_local, j_d_local] * x_j
+                        else:
+                            if i_d_local < j_d_local:
+                                v[k] = v[k] - sh_L[j_d_local, i_d_local] * x_j
 
-        # Write the solved Mgrad back to global memory (local sh_v -> global through dof_id)
-        i_d_local = tid
-        while i_d_local < n:
-            i_d = i_d_local
-            if qd.static(not rigid_config.is_single_island):
-                i_d = constraint_state.island.dof_id[dof_base + i_d_local, i_b]
-            constraint_state.Mgrad[i_d, i_b] = sh_v[i_d_local]
-            if qd.static(rigid_config.enable_jacobi_equilibration):
-                constraint_state.Mgrad[i_d, i_b] = sh_v[i_d_local] * constraint_state.nt_jacobi[i_d, i_b]
-            i_d_local = i_d_local + T
+        # Write the solved Mgrad back to global memory (local registers -> global through dof_id)
+        for k in qd.static(range(N_ROWS_PER_LANE)):
+            i_d_local = k * T + tid
+            if i_d_local < n:
+                i_d = i_d_local
+                if qd.static(not rigid_config.is_single_island):
+                    i_d = constraint_state.island.dof_id[dof_base + i_d_local, i_b]
+                constraint_state.Mgrad[i_d, i_b] = v[k]
+                if qd.static(rigid_config.enable_jacobi_equilibration):
+                    constraint_state.Mgrad[i_d, i_b] = v[k] * constraint_state.nt_jacobi[i_d, i_b]
         qd.simt.block.sync()
 
         # Persist the factor: store L's lower triangle (local sh_L) at the island's global dof rows and columns of
@@ -3235,7 +3238,6 @@ def func_island_tiled_factor_solve_all(
                 i_work = i_flat // T
                 tid = i_flat % T
                 sh_L = qd.simt.block.SharedArray((MAX_DOFS, MAX_DOFS + 1), gs.qd_float)
-                sh_v = qd.simt.block.SharedArray((MAX_DOFS,), gs.qd_float)
                 if i_work < n_work:
                     i_b = i_work
                     i_island = 0
@@ -3251,7 +3253,6 @@ def func_island_tiled_factor_solve_all(
                                 i_island,
                                 tid,
                                 sh_L,
-                                sh_v,
                                 constraint_state,
                                 dyn_info,
                                 rigid_info,
