@@ -153,3 +153,10 @@ Tool entities resolve normalized/scaled mesh vertices, normals, faces, and signe
 `ToolEntityDescription`. `ToolDescription` allocates per-entity `ToolGeomData` with pose history and mesh
 fields, and the solver and collision methods share those buffers. Entity constructors hold host descriptions;
 native allocation occurs during scene build.
+
+SF declares grid resolution and jet-channel count through `SFDescription`, then binds `SFData` for
+velocity, pressure, and concentration fields. Pressure-projection scratch stays solver-owned. Grid
+getters return copied tensors in x/y/z order. Jet configuration is fixed at build; custom jet functions
+remain runtime configuration, and exporting a scene containing them raises. SF remains unbatched.
+Scene-state snapshots include its velocity, pressure, concentration, and time; scene reset restores these
+for active solvers even when they have no entities. Serialized checkpoints remain unsupported for SF.
