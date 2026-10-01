@@ -302,6 +302,7 @@ def test_parsing_inertia_defaults(
     zero_density_marker_mjcf,
     implicit_inertial_origin_chain,
     visual_collision_inertia,
+    primitive_collision_urdf,
     show_viewer,
     tol,
     caplog,
@@ -594,6 +595,24 @@ def test_parsing_inertia_defaults(
     assert_allclose(entity_variants.desc.variants[1].links[0].mass, 48.0, rtol=1e-6)
     assert_allclose(entity_variants.desc.variants[1].links[0].inertial_pos, (0.2, 0.0, 0.0), atol=1e-7)
     assert_allclose(np.linalg.eigvalsh(entity_variants.desc.variants[1].links[0].inertia), (0.8, 1.6, 2.08), rtol=1e-6)
+
+    # A GLB collision mesh selects the legacy URDF parser, including for the primitive beside it
+    scaled_links = []
+    for scale in (1.0, 2.0):
+        entity_scaled = inertia_scene.add_entity(
+            morph=gs.morphs.URDF(
+                file=primitive_collision_urdf,
+                scale=scale,
+                align=False,
+            ),
+            material=gs.materials.Rigid(
+                rho=1000.0,
+            ),
+        )
+        scaled_links.append(entity_scaled.base_link)
+        assert_allclose(entity_scaled.base_link.desc.mass, 1000.0 * (0.1 * 0.2 * 0.3 + 0.05**3) * scale**3, rtol=1e-6)
+    assert_allclose(scaled_links[1].desc.inertial_pos, 2.0 * scaled_links[0].desc.inertial_pos, rtol=1e-6)
+    assert_allclose(scaled_links[1].desc.inertia, 2.0**5 * scaled_links[0].desc.inertia, rtol=1e-6)
 
     # Every link of an aligned free body keeps its own mass, so each link reads its authored mass. The two totals are
     # accumulated by independent code paths, so their agreement is bounded by that cross-path floor.
