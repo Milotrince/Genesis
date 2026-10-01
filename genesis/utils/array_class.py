@@ -337,7 +337,7 @@ class RigidInfo:
     EPS: qd.Tensor
 
 
-def get_rigid_info(solver, kinematic_only):
+def get_rigid_info(solver, data, kinematic_only):
     _B = solver._B
 
     mass_mat_shape = (solver.n_dofs_, solver.n_dofs_, _B)
@@ -385,11 +385,11 @@ def get_rigid_info(solver, kinematic_only):
     # FIXME: Add a better split between kinematic and Genesis
     if kinematic_only:
         return RigidInfo(
-            gravity=V_VEC(3, dtype=gs.qd_float, shape=()),
-            meaninertia=V(dtype=gs.qd_float, shape=()),
+            gravity=data.gravity,
+            meaninertia=data.meaninertia,
             n_awake_dofs=V(dtype=gs.qd_int, shape=(_B,)),
-            qpos0=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
-            qpos=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
+            qpos0=data.qpos0,
+            qpos=data.qpos,
             qpos_next=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
             links_T=V_MAT(n=4, m=4, dtype=gs.qd_float, shape=(solver.n_links_,)),
             geoms_init_AABB=V_VEC(3, dtype=gs.qd_float, shape=()),
@@ -435,11 +435,11 @@ def get_rigid_info(solver, kinematic_only):
         )
 
     return RigidInfo(
-        gravity=V_VEC(3, dtype=gs.qd_float, shape=(_B,)),
-        meaninertia=V(dtype=gs.qd_float, shape=(_B,)),
+        gravity=data.gravity,
+        meaninertia=data.meaninertia,
         n_awake_dofs=V(dtype=gs.qd_int, shape=(_B,)),
-        qpos0=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B)),
-        qpos=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B), needs_grad=requires_grad),
+        qpos0=data.qpos0,
+        qpos=data.qpos,
         qpos_next=V(dtype=gs.qd_float, shape=(solver.n_qs_, _B), needs_grad=requires_grad),
         links_T=V_MAT(n=4, m=4, dtype=gs.qd_float, shape=(solver.n_links_,)),
         geoms_init_AABB=V_VEC(3, dtype=gs.qd_float, shape=(solver.n_geoms_, 8)),
@@ -3094,7 +3094,7 @@ def island_tile_caps(cap_first, cap_last):
 @qd.data_oriented
 class DataManager:
     def __init__(self, solver, kinematic_only):
-        self.rigid_info = get_rigid_info(solver, kinematic_only)
+        self.rigid_info = get_rigid_info(solver, solver._solver_data, kinematic_only)
 
         self.kinematics_scratch = get_kinematics_scratch(solver)
 

@@ -102,6 +102,14 @@ def test_shared_binding(n_envs, tmp_path, show_viewer, tol):
             (2.0, 3.0, 4.0),
             tol=tol,
         )
+        assert_allclose(
+            qd_to_torch(joints.qpos, transpose=True)[:, joints.q_start : joints.q_start + 3],
+            (2.0, 3.0, 4.0),
+            tol=tol,
+        )
+        qpos = entity.get_qpos()
+        qpos.zero_()
+        assert_allclose(entity.get_pos(), (2.0, 3.0, 4.0), tol=tol)
         assert_allclose(entity.get_vverts().mean(dim=-2), (2.0, 3.0, 4.0), tol=tol)
         geom = scene.sim._solver_data.get(VisualGeomData, entity.solver)
         assert_allclose(qd_to_torch(geom.state.pos, transpose=True)[:, geom.idx], (2.0, 3.0, 4.0), tol=tol)
