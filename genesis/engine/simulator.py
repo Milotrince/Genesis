@@ -424,6 +424,12 @@ class Simulator(RBC):
         self.substep_pre_coupling(f)
         self._coupler.couple(f)
         self.substep_post_coupling(f)
+        for access in self._coupler.data_access:
+            access.commit()
+        for entities in self._hybrids_by_solver.values():
+            for entity in entities:
+                for access in entity.data_access:
+                    access.commit()
 
     def sub_step_grad(self, f):
         self.substep_post_coupling_grad(f)

@@ -166,3 +166,21 @@ Hybrid entities serialize their rigid/soft entity references and resolved partic
 simulator applies each association after its soft solver completes the post-coupling phase, in entity
 order. Authoring callbacks are consumed when resolving descriptions; loaded scenes use those resolved
 results. Hybrid composition currently supports rigid links and MPM particles.
+
+### Shared writes
+
+`SolverDataArray.bind(record)` retains read access. Passing `write="qpos"` or `write="dofs_velocity"`
+for a `JointsData` record binds the owning solver's setter to its entity range. `binding.commit(value,
+envs_idx=...)` applies that setter, including forward kinematics, contact invalidation, wake-up, and
+state-change notifications. Unsupported operations and records from another scene raise during binding.
+Bindings expire when their scene is destroyed.
+
+Native substep coupling declares exact written field paths with `bind_coupling`. Each solver lists its
+supported coupling fields. These writes target substep history or reordered buffers in the existing
+Legacy, SAP, and Hybrid phases. The simulator commits them after all post-coupling work, when original
+particle ordering and derived positions are available. Owners publish state-change notifications;
+rigid velocity updates invalidate forward-velocity caches. Accumulated rigid forces retain their next
+rigid-step consumption and wake-up behavior. IPC uses its existing owner setters for writeback.
+
+The collection and bindings are internal developer interfaces. Raw native buffers remain trusted
+solver/coupler storage; public entity getters return isolated tensors and public writes use setters.

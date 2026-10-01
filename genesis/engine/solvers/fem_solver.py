@@ -23,6 +23,7 @@ from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
 @qd.data_oriented
 class FEMSolver(GravityMixin, TimeBasedMixin, Solver):
+    coupling_fields = ("elements_v.pos", "elements_v.vel")
     material_cls = FEM.Base
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------

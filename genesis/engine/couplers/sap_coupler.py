@@ -13,6 +13,7 @@ import genesis.utils.element as eu
 import genesis.utils.geom as gu
 from genesis.constants import IntEnum
 from genesis.engine.bvh import build_bvh, func_bvh_query_leaves, func_no_filter, get_bvh_data
+from genesis.engine.solver_data import CouplingDataAccess
 from genesis.engine.solver_data.articulated import ArticulatedData
 from genesis.engine.solver_data.fem import FEMData
 from genesis.options.solvers import SAPCouplerOptions
@@ -186,6 +187,7 @@ class SAPCoupler(RBC):
         self.options = options
         self.rigid_solver = self.sim.rigid_solver
         self._rigid_data: ArticulatedData | None = None
+        self.data_access: tuple[CouplingDataAccess, ...] = ()
         self.fem_solver = self.sim.fem_solver
         self._fem_data: FEMData | None = None
         self._n_sap_iterations = options.n_sap_iterations
@@ -249,6 +251,12 @@ class SAPCoupler(RBC):
         self._rigid_data = self.sim._solver_data.get(ArticulatedData, self.rigid_solver)
         if self.fem_solver.is_active:
             self._fem_data = self.sim._solver_data.get(FEMData, self.fem_solver)
+        access = []
+        if self.rigid_solver.is_active:
+            access.append(self.sim._solver_data.bind_coupling(self._rigid_data, writes=("state.dofs.vel",)))
+        if self._fem_data is not None:
+            access.append(self.sim._solver_data.bind_coupling(self._fem_data, writes=("elements_v.vel",)))
+        self.data_access = tuple(access)
         self._B = self.sim._B
         self.contact_handlers = []
         self._enable_rigid_fem_contact &= self.rigid_solver.is_active and self.fem_solver.is_active

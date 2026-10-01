@@ -315,6 +315,7 @@ class GravityMixin:
 class Solver(RBC):
     # The material of the entities this solver simulates, None for a solver holding no entity of its own
     material_cls: type[Material] | None = None
+    coupling_fields: tuple[str, ...] = ()
 
     def __init__(self, scene: "Scene", sim: "Simulator", options):
         self._uid = gs.UID()
@@ -367,6 +368,15 @@ class Solver(RBC):
 
     def bind(self):
         pass
+
+    def bind_data_write(self, data: SolverData, write: str) -> Callable:
+        gs.raise_exception(f"{type(self).__name__} does not support '{write}' writes to {type(data).__name__}.")
+
+    @mutates(StateChange.GEOMETRY, StateChange.DYNAMICS)
+    def commit_coupling(self):
+        """Publish completed native coupling updates after solver integration and reorder writeback."""
+        if gs.backend == gs.metal:
+            torch.mps.synchronize()
 
     def build(self):
         self._B = self._sim._B

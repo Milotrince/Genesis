@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 @qd.data_oriented
 class MPMSolver(GravityMixin, TimeBasedMixin, Solver):
+    coupling_fields = ("grid.vel_out", "particles.vel")
     material_cls = MPM.Base
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------

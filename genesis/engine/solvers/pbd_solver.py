@@ -26,6 +26,7 @@ from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
 @qd.data_oriented
 class PBDSolver(GravityMixin, TimeBasedMixin, Solver):
+    coupling_fields = ("particles_reordered.pos", "particles_reordered.vel")
     material_cls = PBD.Base
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
