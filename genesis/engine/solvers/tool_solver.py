@@ -1,18 +1,13 @@
-from typing import TYPE_CHECKING
-
 import quadrants as qd
 
 import genesis as gs
 from genesis.engine.boundaries import FloorBoundary
 from genesis.engine.entities.tool_entity.tool_entity import ToolEntity
 from genesis.engine.materials import Tool
+from genesis.engine.solver_data.tool import ToolData, ToolDescription, ToolEntityDescription
 from genesis.engine.states.solvers import ToolSolverState
-from genesis.utils.misc import *
 
 from .base_solver import Solver, TimeBasedMixin
-
-if TYPE_CHECKING:
-    from genesis.engine.entities import ToolEntity
 
 
 @qd.data_oriented
@@ -38,8 +33,35 @@ class ToolSolver(TimeBasedMixin, Solver):
         # boundary
         self.setup_boundary()
 
+    def describe(self) -> ToolDescription | None:
+        if not self.is_active:
+            return None
+        return ToolDescription(
+            entities=tuple(entity.desc for entity in self.entities),
+            entity_idxs=tuple(entity.idx for entity in self.entities),
+            n_envs=self._B,
+            substeps_local=self.sim.substeps_local,
+        )
+
+    def bind(self):
+        if not self.is_active:
+            return
+        assert isinstance(self._solver_data, ToolData)
+        for entity, data in zip(self.entities, self._solver_data.geoms, strict=True):
+            self.sim._solver_data.add(data)
+            entity.pos = data.pos
+            entity.quat = data.quat
+            entity.vel = data.vel
+            entity.ang = data.ang
+            entity.mesh.init_vertices = data.init_vertices
+            entity.mesh.init_vertex_normals = data.init_vertex_normals
+            entity.mesh.faces = data.faces
+            entity.mesh.vertices = data.vertices
+            entity.mesh.vertex_normals = data.vertex_normals
+            entity.mesh.sdf_voxels = data.sdf_voxels
+            entity.mesh.T_mesh_to_sdf = data.T_mesh_to_sdf
+
     def build(self):
-        super().build()
         for entity in self._entities:
             entity.build()
 
@@ -53,6 +75,9 @@ class ToolSolver(TimeBasedMixin, Solver):
     def add_entity(
         self, idx, material, morph, surface, visualize_contact=False, name: str | None = None, desc=None
     ) -> "ToolEntity":
+        if desc is None:
+            desc = ToolEntityDescription.resolve(material, morph, surface, name)
+        assert isinstance(desc, ToolEntityDescription)
         entity = ToolEntity(
             scene=self._scene,
             idx=idx,
@@ -61,6 +86,7 @@ class ToolSolver(TimeBasedMixin, Solver):
             morph=morph,
             surface=surface,
             name=name,
+            desc=desc,
         )
         self._entities.append(entity)
         return entity

@@ -1,17 +1,15 @@
 from pathlib import Path
 
 import numpy as np
-import quadrants as qd
 import torch
 
+import quadrants as qd
+
 import genesis as gs
+from genesis.engine.solver_data.tool import ToolEntityDescription
 from genesis.engine.states.cache import QueriedStates
 from genesis.engine.states.entities import ToolEntityState
-from genesis.utils.geom import (
-    qd_rotvec_to_quat,
-    qd_transform_quat_by_quat,
-    transform_pos_quat_by_trans_quat,
-)
+from genesis.utils.geom import qd_rotvec_to_quat, qd_transform_quat_by_quat
 from genesis.utils.misc import to_gs_tensor
 
 from ..base_entity import Entity
@@ -30,28 +28,21 @@ class ToolEntity(Entity):
         morph,
         surface,
         name: str | None = None,
+        *,
+        desc: ToolEntityDescription,
     ):
-        super().__init__(idx, scene, morph, solver, material, surface, name=name)
-
-        # The morph pose offset (e.g. an up-axis conversion) is composed onto the morph pose.
-        self._init_pos, self._init_quat = transform_pos_quat_by_trans_quat(
-            np.array(morph.offset_pos, dtype=gs.np_float),
-            np.array(morph.offset_quat, dtype=gs.np_float),
-            np.array(morph.pos, dtype=gs.np_float),
-            np.array(morph.quat, dtype=gs.np_float),
-        )
-
-        self.mesh = Mesh(
-            entity=self,
-            material=material,
-            morph=morph,
-        )
+        super().__init__(idx, scene, desc.morph, solver, desc.material, desc.surface, name=desc.name)
+        self._desc = desc
+        desc.name = self.name
+        self._init_pos, self._init_quat = desc.init_pos, desc.init_quat
+        self.mesh = Mesh(entity=self, desc=desc)
         self.init_tgt_vars()
         self.init_ckpt()
         self._queried_states = QueriedStates()
 
-        # for rendering purpose only
-        self.latest_pos = qd.Vector.field(3, dtype=gs.qd_float, shape=(1))
+    @property
+    def desc(self) -> ToolEntityDescription:
+        return self._desc
 
     # ------------------------------------------------------------------------------------
     # --------------------------------- naming methods -----------------------------------
@@ -315,14 +306,7 @@ class ToolEntity(Entity):
         self.set_frame(f, state.pos, state.quat, state.vel, state.ang)
 
     def build(self):
-        self.pos = qd.Vector.field(3, gs.qd_float, needs_grad=True)  # positon
-        self.quat = qd.Vector.field(4, gs.qd_float, needs_grad=True)  # quaternion wxyz
-        self.vel = qd.Vector.field(3, gs.qd_float, needs_grad=True)  # velocity
-        self.ang = qd.Vector.field(3, gs.qd_float, needs_grad=True)  # angular velocity
-
-        qd.root.dense(qd.ij, (self._sim.substeps_local + 1, self._sim._B)).place(
-            self.pos, self.pos.grad, self.quat, self.quat.grad, self.vel, self.vel.grad, self.ang, self.ang.grad
-        )
+        self.latest_pos = qd.Vector.field(n=3, dtype=gs.qd_float, shape=1)
         self.init_state = ToolEntityState(self, 0)
         self.set_init_state(self._init_pos, self._init_quat)
 

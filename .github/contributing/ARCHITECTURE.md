@@ -148,3 +148,8 @@ PBD cloth and elastic entities use `PBDMeshDescription` for remeshed vertices, e
 and tetrahedral rest volumes. Liquids and free particles use `ParticleEntityDescription`.
 `PBDDescription` allocates original-order and reordered particle buffers plus rest topology;
 `PBDGeomData` records each entity's particle, edge, bending-edge, and element ranges.
+
+Tool entities resolve normalized/scaled mesh vertices, normals, faces, and signed-distance samples into
+`ToolEntityDescription`. `ToolDescription` allocates per-entity `ToolGeomData` with pose history and mesh
+fields, and the solver and collision methods share those buffers. Entity constructors hold host descriptions;
+native allocation occurs during scene build.
