@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from functools import partial
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -402,6 +403,14 @@ class KinematicSolver(Solver):
             is_batch_dofs_info=self.rigid_config.batch_dofs_info,
             is_batch_joints_info=self.rigid_config.batch_joints_info,
         )
+
+    def bind_data_write(self, data, write):
+        if isinstance(data, JointsData) and data.owner is self:
+            if write == "qpos":
+                return partial(self.set_qpos, qs_idx=slice(data.q_start, data.q_end))
+            if write == "dofs_velocity":
+                return partial(self.set_dofs_velocity, dofs_idx=slice(data.dof_start, data.dof_end))
+        return super().bind_data_write(data, write)
 
     def bind(self):
         assert isinstance(self._solver_data, ArticulatedData)

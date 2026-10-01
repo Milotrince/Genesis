@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 import genesis as gs
@@ -107,6 +109,21 @@ def test_shared_binding(n_envs, tmp_path, show_viewer, tol):
             (2.0, 3.0, 4.0),
             tol=tol,
         )
+        binding = scene.sim._solver_data.bind(joints, write="qpos")
+        configuration = entity.get_qpos()
+        configuration[..., :3] = 5.0
+        binding.commit(configuration)
+        assert_allclose(entity.get_pos(), (5.0, 5.0, 5.0), tol=tol)
+        configuration[..., :3] = gs.tensor((2.0, 3.0, 4.0))
+        binding.commit(configuration)
+        with pytest.raises(gs.GenesisException, match="read-only"):
+            scene.sim._solver_data.bind(joints).commit(entity.get_qpos())
+        with pytest.raises(gs.GenesisException, match="does not support"):
+            scene.sim._solver_data.bind(joints, write="mass")
+        with pytest.raises(gs.GenesisException, match="different or destroyed"):
+            scene.sim._solver_data.bind(replace(joints))
+        with pytest.raises(gs.GenesisException, match="Unsupported coupling writes"):
+            scene.sim._solver_data.bind_coupling(entity.solver._solver_data, writes=("qpos",))
         qpos = entity.get_qpos()
         qpos.zero_()
         assert_allclose(entity.get_pos(), (2.0, 3.0, 4.0), tol=tol)

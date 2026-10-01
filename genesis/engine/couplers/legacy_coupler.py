@@ -6,6 +6,7 @@ import quadrants as qd
 
 import genesis as gs
 import genesis.utils.sdf as sdf
+from genesis.engine.solver_data import CouplingDataAccess
 from genesis.engine.solver_data.articulated import ArticulatedData
 from genesis.engine.solver_data.fem import FEMData
 from genesis.engine.solver_data.mpm import MPMData
@@ -40,6 +41,7 @@ class LegacyCoupler(RBC):
         self.tool_solver = self.sim.tool_solver
         self.rigid_solver = self.sim.rigid_solver
         self._rigid_data: ArticulatedData | None = None
+        self.data_access: tuple[CouplingDataAccess, ...] = ()
         self.mpm_solver = self.sim.mpm_solver
         self._mpm_data: MPMData | None = None
         self.sph_solver = self.sim.sph_solver
@@ -68,6 +70,27 @@ class LegacyCoupler(RBC):
         self._mpm_pbd = self.mpm_solver.is_active and self.pbd_solver.is_active and self.options.mpm_pbd
         self._fem_mpm = self.fem_solver.is_active and self.mpm_solver.is_active and self.options.fem_mpm
         self._fem_sph = self.fem_solver.is_active and self.sph_solver.is_active and self.options.fem_sph
+
+        access = []
+        if self._rigid_mpm or self._rigid_sph or self._rigid_pbd or self._rigid_fem:
+            access.append(
+                self.sim._solver_data.bind_coupling(
+                    self._rigid_data, writes=("state.links.cfrc_coupling_ang", "state.links.cfrc_coupling_vel")
+                )
+            )
+        if self._mpm_data is not None:
+            access.append(self.sim._solver_data.bind_coupling(self._mpm_data, writes=("grid.vel_out",)))
+        if self._fem_data is not None:
+            access.append(self.sim._solver_data.bind_coupling(self._fem_data, writes=("elements_v.vel",)))
+        if self._rigid_sph or self._mpm_sph or self._fem_sph:
+            access.append(self.sim._solver_data.bind_coupling(self._sph_data, writes=("particles_reordered.vel",)))
+        if self._rigid_pbd or self._mpm_pbd:
+            access.append(
+                self.sim._solver_data.bind_coupling(
+                    self._pbd_data, writes=("particles_reordered.pos", "particles_reordered.vel")
+                )
+            )
+        self.data_access = tuple(access)
 
         if (self._rigid_mpm or self._rigid_sph or self._rigid_pbd or self._rigid_fem) and any(
             geom.needs_coup for geom in self.rigid_solver.geoms

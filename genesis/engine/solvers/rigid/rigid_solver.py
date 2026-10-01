@@ -219,6 +219,7 @@ def _sanitize_sol_params(
 
 
 class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
+    coupling_fields = ("state.links.cfrc_coupling_ang", "state.links.cfrc_coupling_vel", "state.dofs.vel")
     material_cls = Rigid
     _entity_classes = ((Drone, DroneEntity), (Terrain, TerrainEntity), (Morph, RigidEntity))
     # override typing
@@ -1288,6 +1289,10 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
 
     def _init_constraint_solver(self):
         self.constraint_solver = ConstraintSolver(self)
+
+    def commit_coupling(self):
+        self._is_forward_vel_updated = False
+        super().commit_coupling()
 
     def update_forward_pos(self):
         """Run forward kinematics over links and geoms if they are not already up to date for the current pose.

@@ -10,6 +10,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 import genesis.utils.geom as gu
 import genesis.utils.urdf as uu
+from genesis.engine.solver_data import CouplingDataAccess
 from genesis.engine.solver_data.articulated import ArticulatedData
 from genesis.engine.solver_data.hybrid import HybridAssociationDescription, HybridData, HybridEntityDescription
 from genesis.engine.solver_data.mpm import MPMData
@@ -161,6 +162,7 @@ class HybridEntity(Entity):
         self._rigid_data: ArticulatedData | None = None
         self._soft_data: MPMData | None = None
         self._hybrid_data: HybridData | None = None
+        self.data_access: tuple[CouplingDataAccess, ...] = ()
 
         # set members
         self._material_rigid = material_rigid
@@ -358,6 +360,13 @@ class HybridEntity(Entity):
         self._rigid_data = self._sim._solver_data.get(ArticulatedData, self._solver_rigid)
         self._soft_data = self._sim._solver_data.get(MPMData, self._solver_soft)
         self._hybrid_data = self._sim._solver_data.get(HybridData, self._solver_soft, self.idx)
+        if self.desc.association is not None:
+            self.data_access = (
+                self._sim._solver_data.bind_coupling(
+                    self._rigid_data, writes=("state.links.cfrc_coupling_ang", "state.links.cfrc_coupling_vel")
+                ),
+                self._sim._solver_data.bind_coupling(self._soft_data, writes=("particles.vel",)),
+            )
 
     def build(self):
         association = self.desc.association

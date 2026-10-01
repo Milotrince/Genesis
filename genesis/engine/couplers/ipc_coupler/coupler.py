@@ -12,6 +12,7 @@ import genesis as gs
 import genesis.utils.geom as gu
 from genesis.engine.entities.rigid_entity.inertial import RHO_MUJOCO, RHO_OBJECT, RHO_ROBOT
 from genesis.engine.materials.FEM.cloth import Cloth
+from genesis.engine.solver_data import CouplingDataAccess
 from genesis.engine.solver_data.articulated import ArticulatedData
 from genesis.options.solvers import IPCCouplerOptions, RigidOptions
 from genesis.repr_base import RBC
@@ -122,6 +123,7 @@ class IPCCoupler(RBC):
         # Define some proxies for convenience
         self.rigid_solver: "RigidSolver" = self.sim.rigid_solver
         self._rigid_data: ArticulatedData | None = None
+        self.data_access: tuple[CouplingDataAccess, ...] = ()
         self.fem_solver: "FEMSolver" = self.sim.fem_solver
 
         # ==== IPC System Infrastructure ====

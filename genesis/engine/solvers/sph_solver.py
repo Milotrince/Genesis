@@ -17,6 +17,7 @@ from .base_solver import GravityMixin, Solver, TimeBasedMixin
 
 @qd.data_oriented
 class SPHSolver(GravityMixin, TimeBasedMixin, Solver):
+    coupling_fields = ("particles_reordered.vel",)
     material_cls = SPH.Base
     # ------------------------------------------------------------------------------------
     # --------------------------------- Initialization -----------------------------------
