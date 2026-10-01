@@ -273,6 +273,10 @@ def func_box_box_contact(
             penetration = c2
             code = i + 3 * (pos12[i] < 0) + 6
     clnorm = qd.Vector([0.0, 0.0, 0.0], dt=gs.qd_float)
+    # A rotation about a face normal makes an edge-edge axis coincide with it, and the edge-edge manifold built for that
+    # face-face tie places contacts far outside the boxes. The edge axis must win by more than the rounding error,
+    # which scales with the box sizes (a relative margin vanishes in single precision).
+    tol_edge = 4.0 * EPS * (size1.sum() + size2.sum())
     for i, j in qd.static(qd.ndrange(3, 3)):
         rj0 = rott[j, 0]
         rj1 = rott[j, 1]
@@ -309,7 +313,7 @@ def func_box_box_contact(
             if c3 < -margin:
                 is_return = True
 
-            if c3 < penetration * (1.0 - 1e-12):
+            if c3 < penetration - tol_edge:
                 penetration = c3
                 cle1 = 0
                 for k in qd.static(range(3)):
