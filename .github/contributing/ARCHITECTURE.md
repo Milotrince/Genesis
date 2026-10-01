@@ -160,3 +160,9 @@ getters return copied tensors in x/y/z order. Jet configuration is fixed at buil
 remain runtime configuration, and exporting a scene containing them raises. SF remains unbatched.
 Scene-state snapshots include its velocity, pressure, concentration, and time; scene reset restores these
 for active solvers even when they have no entities. Serialized checkpoints remain unsupported for SF.
+
+Hybrid entities serialize their rigid/soft entity references and resolved particle associations in
+`HybridEntityDescription`. The MPM description allocates association buffers as `HybridData`. The
+simulator applies each association after its soft solver completes the post-coupling phase, in entity
+order. Authoring callbacks are consumed when resolving descriptions; loaded scenes use those resolved
+results. Hybrid composition currently supports rigid links and MPM particles.
