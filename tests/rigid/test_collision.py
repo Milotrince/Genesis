@@ -424,8 +424,7 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
 @pytest.mark.parametrize("precision", ["32"])
 @pytest.mark.parametrize("box_box_detection", [False, True])
 def test_box_stacks_stability(box_box_detection, show_viewer, tol):
-    # Piles of boxes stacked flat at random yaws on a fixed base, at several scales, either exactly level or tilted by
-    # a tiny roll and pitch.
+    # Piles of boxes stacked flat at random yaws on fixed bases, at several scales, level or slightly tilted.
     N_ENVS = 16
     N_STEPS = 60
     GRAVITY = 9.81
