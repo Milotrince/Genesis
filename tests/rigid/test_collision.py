@@ -423,8 +423,9 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["32"])
 def test_box_stacks_stability(show_viewer, tol):
-    # Piles of boxes of random shapes, each resting on a random face at a random yaw and offset on the box below, on
-    # fixed bases at several scales, restacked in a new order and pose after every reset.
+    # FIXME: Add parameterization over box_box_detection. Currently unstable when False.
+    # Piles of boxes of random shapes, each lying on a random face at a random yaw near the axis of its pile, on fixed
+    # bases at several scales, restacked in a new order and pose after every reset.
     N_ENVS = 16
     N_PHASES = 3
     N_STEPS = 50
@@ -454,7 +455,6 @@ def test_box_stacks_stability(show_viewer, tol):
             gravity=(0.0, 0.0, -GRAVITY),
         ),
         rigid_options=gs.options.RigidOptions(
-            # FIXME: With box-box detection off, boxes resting on a random face with an overhang get kicked.
             box_box_detection=True,
             use_hibernation=False,
         ),
@@ -490,47 +490,37 @@ def test_box_stacks_stability(show_viewer, tol):
         aabbs = np.stack([tensor_to_array(box.get_AABB()) for box in boxes])
         piles_boxes_size.append(aabbs[..., 1, :] - aabbs[..., 0, :])
 
-    envs_idx = np.arange(N_ENVS)
-    envs_tilt = TILT * (envs_idx % 2)
+    envs_tilt = TILT * (np.arange(N_ENVS) % 2)
     for i_phase in range(N_PHASES):
         if i_phase > 0:
             scene.reset()
         for (scale, pile_pos, boxes), boxes_size in zip(piles, piles_boxes_size):
             n_boxes = len(boxes)
-            # Each box rests on a random face leaving it no taller than the short side of its footprint
+            # Each box lies on a random face leaving it no taller than the short side of its footprint, at a random level
+            # of the pile, with its center close enough to the pile axis that every part of the pile is supported.
             is_up_axis = np.arange(3) == FACES_UP_AXIS[:, None]
             faces_height = np.where(is_up_axis, boxes_size[..., None, :], 0.0).sum(axis=-1)
             faces_width = np.where(is_up_axis, np.inf, boxes_size[..., None, :]).min(axis=-1)
-            is_face_allowed = faces_height <= faces_width
-            faces = np.argmax(np.where(is_face_allowed, np.random.rand(*is_face_allowed.shape), -1.0), axis=-1)
+            faces = np.argmax(np.where(faces_height <= faces_width, np.random.rand(*faces_height.shape), -1.0), axis=-1)
+            boxes_height = np.take_along_axis(faces_height, faces[..., None], axis=-1)[..., 0]
+            boxes_width = np.take_along_axis(faces_width, faces[..., None], axis=-1)[..., 0]
+            levels = np.argsort(np.random.rand(n_boxes, N_ENVS), axis=0)
+            boxes_top = np.empty_like(boxes_height)
+            np.put_along_axis(boxes_top, levels, np.cumsum(np.take_along_axis(boxes_height, levels, axis=0), axis=0), 0)
+            boxes_pos = np.empty((n_boxes, N_ENVS, 3))
+            boxes_offset = np.random.uniform(low=-1.0, high=1.0, size=(n_boxes, N_ENVS, 2))
+            boxes_pos[..., :2] = pile_pos[:2] + 0.08 * boxes_width.min(axis=0)[:, None] * boxes_offset
+            boxes_pos[..., 2] = pile_pos[2] + boxes_top - 0.5 * boxes_height
             angles_rp = np.random.uniform(low=-1.0, high=1.0, size=(n_boxes, N_ENVS, 2)) * envs_tilt[:, None]
             angle_yaw = np.random.uniform(low=-np.pi, high=np.pi, size=(n_boxes, N_ENVS, 1))
             quat_face = gu.xyz_to_quat(FACES_RPY[faces], rpy=True)
-            quat_tilt = gu.xyz_to_quat(np.concatenate([angles_rp, np.zeros_like(angle_yaw)], axis=-1), rpy=True)
-            quat_yaw = gu.xyz_to_quat(np.concatenate([np.zeros_like(angles_rp), angle_yaw], axis=-1), rpy=True)
-            boxes_quat = gu.transform_quat_by_quat(gu.transform_quat_by_quat(quat_face, quat_tilt), quat_yaw)
-
-            # Every box center stays within a quarter of the smallest footprint inradius of the pile axis, so the center
-            # of mass of any part of the pile rests inside the face supporting it, while larger boxes overhang smaller.
-            boxes_half_height = 0.5 * np.take_along_axis(faces_height, faces[..., None], axis=-1)[..., 0]
-            boxes_inradius = 0.5 * np.take_along_axis(faces_width, faces[..., None], axis=-1)[..., 0]
-            pile_offset_radius = 0.25 * np.minimum(boxes_inradius.min(axis=0), 0.5 * scale * BASE_SIZE[:2].min())
-            boxes_pos = np.empty((n_boxes, N_ENVS, 3))
-            support_z = np.full(N_ENVS, pile_pos[2])
-            for i_b in np.argsort(np.random.rand(N_ENVS, n_boxes), axis=1).T:
-                offset_angle = np.random.uniform(low=-np.pi, high=np.pi, size=N_ENVS)
-                offset_radius = pile_offset_radius * np.sqrt(np.random.rand(N_ENVS))
-                offset = offset_radius[:, None] * np.stack([np.cos(offset_angle), np.sin(offset_angle)], axis=-1)
-                half_height = boxes_half_height[i_b, envs_idx]
-                boxes_pos[i_b, envs_idx, :2] = pile_pos[:2] + offset
-                boxes_pos[i_b, envs_idx, 2] = support_z + half_height
-                support_z = support_z + 2.0 * half_height
+            quat_pose = gu.xyz_to_quat(np.concatenate([angles_rp, angle_yaw], axis=-1), rpy=True)
+            boxes_quat = gu.transform_quat_by_quat(quat_face, quat_pose)
             for box, pos, quat in zip(boxes, boxes_pos, boxes_quat):
                 box.set_pos(pos)
                 box.set_quat(quat)
 
-        # Gravity and contacts alone act on the boxes, so the mechanical energy of a pile can only decrease. A kicked
-        # box gains energy of the order of its weight times its size.
+        # Gravity and contacts alone act on the boxes, so the mechanical energy of a pile can only decrease.
         piles_links_idx = [range(boxes[0].link_start, boxes[-1].link_end) for scale, pile_pos, boxes in piles]
         piles_dofs_idx = [range(boxes[0].dof_start, boxes[-1].dof_end) for scale, pile_pos, boxes in piles]
         piles_energy_unit = [sum(box.get_mass() for box in boxes) * GRAVITY * scale for scale, pile_pos, boxes in piles]
