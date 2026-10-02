@@ -483,23 +483,21 @@ def test_box_stacks_stability(box_box_detection, show_viewer, tol):
 
     # Gravity and contacts alone act on the boxes, so the mechanical energy of a pile can only decrease. A kicked box
     # gains energy of the order of its weight times its size.
+    piles_links_idx = [range(boxes[0].link_start, boxes[-1].link_end) for scale, tilt, boxes in piles]
+    piles_dofs_idx = [range(boxes[0].dof_start, boxes[-1].dof_end) for scale, tilt, boxes in piles]
+    piles_energy_unit = [sum(box.get_mass() for box in boxes) * GRAVITY * scale for scale, tilt, boxes in piles]
     piles_energy_0 = []
     for i_step in range(N_STEPS + 1):
         if i_step > 0:
             scene.step()
-        for i_p, (scale, tilt, boxes) in enumerate(piles):
-            energy = 0.0
-            for box in boxes:
-                vel = box.get_dofs_velocity()
-                energy += 0.5 * torch.einsum("bi,bij,bj->b", vel, box.get_mass_mat(), vel)
-                energy += box.get_mass() * GRAVITY * box.get_pos()[..., 2]
+        for i_p, (links_idx, dofs_idx) in enumerate(zip(piles_links_idx, piles_dofs_idx)):
+            energy = scene.rigid_solver.get_kinetic_energy(links_idx, dofs_idx)
+            energy += scene.rigid_solver.get_potential_energy(links_idx, dofs_idx)
             if i_step == 0:
                 piles_energy_0.append(energy)
-            energy_unit = sum(box.get_mass() for box in boxes) * GRAVITY * scale
-            assert ((energy - piles_energy_0[i_p]) / energy_unit <= tol).all()
+            assert ((energy - piles_energy_0[i_p]) / piles_energy_unit[i_p] <= tol).all()
 
-    # FIXME: SIM-470, SIM-471 - resting boxes keep moving (spinning with box-box detection off, residual motion in single
-    # precision with it on), so the piles cannot be asserted to come to rest yet.
+    # FIXME: Boxes are jittery.
     # for scale, tilt, boxes in piles:
     #     for box in boxes:
     #         assert_allclose(box.get_dofs_velocity(), 0.0, tol=tol)
