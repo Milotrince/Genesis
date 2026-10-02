@@ -422,9 +422,11 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["32"])
-def test_box_box_face_contact_under_yaw(show_viewer):
+def test_box_box_face_contact_under_yaw(show_viewer, tol):
     N_ENVS = 16
     N_STEPS = 50
+    TABLE_SIZE = (1.4, 0.8, 0.76)
+    BOX_SIZE = (0.314, 0.19, 0.005)
 
     # Thin boxes resting flat on a larger one at random yaws. One edge-edge separating axis then coincides with the face
     # normal, and in single precision it ties with the face axis to within rounding.
@@ -436,23 +438,23 @@ def test_box_box_face_contact_under_yaw(show_viewer):
             box_box_detection=True,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.0, -0.9, 2.1),
-            camera_lookat=(0.0, 0.0, 0.76),
+            camera_pos=(0.0, -1.0, 2.0),
+            camera_lookat=(0.0, 0.0, TABLE_SIZE[2]),
         ),
         show_viewer=show_viewer,
     )
     scene.add_entity(
         gs.morphs.Box(
-            pos=(0.0, 0.0, 0.38),
-            size=(1.4, 0.8, 0.76),
+            pos=(0.0, 0.0, 0.5 * TABLE_SIZE[2]),
+            size=TABLE_SIZE,
             fixed=True,
         ),
     )
     boxes = [
         scene.add_entity(
             gs.morphs.Box(
-                pos=(x, y, 0.76248),
-                size=(0.314, 0.19, 0.005),
+                pos=(x, y, TABLE_SIZE[2] + 0.5 * BOX_SIZE[2]),
+                size=BOX_SIZE,
             ),
             surface=gs.surfaces.Default(
                 color=(1.0, 0.0, 0.0),
@@ -470,12 +472,12 @@ def test_box_box_face_contact_under_yaw(show_viewer):
     for _ in range(N_STEPS):
         scene.step()
 
-    # Every box rests where it was put, only sinking into the table top by the resting penetration of the contact.
+    # Every box rests where it was put, neither lifting off the table top nor sinking past half its thickness.
     for box, pos, quat in zip(boxes, boxes_pos, boxes_quat):
-        assert_allclose(box.get_dofs_velocity(), 0.0, atol=1e-3)
-        assert_allclose(box.get_pos()[..., :2], pos[..., :2], atol=1e-5)
-        assert_allclose(box.get_pos()[..., 2], 0.7625, atol=1e-3)
-        assert_allclose(box.get_quat(), quat, atol=1e-5)
+        assert_allclose(box.get_dofs_velocity(), 0.0, tol=tol)
+        assert_allclose(box.get_pos()[..., :2], pos[..., :2], tol=tol)
+        assert_allclose(box.get_quat(), quat, tol=tol)
+        assert ((TABLE_SIZE[2] < box.get_pos()[..., 2]) & (box.get_pos()[..., 2] <= pos[..., 2])).all()
 
 
 @pytest.mark.required
