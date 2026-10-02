@@ -427,7 +427,7 @@ def test_box_stacks_stability(box_box_detection, show_viewer, tol):
     N_ENVS = 16
     N_STEPS = 60
     GRAVITY = 9.81
-    SCALES = (0.1, 0.4, 2.0)
+    SCALES = (0.05, 0.4, 2.0)
     TILTS = (0.0, 1e-3)
     BASE_SIZE = np.array((2.0, 2.0, 1.0))
     BOXES_SIZE = np.array(((1.0, 0.6, 0.02), (0.8, 0.5, 0.1), (0.4, 0.4, 0.3)))
@@ -498,6 +498,12 @@ def test_box_stacks_stability(box_box_detection, show_viewer, tol):
                 piles_energy_0.append(energy)
             energy_unit = sum(box.get_mass() for box in boxes) * GRAVITY * scale
             assert ((energy - piles_energy_0[i_p]) / energy_unit <= tol).all()
+
+    # FIXME: SIM-470, SIM-471 - resting boxes keep moving (spinning with box-box detection off, residual motion in single
+    # precision with it on), so the piles cannot be asserted to come to rest yet.
+    # for scale, tilt, boxes in piles:
+    #     for box in boxes:
+    #         assert_allclose(box.get_dofs_velocity(), 0.0, tol=tol)
 
 
 @pytest.mark.required
