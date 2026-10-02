@@ -422,62 +422,80 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["32"])
-def test_box_box_face_contact_under_yaw(show_viewer, tol):
+def test_box_box_stacks_at_rest(show_viewer, tol):
     N_ENVS = 16
-    N_STEPS = 50
-    TABLE_SIZE = (1.4, 0.8, 0.76)
-    BOX_SIZE = (0.314, 0.19, 0.005)
+    N_STEPS = 60
+    GRAVITY = 9.81
+    SCALES = (0.1, 0.4, 2.0)
+    TILTS = (0.0, 1e-3)
+    BASE_SIZE = np.array((2.0, 2.0, 1.0))
+    BOXES_SIZE = np.array(((1.0, 0.6, 0.02), (0.8, 0.5, 0.1), (0.4, 0.4, 0.3)))
+    PILE_SPACING = 3.0 * BASE_SIZE[0] * max(SCALES)
 
-    # Thin boxes resting flat on a larger one at random yaws. One edge-edge separating axis then coincides with the face
-    # normal, and in single precision it ties with the face axis to within rounding.
+    # Piles of boxes stacked flat at random yaws on a fixed base, at several scales, either exactly level or tilted by
+    # a tiny roll and pitch. Two boxes differing by a yaw alone make an edge-edge separating axis coincide with the face
+    # normal, which single precision must resolve without ever kicking a box.
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
+            gravity=(0.0, 0.0, -GRAVITY),
         ),
         rigid_options=gs.options.RigidOptions(
             box_box_detection=True,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.0, -1.0, 2.0),
-            camera_lookat=(0.0, 0.0, TABLE_SIZE[2]),
+            camera_pos=(-12.5, 26.8, 17.0),
+            camera_lookat=(1.5, 2.4, -3.4),
         ),
         show_viewer=show_viewer,
     )
-    scene.add_entity(
-        gs.morphs.Box(
-            pos=(0.0, 0.0, 0.5 * TABLE_SIZE[2]),
-            size=TABLE_SIZE,
-            fixed=True,
-        ),
-    )
-    boxes = [
+    piles = []
+    for (i_s, scale), (i_t, tilt) in product(enumerate(SCALES), enumerate(TILTS)):
+        x, y = PILE_SPACING * (i_t - 0.5), PILE_SPACING * (i_s - 1)
         scene.add_entity(
             gs.morphs.Box(
-                pos=(x, y, TABLE_SIZE[2] + 0.5 * BOX_SIZE[2]),
-                size=BOX_SIZE,
-            ),
-            surface=gs.surfaces.Default(
-                color=(1.0, 0.0, 0.0),
+                pos=(x, y, 0.5 * scale * BASE_SIZE[2]),
+                size=scale * BASE_SIZE,
+                fixed=True,
             ),
         )
-        for x, y in product((-0.3, 0.3), (-0.2, 0.2))
-    ]
+        boxes = []
+        z = scale * BASE_SIZE[2]
+        for box_size in scale * BOXES_SIZE:
+            boxes.append(
+                scene.add_entity(
+                    gs.morphs.Box(
+                        pos=(x, y, z + 0.5 * box_size[2]),
+                        size=box_size,
+                    ),
+                )
+            )
+            z += box_size[2]
+        piles.append((scale, tilt, boxes))
     scene.build(n_envs=N_ENVS)
 
-    for box in boxes:
-        angle_yaw = np.random.uniform(low=-np.pi, high=np.pi, size=(N_ENVS, 1))
-        box.set_quat(gu.xyz_to_quat(np.concatenate([np.zeros((N_ENVS, 2)), angle_yaw], axis=-1), rpy=True))
-    boxes_pos = [box.get_pos() for box in boxes]
-    boxes_quat = [box.get_quat() for box in boxes]
-    for _ in range(N_STEPS):
-        scene.step()
+    for scale, tilt, boxes in piles:
+        for box in boxes:
+            angles_rp = np.random.uniform(low=-tilt, high=tilt, size=(N_ENVS, 2))
+            angle_yaw = np.random.uniform(low=-np.pi, high=np.pi, size=(N_ENVS, 1))
+            box.set_quat(gu.xyz_to_quat(np.concatenate([angles_rp, angle_yaw], axis=-1), rpy=True))
 
-    # Every box rests where it was put, neither lifting off the table top nor sinking past half its thickness.
-    for box, pos, quat in zip(boxes, boxes_pos, boxes_quat):
-        assert_allclose(box.get_dofs_velocity(), 0.0, tol=tol)
-        assert_allclose(box.get_pos()[..., :2], pos[..., :2], tol=tol)
-        assert_allclose(box.get_quat(), quat, tol=tol)
-        assert ((TABLE_SIZE[2] < box.get_pos()[..., 2]) & (box.get_pos()[..., 2] <= pos[..., 2])).all()
+    # Gravity and contacts alone act on the boxes, so the mechanical energy of a pile can only decrease. A kicked box
+    # gains energy of the order of its weight times its size.
+    piles_energy_0 = []
+    for i_step in range(N_STEPS + 1):
+        if i_step > 0:
+            scene.step()
+        for i_p, (scale, tilt, boxes) in enumerate(piles):
+            energy = 0.0
+            for box in boxes:
+                vel = box.get_dofs_velocity()
+                energy += 0.5 * torch.einsum("bi,bij,bj->b", vel, box.get_mass_mat(), vel)
+                energy += box.get_mass() * GRAVITY * box.get_pos()[..., 2]
+            if i_step == 0:
+                piles_energy_0.append(energy)
+            energy_unit = sum(box.get_mass() for box in boxes) * GRAVITY * scale
+            assert ((energy - piles_energy_0[i_p]) / energy_unit <= tol).all()
 
 
 @pytest.mark.required
