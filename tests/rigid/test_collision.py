@@ -443,6 +443,7 @@ def test_box_stacks_stability(box_box_detection, show_viewer, tol):
         ),
         rigid_options=gs.options.RigidOptions(
             box_box_detection=box_box_detection,
+            use_hibernation=False,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(8.2, -11.9, 10.3),
