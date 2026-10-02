@@ -500,9 +500,12 @@ def func_box_box_contact(
                         )
                         n = n + 1
 
+            # A lone incident corner is the whole manifold, so it is kept as is. Otherwise the closest corner is clipped
+            # like the others, since it lies outside the reference face whenever the incident face overhangs it, and the
+            # edge crossings above already cover the clipped polygon.
             for i in range(1 << (m - 1)):
                 tmp1 = collider_state.box_pts[0 if i == 0 else i + 2, i_b]
-                if not (i and (tmp1[0] <= -lx or tmp1[0] >= lx or tmp1[1] <= -ly or tmp1[1] >= ly)):
+                if m == 1 or not (tmp1[0] <= -lx or tmp1[0] >= lx or tmp1[1] <= -ly or tmp1[1] >= ly):
                     collider_state.box_points[n, i_b] = tmp1
                     n = n + 1
             m = n
