@@ -543,8 +543,8 @@ def test_box_stacks_stability(show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["32"])
-@pytest.mark.parametrize("gjk_collision", [True, False])
-def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
+@pytest.mark.parametrize("gjk_collision, box_box_detection", [(True, False), (False, False), (False, True)])
+def test_convex_collision_across_geom_scales(gjk_collision, box_box_detection, show_viewer, tol):
     YAW = 1.1
     BOX_SIZE = 16.0
     GEOM_SIZE = 0.016
@@ -561,6 +561,7 @@ def test_convex_collision_across_geom_scales(gjk_collision, show_viewer, tol):
     scene = gs.Scene(
         rigid_options=gs.options.RigidOptions(
             use_gjk_collision=gjk_collision,
+            box_box_detection=box_box_detection,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(6.6, 5.74, 8.85),
