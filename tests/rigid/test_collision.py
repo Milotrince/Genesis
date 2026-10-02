@@ -422,7 +422,8 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["32"])
-def test_box_box_stacks_at_rest(show_viewer, tol):
+@pytest.mark.parametrize("box_box_detection", [False, True])
+def test_box_stacks_stability(box_box_detection, show_viewer, tol):
     N_ENVS = 16
     N_STEPS = 60
     GRAVITY = 9.81
@@ -433,15 +434,15 @@ def test_box_box_stacks_at_rest(show_viewer, tol):
     PILE_SPACING = 1.5 * BASE_SIZE[0] * max(SCALES)
 
     # Piles of boxes stacked flat at random yaws on a fixed base, at several scales, either exactly level or tilted by
-    # a tiny roll and pitch. Two boxes differing by a yaw alone make an edge-edge separating axis coincide with the face
-    # normal, which single precision must resolve without ever kicking a box.
+    # a tiny roll and pitch. For box-box detection, two boxes differing by a yaw alone make an edge-edge separating axis
+    # coincide with the face normal, which single precision must resolve without ever kicking a box.
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
             gravity=(0.0, 0.0, -GRAVITY),
         ),
         rigid_options=gs.options.RigidOptions(
-            box_box_detection=True,
+            box_box_detection=box_box_detection,
         ),
         viewer_options=gs.options.ViewerOptions(
             camera_pos=(8.2, -11.9, 10.3),
