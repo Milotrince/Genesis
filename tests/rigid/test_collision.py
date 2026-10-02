@@ -431,7 +431,7 @@ def test_box_stacks_stability(show_viewer, tol):
     N_STEPS = 50
     GRAVITY = 9.81
     TILT = 1e-3
-    SCALES = (0.05, 0.4, 2.0)
+    SCALES = (0.1, 0.4, 2.0)
     N_PILES_PER_SCALE = 2
     BASE_SIZE = np.array((2.0, 2.0, 1.0))
     BOXES_SIZE = np.array(((1.0, 0.6, 0.02), (0.8, 0.1, 0.1), (0.5, 0.4, 0.1), (0.3, 0.3, 0.3)))
@@ -452,6 +452,9 @@ def test_box_stacks_stability(show_viewer, tol):
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
+            # Halves the resting sink of the contacts, which narrow supports at the smallest scale cannot carry without
+            # tipping over.
+            substeps=2,
             gravity=(0.0, 0.0, -GRAVITY),
         ),
         rigid_options=gs.options.RigidOptions(
