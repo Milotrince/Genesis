@@ -430,7 +430,7 @@ def test_box_box_stacks_at_rest(show_viewer, tol):
     TILTS = (0.0, 1e-3)
     BASE_SIZE = np.array((2.0, 2.0, 1.0))
     BOXES_SIZE = np.array(((1.0, 0.6, 0.02), (0.8, 0.5, 0.1), (0.4, 0.4, 0.3)))
-    PILE_SPACING = 3.0 * BASE_SIZE[0] * max(SCALES)
+    PILE_SPACING = 1.5 * BASE_SIZE[0] * max(SCALES)
 
     # Piles of boxes stacked flat at random yaws on a fixed base, at several scales, either exactly level or tilted by
     # a tiny roll and pitch. Two boxes differing by a yaw alone make an edge-edge separating axis coincide with the face
@@ -444,8 +444,8 @@ def test_box_box_stacks_at_rest(show_viewer, tol):
             box_box_detection=True,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(-12.5, 26.8, 17.0),
-            camera_lookat=(1.5, 2.4, -3.4),
+            camera_pos=(8.2, -11.9, 10.3),
+            camera_lookat=(-0.6, 0.8, -1.2),
         ),
         show_viewer=show_viewer,
     )
