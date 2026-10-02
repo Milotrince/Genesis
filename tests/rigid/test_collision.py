@@ -636,6 +636,7 @@ def test_convex_collision_across_geom_scales(gjk_collision, box_box_detection, s
     is_pressed = contacts["geom_b"] == geom_pressed.geoms[0].idx
     assert is_pressed.any()
     assert_allclose(contacts["penetration"][is_pressed], PRESSED_DEPTH, tol=tol)
+    assert ((contacts["position"][is_pressed] - geom_pressed.get_pos()).norm(dim=-1) <= GEOM_SIZE).all()
     assert (contacts["penetration"][is_box & ~is_pressed] >= 0.0).all()
     assert (contacts["penetration"][is_box & ~is_pressed] <= GEOM_SIZE).all()
     is_lamp = contacts["geom_b"] == lamp.geoms[0].idx
