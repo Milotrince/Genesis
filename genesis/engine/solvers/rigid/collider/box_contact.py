@@ -525,7 +525,7 @@ def func_box_box_contact(
             n_start = collider_state.n_contacts[i_b]
             for i in range(n):
                 if n_added < qd.static(collider_static_config.n_contacts_per_nonconvex_pair):
-                    dist = collider_state.box_points[i, i_b][2]
+                    dist = collider_state.box_depth[i, i_b]
                     collider_state.box_points[i, i_b][2] = collider_state.box_points[i, i_b][2] + hz
                     contact_pos = p + r @ collider_state.box_points[i, i_b]
 
