@@ -459,8 +459,8 @@ def test_box_stacks_stability(show_viewer, tol):
             use_hibernation=False,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(10.7, -2.5, 20.0),
-            camera_lookat=(-1.5, 1.9, 0.0),
+            camera_pos=(15.5, -5.7, 11.1),
+            camera_lookat=(0.1, 1.3, 0.6),
         ),
         show_viewer=show_viewer,
     )
@@ -497,7 +497,12 @@ def test_box_stacks_stability(show_viewer, tol):
             scene.reset()
         for (scale, pile_pos, boxes), boxes_size in zip(piles, piles_boxes_size):
             n_boxes = len(boxes)
-            faces = np.random.randint(len(FACES_RPY), size=(n_boxes, N_ENVS))
+            # Each box rests on a random face leaving it no taller than the short side of its footprint
+            is_up_axis = np.arange(3) == FACES_UP_AXIS[:, None]
+            faces_height = np.where(is_up_axis, boxes_size[..., None, :], 0.0).sum(axis=-1)
+            faces_width = np.where(is_up_axis, np.inf, boxes_size[..., None, :]).min(axis=-1)
+            is_face_allowed = faces_height <= faces_width
+            faces = np.argmax(np.where(is_face_allowed, np.random.rand(*is_face_allowed.shape), -1.0), axis=-1)
             angles_rp = np.random.uniform(low=-1.0, high=1.0, size=(n_boxes, N_ENVS, 2)) * envs_tilt[:, None]
             angle_yaw = np.random.uniform(low=-np.pi, high=np.pi, size=(n_boxes, N_ENVS, 1))
             quat_face = gu.xyz_to_quat(FACES_RPY[faces], rpy=True)
@@ -505,25 +510,21 @@ def test_box_stacks_stability(show_viewer, tol):
             quat_yaw = gu.xyz_to_quat(np.concatenate([np.zeros_like(angles_rp), angle_yaw], axis=-1), rpy=True)
             boxes_quat = gu.transform_quat_by_quat(gu.transform_quat_by_quat(quat_face, quat_tilt), quat_yaw)
 
-            # Each box rests on the one below with its center within half the inscribed radius of that box's top face,
-            # so every pile is stable while a larger box overhangs a smaller one.
-            is_up_axis = np.arange(3) == FACES_UP_AXIS[faces][..., None]
-            boxes_half_height = 0.5 * np.where(is_up_axis, boxes_size, 0.0).sum(axis=-1)
-            boxes_inradius = 0.5 * np.where(is_up_axis, np.inf, boxes_size).min(axis=-1)
+            # Every box center stays within a quarter of the smallest footprint inradius of the pile axis, so the center
+            # of mass of any part of the pile rests inside the face supporting it, while larger boxes overhang smaller.
+            boxes_half_height = 0.5 * np.take_along_axis(faces_height, faces[..., None], axis=-1)[..., 0]
+            boxes_inradius = 0.5 * np.take_along_axis(faces_width, faces[..., None], axis=-1)[..., 0]
+            pile_offset_radius = 0.25 * np.minimum(boxes_inradius.min(axis=0), 0.5 * scale * BASE_SIZE[:2].min())
             boxes_pos = np.empty((n_boxes, N_ENVS, 3))
-            support_xy = np.tile(pile_pos[:2], (N_ENVS, 1))
             support_z = np.full(N_ENVS, pile_pos[2])
-            support_inradius = np.full(N_ENVS, 0.5 * scale * BASE_SIZE[:2].min())
             for i_b in np.argsort(np.random.rand(N_ENVS, n_boxes), axis=1).T:
                 offset_angle = np.random.uniform(low=-np.pi, high=np.pi, size=N_ENVS)
-                offset_radius = 0.5 * support_inradius * np.sqrt(np.random.rand(N_ENVS))
+                offset_radius = pile_offset_radius * np.sqrt(np.random.rand(N_ENVS))
                 offset = offset_radius[:, None] * np.stack([np.cos(offset_angle), np.sin(offset_angle)], axis=-1)
                 half_height = boxes_half_height[i_b, envs_idx]
-                boxes_pos[i_b, envs_idx, :2] = support_xy + offset
+                boxes_pos[i_b, envs_idx, :2] = pile_pos[:2] + offset
                 boxes_pos[i_b, envs_idx, 2] = support_z + half_height
-                support_xy = boxes_pos[i_b, envs_idx, :2]
                 support_z = support_z + 2.0 * half_height
-                support_inradius = boxes_inradius[i_b, envs_idx]
             for box, pos, quat in zip(boxes, boxes_pos, boxes_quat):
                 box.set_pos(pos)
                 box.set_quat(quat)
