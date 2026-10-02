@@ -436,7 +436,7 @@ def test_box_box_face_contact_under_yaw(show_viewer):
             box_box_detection=True,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(0.0, -1.8, 2.0),
+            camera_pos=(0.0, -0.9, 2.1),
             camera_lookat=(0.0, 0.0, 0.76),
         ),
         show_viewer=show_viewer,
@@ -454,6 +454,9 @@ def test_box_box_face_contact_under_yaw(show_viewer):
                 pos=(x, y, 0.76248),
                 size=(0.314, 0.19, 0.005),
             ),
+            surface=gs.surfaces.Default(
+                color=(1.0, 0.0, 0.0),
+            ),
         )
         for x, y in product((-0.3, 0.3), (-0.2, 0.2))
     ]
@@ -462,10 +465,17 @@ def test_box_box_face_contact_under_yaw(show_viewer):
     for box in boxes:
         angle_yaw = np.random.uniform(low=-np.pi, high=np.pi, size=(N_ENVS, 1))
         box.set_quat(gu.xyz_to_quat(np.concatenate([np.zeros((N_ENVS, 2)), angle_yaw], axis=-1), rpy=True))
+    boxes_pos = [box.get_pos() for box in boxes]
+    boxes_quat = [box.get_quat() for box in boxes]
     for _ in range(N_STEPS):
         scene.step()
-        for box in boxes:
-            assert_allclose(box.get_dofs_velocity(), 0.0, atol=1e-2)
+
+    # Every box rests where it was put, only sinking into the table top by the resting penetration of the contact.
+    for box, pos, quat in zip(boxes, boxes_pos, boxes_quat):
+        assert_allclose(box.get_dofs_velocity(), 0.0, atol=1e-3)
+        assert_allclose(box.get_pos()[..., :2], pos[..., :2], atol=1e-5)
+        assert_allclose(box.get_pos()[..., 2], 0.7625, atol=1e-3)
+        assert_allclose(box.get_quat(), quat, atol=1e-5)
 
 
 @pytest.mark.required
