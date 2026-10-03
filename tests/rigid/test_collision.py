@@ -422,8 +422,8 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
 
 @pytest.mark.required
 @pytest.mark.parametrize("precision", ["32"])
-def test_box_stacks_stability(show_viewer, tol):
-    # FIXME: Add parameterization over box_box_detection. Currently unstable when False.
+@pytest.mark.parametrize("box_box_detection", [False, True])
+def test_box_stacks_stability(box_box_detection, show_viewer, tol):
     # Piles of boxes of random shapes, each lying on a random face at a random yaw near the axis of its pile, on fixed
     # bases at several scales, restacked in a new order and pose after every reset.
     N_ENVS = 16
@@ -434,7 +434,7 @@ def test_box_stacks_stability(show_viewer, tol):
     SCALES = (0.1, 0.4, 2.0)
     N_PILES_PER_SCALE = 2
     BASE_SIZE = np.array((2.0, 2.0, 1.0))
-    BOXES_SIZE = np.array(((1.0, 0.6, 0.02), (0.8, 0.1, 0.1), (0.5, 0.4, 0.1), (0.3, 0.3, 0.3)))
+    BOXES_SIZE = np.array(((1.0, 0.6, 0.02), (0.8, 0.2, 0.1), (0.5, 0.4, 0.1), (0.3, 0.3, 0.3)))
     PILE_SPACING = 1.5 * BASE_SIZE[0] * max(SCALES)
     # Orientations resting a box on each of its six faces, with the index of the body axis left vertical
     FACES_RPY = np.array(
@@ -458,7 +458,7 @@ def test_box_stacks_stability(show_viewer, tol):
             gravity=(0.0, 0.0, -GRAVITY),
         ),
         rigid_options=gs.options.RigidOptions(
-            box_box_detection=True,
+            box_box_detection=box_box_detection,
             use_hibernation=False,
         ),
         viewer_options=gs.options.ViewerOptions(
@@ -477,12 +477,19 @@ def test_box_stacks_stability(show_viewer, tol):
                 fixed=True,
             ),
         )
-        # Every box takes each shape in some environments, in an order shuffled per box
+        # Every box takes each shape in some environments, in an order shuffled per box.
+        # The boxes are built apart, as the contacts of boxes overlapping at build time overflow the contact budget.
         boxes = [
             scene.add_entity(
-                morph=[gs.morphs.Box(size=scale * box_size) for box_size in np.random.permutation(BOXES_SIZE)],
+                morph=[
+                    gs.morphs.Box(
+                        pos=(pile_pos[0], pile_pos[1], pile_pos[2] + (i_b + 1) * scale),
+                        size=scale * box_size,
+                    )
+                    for box_size in np.random.permutation(BOXES_SIZE)
+                ],
             )
-            for _ in BOXES_SIZE
+            for i_b in range(len(BOXES_SIZE))
         ]
         piles.append((scale, pile_pos, boxes))
     scene.build(n_envs=N_ENVS)
@@ -499,8 +506,7 @@ def test_box_stacks_stability(show_viewer, tol):
             scene.reset()
         for (scale, pile_pos, boxes), boxes_size in zip(piles, piles_boxes_size):
             n_boxes = len(boxes)
-            # Each box lies on a random face leaving it no taller than the short side of its footprint, at a random level
-            # of the pile, with its center close enough to the pile axis that every part of the pile is supported.
+            # Create stable box stacks which should not tip over.
             is_up_axis = np.arange(3) == FACES_UP_AXIS[:, None]
             faces_height = np.where(is_up_axis, boxes_size[..., None, :], 0.0).sum(axis=-1)
             faces_width = np.where(is_up_axis, np.inf, boxes_size[..., None, :]).min(axis=-1)
@@ -538,10 +544,9 @@ def test_box_stacks_stability(show_viewer, tol):
                     piles_energy_0.append(energy)
                 assert ((energy - piles_energy_0[i_p]) / piles_energy_unit[i_p] <= tol).all()
 
-    # FIXME: Boxes are jittery.
-    # for scale, pile_pos, boxes in piles:
-    #     for box in boxes:
-    #         assert_allclose(box.get_dofs_velocity(), 0.0, tol=tol)
+        # Every pile has come to rest by the end of the phase
+        for links_idx, dofs_idx, energy_unit in zip(piles_links_idx, piles_dofs_idx, piles_energy_unit):
+            assert (scene.rigid_solver.get_kinetic_energy(links_idx, dofs_idx) / energy_unit <= tol).all()
 
 
 @pytest.mark.required
