@@ -274,7 +274,7 @@ def func_box_box_contact(
             code = i + 3 * (pos12[i] < 0) + 6
     clnorm = qd.Vector([0.0, 0.0, 0.0], dt=gs.qd_float)
     # Keep the face axis unless an edge-edge axis has a smaller penetration by more than rounding error.
-    # That error scales with the box sizes, since each penetration sums terms bounded by the half-sizes.
+    # That error scales with the box sizes over the norm of the edge cross product.
     tol_edge = EPS * (size1.sum() + size2.sum())
     for i, j in qd.static(qd.ndrange(3, 3)):
         rj0 = rott[j, 0]
@@ -312,7 +312,7 @@ def func_box_box_contact(
             if c3 < -margin:
                 is_return = True
 
-            if c3 < penetration - tol_edge:
+            if c3 < penetration - tol_edge / c1:
                 penetration = c3
                 cle1 = 0
                 for k in qd.static(range(3)):
