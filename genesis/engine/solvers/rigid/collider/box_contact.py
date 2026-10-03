@@ -811,10 +811,9 @@ def func_box_box_contact(
                 for i in range(4):
                     x, y = collider_state.box_ppts2[i, 0, i_b], collider_state.box_ppts2[i, 1, i_b]
 
-                    if nl == 0:
-                        if (nf != 0) and (x < -lx or x > lx) and (y < -ly or y > ly):
-                            continue
-                    elif x < -lx or x > lx or y < -ly or y > ly:
+                    # Skip an incident corner outside the reference face, which would report its offset as penetration.
+                    # Without edge crossings or reference corners the incident face lies within it, so none is skipped.
+                    if (nl != 0 or nf != 0) and (x < -lx or x > lx or y < -ly or y > ly):
                         continue
 
                     c1 = 0
