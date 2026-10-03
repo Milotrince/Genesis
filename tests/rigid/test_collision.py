@@ -430,30 +430,27 @@ def test_box_stacks_stability(box_box_detection, show_viewer, tol):
     N_PHASES = 3
     N_STEPS = 50
     GRAVITY = 9.81
-    TILT = 1e-3
+    TILT = 0.05
     SCALES = (0.1, 0.4, 2.0)
     N_PILES_PER_SCALE = 2
     BASE_SIZE = np.array((2.0, 2.0, 1.0))
     BOXES_SIZE = np.array(((1.0, 0.6, 0.02), (0.8, 0.2, 0.1), (0.5, 0.4, 0.1), (0.3, 0.3, 0.3)))
     PILE_SPACING = 1.5 * BASE_SIZE[0] * max(SCALES)
-    # Orientations resting a box on each of its six faces, with the index of the body axis left vertical
-    FACES_RPY = np.array(
+    BOX_EULER_ROTS = np.array(
         (
             (0.0, 0.0, 0.0),
-            (np.pi, 0.0, 0.0),
-            (0.5 * np.pi, 0.0, 0.0),
-            (-0.5 * np.pi, 0.0, 0.0),
-            (0.0, -0.5 * np.pi, 0.0),
-            (0.0, 0.5 * np.pi, 0.0),
+            (180.0, 0.0, 0.0),
+            (90.0, 0.0, 0.0),
+            (-90.0, 0.0, 0.0),
+            (0.0, -90.0, 0.0),
+            (0.0, 90.0, 0.0),
         )
     )
-    FACES_UP_AXIS = np.array((2, 2, 1, 1, 0, 0))
+    BOX_UP_AXES = np.array((2, 2, 1, 1, 0, 0))
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
             dt=0.01,
-            # Halves the resting sink of the contacts, which narrow supports at the smallest scale cannot carry without
-            # tipping over.
             substeps=2,
             gravity=(0.0, 0.0, -GRAVITY),
         ),
@@ -462,8 +459,8 @@ def test_box_stacks_stability(box_box_detection, show_viewer, tol):
             use_hibernation=False,
         ),
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(15.5, -5.7, 11.1),
-            camera_lookat=(0.1, 1.3, 0.6),
+            camera_pos=(15.5, -5.5, 11.0),
+            camera_lookat=(0.1, 1.2, 0.6),
         ),
         show_viewer=show_viewer,
     )
@@ -507,7 +504,7 @@ def test_box_stacks_stability(box_box_detection, show_viewer, tol):
         for (scale, pile_pos, boxes), boxes_size in zip(piles, piles_boxes_size):
             n_boxes = len(boxes)
             # Create stable box stacks which should not tip over.
-            is_up_axis = np.arange(3) == FACES_UP_AXIS[:, None]
+            is_up_axis = np.arange(3) == BOX_UP_AXES[:, None]
             faces_height = np.where(is_up_axis, boxes_size[..., None, :], 0.0).sum(axis=-1)
             faces_width = np.where(is_up_axis, np.inf, boxes_size[..., None, :]).min(axis=-1)
             faces = np.argmax(np.where(faces_height <= faces_width, np.random.rand(*faces_height.shape), -1.0), axis=-1)
@@ -521,9 +518,9 @@ def test_box_stacks_stability(box_box_detection, show_viewer, tol):
             boxes_pos[..., :2] = pile_pos[:2] + 0.08 * boxes_width.min(axis=0)[:, None] * boxes_offset
             boxes_pos[..., 2] = pile_pos[2] + boxes_top - 0.5 * boxes_height
             angles_rp = np.random.uniform(low=-1.0, high=1.0, size=(n_boxes, N_ENVS, 2)) * envs_tilt[:, None]
-            angle_yaw = np.random.uniform(low=-np.pi, high=np.pi, size=(n_boxes, N_ENVS, 1))
-            quat_face = gu.xyz_to_quat(FACES_RPY[faces], rpy=True)
-            quat_pose = gu.xyz_to_quat(np.concatenate([angles_rp, angle_yaw], axis=-1), rpy=True)
+            angle_yaw = np.random.uniform(low=-180.0, high=180.0, size=(n_boxes, N_ENVS, 1))
+            quat_face = gu.euler_to_quat(BOX_EULER_ROTS[faces])
+            quat_pose = gu.euler_to_quat(np.concatenate([angles_rp, angle_yaw], axis=-1))
             boxes_quat = gu.transform_quat_by_quat(quat_face, quat_pose)
             for box, pos, quat in zip(boxes, boxes_pos, boxes_quat):
                 box.set_pos(pos)

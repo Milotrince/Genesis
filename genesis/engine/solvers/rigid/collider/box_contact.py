@@ -273,8 +273,8 @@ def func_box_box_contact(
             penetration = c2
             code = i + 3 * (pos12[i] < 0) + 6
     clnorm = qd.Vector([0.0, 0.0, 0.0], dt=gs.qd_float)
-    # An edge-edge axis must beat the face axis by more than rounding error, so that a tie stays with the face. Each
-    # separation sums terms bounded by the half-sizes, so that error scales with the box sizes.
+    # Keep the face axis unless an edge-edge axis has a smaller penetration by more than rounding error.
+    # That error scales with the box sizes, since each penetration sums terms bounded by the half-sizes.
     tol_edge = EPS * (size1.sum() + size2.sum())
     for i, j in qd.static(qd.ndrange(3, 3)):
         rj0 = rott[j, 0]
@@ -500,9 +500,8 @@ def func_box_box_contact(
                         )
                         n = n + 1
 
-            # A lone incident corner is the whole manifold, so it is kept as is. Otherwise the closest corner is clipped
-            # like the others, since it lies outside the reference face whenever the incident face overhangs it, and the
-            # edge crossings above already cover the clipped polygon.
+            # Keep the incident face corners lying on the reference face. When the incident box touches it with a single
+            # corner, that corner is the whole contact and is kept wherever it lies.
             for i in range(1 << (m - 1)):
                 tmp1 = collider_state.box_pts[0 if i == 0 else i + 2, i_b]
                 if m == 1 or not (tmp1[0] <= -lx or tmp1[0] >= lx or tmp1[1] <= -ly or tmp1[1] >= ly):
