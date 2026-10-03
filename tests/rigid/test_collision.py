@@ -175,7 +175,7 @@ def test_no_drift(gjk_collision, entity_kind, entity_type, ground_type, show_vie
     # Smallest semi-axis along body z so the ellipsoid rests on its narrowest cross-section
     ELLIPSOID_SEMI_AXES = (0.0035, 0.0030, SMOOTH_RADIUS)
     BOX_HALF_EXTENT = 0.1
-    N_ENVS = 16
+    N_ENVS = 64
     SPHERE_TESSELLATION_SUBDIVISIONS = 3
 
     # The box and the gravity vector are rotated by the same tilt, which is physically equivalent to the untilted setup.
@@ -424,13 +424,16 @@ def test_mpr_thin_box_stack_no_lateral_phantom(show_viewer, tol):
 @pytest.mark.parametrize("precision", ["32"])
 @pytest.mark.parametrize("box_box_detection", [False, True])
 def test_box_stacks_stability(box_box_detection, show_viewer, tol):
-    # Piles of boxes of random shapes, each lying on a random face at a random yaw near the axis of its pile, on fixed
-    # bases at several scales, restacked in a new order and pose after every reset.
-    N_ENVS = 16
+    # Balanced piles of random boxes in a random order, on fixed bases at several scales, restacked after every reset.
+    N_ENVS = 64
     N_PHASES = 3
     N_STEPS = 50
     GRAVITY = 9.81
     TILT = 0.05
+    N_TRIES = 1000
+    # Largest offset of a box from the pile axis and smallest balance margin, relative to the pile scale
+    OFFSET_MAX = 0.2
+    MARGIN = 0.03
     SCALES = (0.1, 0.4, 2.0)
     N_PILES_PER_SCALE = 2
     BASE_SIZE = np.array((2.0, 2.0, 1.0))
@@ -492,35 +495,65 @@ def test_box_stacks_stability(box_box_detection, show_viewer, tol):
     scene.build(n_envs=N_ENVS)
 
     # The boxes are built axis-aligned, so their bounding boxes give the size each environment simulates
-    piles_boxes_size = []
+    piles_boxes_size, piles_boxes_mass = [], []
     for scale, pile_pos, boxes in piles:
         aabbs = np.stack([tensor_to_array(box.get_AABB()) for box in boxes])
         piles_boxes_size.append(aabbs[..., 1, :] - aabbs[..., 0, :])
+        piles_boxes_mass.append(np.stack([tensor_to_array(box.get_mass()) for box in boxes]))
 
     envs_tilt = TILT * (np.arange(N_ENVS) % 2)
     for i_phase in range(N_PHASES):
         if i_phase > 0:
             scene.reset()
-        for (scale, pile_pos, boxes), boxes_size in zip(piles, piles_boxes_size):
+        for (scale, pile_pos, boxes), boxes_size, boxes_mass in zip(piles, piles_boxes_size, piles_boxes_mass):
             n_boxes = len(boxes)
-            # Create stable box stacks which should not tip over.
+            # Create stable box stacks which should not tip over, keeping the most precarious one of each environment.
+            shape = (N_TRIES, n_boxes, N_ENVS)
             is_up_axis = np.arange(3) == BOX_UP_AXES[:, None]
             faces_height = np.where(is_up_axis, boxes_size[..., None, :], 0.0).sum(axis=-1)
             faces_width = np.where(is_up_axis, np.inf, boxes_size[..., None, :]).min(axis=-1)
-            faces = np.argmax(np.where(faces_height <= faces_width, np.random.rand(*faces_height.shape), -1.0), axis=-1)
+            faces = np.argmax(np.where(faces_height <= faces_width, np.random.rand(*shape, 6), -1.0), axis=-1)
+            levels = np.argsort(np.random.rand(*shape), axis=1)
+            angle_yaw = np.random.uniform(low=-180.0, high=180.0, size=shape)
+            offset_dir = np.random.uniform(low=-np.pi, high=np.pi, size=shape)
+            offset_norm = OFFSET_MAX * scale * np.sqrt(np.random.rand(*shape))
+            boxes_offset = offset_norm[..., None] * np.stack((np.cos(offset_dir), np.sin(offset_dir)), axis=-1)
+
+            quat_yaw = gu.euler_to_quat(np.stack((np.zeros(shape), np.zeros(shape), angle_yaw), axis=-1))
+            boxes_R = gu.quat_to_R(gu.transform_quat_by_quat(gu.euler_to_quat(BOX_EULER_ROTS[faces]), quat_yaw))
+            boxes_half = np.where(is_up_axis[faces], np.inf, 0.5 * boxes_size)
+            levels_R = np.take_along_axis(boxes_R, levels[..., None, None], axis=1)
+            levels_half = np.take_along_axis(boxes_half, levels[..., None], axis=1)
+            levels_offset = np.take_along_axis(boxes_offset, levels[..., None], axis=1)
+            levels_mass = np.take_along_axis(np.broadcast_to(boxes_mass, shape), levels, axis=1)
+            mass_above = np.cumsum(levels_mass[:, ::-1], axis=1)[:, ::-1]
+            moment_above = np.cumsum((levels_mass[..., None] * levels_offset)[:, ::-1], axis=1)[:, ::-1]
+            com_above = moment_above / mass_above[..., None]
+            # The center of mass above each level must lie inside its own footprint and that of its support
+            footprints_R = np.stack((levels_R, np.roll(levels_R, 1, axis=1)))
+            footprints_half = np.stack((levels_half, np.roll(levels_half, 1, axis=1)))
+            footprints_offset = np.stack((levels_offset, np.roll(levels_offset, 1, axis=1)))
+            footprints_R[1, :, 0] = np.eye(3)
+            footprints_half[1, :, 0] = 0.5 * scale * BASE_SIZE * (1.0, 1.0, np.inf)
+            footprints_offset[1, :, 0] = 0.0
+            com_local = np.einsum("...ji,...j->...i", footprints_R[..., :2, :], com_above - footprints_offset)
+            margins = (footprints_half - np.abs(com_local)).min(axis=(0, 2, -1))
+            is_balanced = margins >= MARGIN * scale
+            assert is_balanced.any(axis=0).all()
+            tries_idx = np.argmin(np.where(is_balanced, margins, np.inf), axis=0)
+            best_idx = (tries_idx, np.arange(n_boxes)[:, None], np.arange(N_ENVS))
+            faces, levels = faces[best_idx], levels[best_idx]
+            angle_yaw, boxes_offset = angle_yaw[best_idx], boxes_offset[best_idx]
+
             boxes_height = np.take_along_axis(faces_height, faces[..., None], axis=-1)[..., 0]
-            boxes_width = np.take_along_axis(faces_width, faces[..., None], axis=-1)[..., 0]
-            levels = np.argsort(np.random.rand(n_boxes, N_ENVS), axis=0)
             boxes_top = np.empty_like(boxes_height)
             np.put_along_axis(boxes_top, levels, np.cumsum(np.take_along_axis(boxes_height, levels, axis=0), axis=0), 0)
             boxes_pos = np.empty((n_boxes, N_ENVS, 3))
-            boxes_offset = np.random.uniform(low=-1.0, high=1.0, size=(n_boxes, N_ENVS, 2))
-            boxes_pos[..., :2] = pile_pos[:2] + 0.08 * boxes_width.min(axis=0)[:, None] * boxes_offset
+            boxes_pos[..., :2] = pile_pos[:2] + boxes_offset
             boxes_pos[..., 2] = pile_pos[2] + boxes_top - 0.5 * boxes_height
             angles_rp = np.random.uniform(low=-1.0, high=1.0, size=(n_boxes, N_ENVS, 2)) * envs_tilt[:, None]
-            angle_yaw = np.random.uniform(low=-180.0, high=180.0, size=(n_boxes, N_ENVS, 1))
             quat_face = gu.euler_to_quat(BOX_EULER_ROTS[faces])
-            quat_pose = gu.euler_to_quat(np.concatenate([angles_rp, angle_yaw], axis=-1))
+            quat_pose = gu.euler_to_quat(np.concatenate([angles_rp, angle_yaw[..., None]], axis=-1))
             boxes_quat = gu.transform_quat_by_quat(quat_face, quat_pose)
             for box, pos, quat in zip(boxes, boxes_pos, boxes_quat):
                 box.set_pos(pos)
@@ -1128,7 +1161,7 @@ def test_contact_pruning_degenerated_hull(model_name, xml_path, show_viewer):
     BOX_HALFSIZE = 0.15
     PRIM_RADIUS = 0.0025
     PRIM_LENGTH = 0.02
-    N_ENVS = 16
+    N_ENVS = 64
 
     scene = gs.Scene(
         sim_options=gs.options.SimOptions(
