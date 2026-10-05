@@ -508,31 +508,29 @@ def test_box_stacks_stability(box_box_detection, show_viewer, tol):
         aabbs = np.stack([tensor_to_array(box.get_AABB()) for box in boxes])
         piles_boxes_size.append(aabbs[..., 1, :] - aabbs[..., 0, :])
 
+    # Largest roll, pitch and yaw of the boxes, the roll and pitch being nonzero in every other environment
     envs_tilt = TILT * (np.arange(N_ENVS) % 2)
+    envs_angles_max = np.stack((envs_tilt, envs_tilt, np.full(N_ENVS, 180.0)), axis=-1)
     for i_phase in range(N_PHASES):
         if i_phase > 0:
             scene.reset()
         for (scale, pile_pos, boxes), boxes_size in zip(piles, piles_boxes_size):
             n_boxes = len(boxes)
             # Create stable box stacks which should not tip over.
-            is_up_axis = np.arange(3) == BOX_UP_AXES[:, None]
-            faces_height = np.where(is_up_axis, boxes_size[..., None, :], 0.0).sum(axis=-1)
-            faces_width = np.where(is_up_axis, np.inf, boxes_size[..., None, :]).min(axis=-1)
-            faces = np.argmax(np.where(faces_height <= faces_width, np.random.rand(*faces_height.shape), -1.0), axis=-1)
+            faces_height = boxes_size[..., BOX_UP_AXES]
+            faces_width = np.where(np.arange(3) == BOX_UP_AXES[:, None], np.inf, boxes_size[..., None, :]).min(axis=-1)
+            faces = np.argmax((faces_height <= faces_width) * np.random.rand(*faces_height.shape), axis=-1)
             boxes_height = np.take_along_axis(faces_height, faces[..., None], axis=-1)[..., 0]
             boxes_width = np.take_along_axis(faces_width, faces[..., None], axis=-1)[..., 0]
-            levels = np.argsort(np.random.rand(n_boxes, N_ENVS), axis=0)
-            boxes_top = np.empty_like(boxes_height)
-            np.put_along_axis(boxes_top, levels, np.cumsum(np.take_along_axis(boxes_height, levels, axis=0), axis=0), 0)
+            boxes_level = np.argsort(np.random.rand(n_boxes, N_ENVS), axis=0)
+            boxes_top = np.where(boxes_level <= boxes_level[:, None], boxes_height, 0.0).sum(axis=1)
             boxes_pos = np.empty((n_boxes, N_ENVS, 3))
             boxes_offset = np.random.uniform(low=-1.0, high=1.0, size=(n_boxes, N_ENVS, 2))
             boxes_pos[..., :2] = pile_pos[:2] + 0.08 * boxes_width.min(axis=0)[:, None] * boxes_offset
             boxes_pos[..., 2] = pile_pos[2] + boxes_top - 0.5 * boxes_height
-            angles_rp = np.random.uniform(low=-1.0, high=1.0, size=(n_boxes, N_ENVS, 2)) * envs_tilt[:, None]
-            angle_yaw = np.random.uniform(low=-180.0, high=180.0, size=(n_boxes, N_ENVS, 1))
+            boxes_angles = np.random.uniform(low=-1.0, high=1.0, size=(n_boxes, N_ENVS, 3)) * envs_angles_max
             quat_face = gu.euler_to_quat(BOX_EULER_ROTS[faces])
-            quat_pose = gu.euler_to_quat(np.concatenate([angles_rp, angle_yaw], axis=-1))
-            boxes_quat = gu.transform_quat_by_quat(quat_face, quat_pose)
+            boxes_quat = gu.transform_quat_by_quat(quat_face, gu.euler_to_quat(boxes_angles))
             for box, pos, quat in zip(boxes, boxes_pos, boxes_quat):
                 box.set_pos(pos)
                 box.set_quat(quat)
