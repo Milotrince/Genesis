@@ -767,6 +767,12 @@ def func_box_box_contact(
                 d = collider_state.box_pts[2, i_b][1]
                 c1 = a * d - b * c
 
+                n_incident_inside = 0
+                for i in range(4):
+                    x, y = collider_state.box_ppts2[i, 0, i_b], collider_state.box_ppts2[i, 1, i_b]
+                    if -lx <= x and x <= lx and -ly <= y and y <= ly:
+                        n_incident_inside = n_incident_inside + 1
+
                 for i in range(4):
                     llx = lx if (i // 2) else -lx
                     lly = ly if (i % 2) else -ly
@@ -777,7 +783,9 @@ def func_box_box_contact(
                     u = (x * d - y * b) / c1
                     v = (y * a - x * c) / c1
 
-                    if nl == 0:
+                    # Skip a reference corner outside the incident face, which would report its offset as penetration.
+                    # It is kept, clamped onto that face, only when no edge crossing or incident corner gives a point.
+                    if nl == 0 and n_incident_inside == 0:
                         if (u < 0 or u > 1) and (v < 0 or v > 1):
                             continue
                     elif u < 0 or u > 1 or v < 0 or v > 1:
