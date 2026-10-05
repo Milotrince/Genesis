@@ -500,8 +500,8 @@ def func_box_box_contact(
                         )
                         n = n + 1
 
-            # Keep the incident face corners lying on the reference face. When the incident box touches it with a single
-            # corner, that corner is the whole contact and is kept wherever it lies.
+            # Keep the incident face corners lying on the reference face.
+            # If the incident box touches it with a single corner, keep that corner.
             for i in range(1 << (m - 1)):
                 tmp1 = collider_state.box_pts[0 if i == 0 else i + 2, i_b]
                 if m == 1 or not (tmp1[0] <= -lx or tmp1[0] >= lx or tmp1[1] <= -ly or tmp1[1] >= ly):
