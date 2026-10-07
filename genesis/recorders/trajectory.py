@@ -135,7 +135,8 @@ def _read_frame(sim: "Simulator", kinds: frozenset[DataKind]) -> np.ndarray:
     """Return one frame as a flat uint8 buffer laid out as '_frame_fields' states.
 
     On a GPU backend with zero-copy views the arrays are concatenated on the device and cross to the host once.
-    Otherwise numpy concatenates them on the host, which on the CPU backend is several times faster than torch.
+    Otherwise numpy concatenates them on the host, since on the CPU backend torch copies a large array on its thread
+    pool, which contends with the simulation threads right after a step.
     """
     flags = [
         flag
