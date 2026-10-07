@@ -134,9 +134,8 @@ def _frame_fields(sim: "Simulator", kinds: frozenset[DataKind]) -> list[FrameFie
 def _read_frame(sim: "Simulator", kinds: frozenset[DataKind]) -> np.ndarray:
     """Return one frame as a flat uint8 buffer laid out as '_frame_fields' states.
 
-    On an accelerator with zero-copy views the arrays are concatenated on the device and cross to the host once.
-    Otherwise each array crosses on its own and the concatenation runs on the host. This includes the CPU backend, where
-    numpy concatenates the views several times faster than torch's thread pool does.
+    On a GPU backend with zero-copy views the arrays are concatenated on the device and cross to the host once.
+    Otherwise numpy concatenates them on the host, which on the CPU backend is several times faster than torch.
     """
     flags = [
         flag
@@ -223,7 +222,6 @@ class TrajectoryFileWriter(BaseFileWriter):
         self._last_fields = _frame_fields(sim, CHECKPOINT_FILE_KINDS)
         self._frame_size = sum(field.nbytes for field in self._fields)
         self._steps_field = next(field for field in self._fields if field.name == STEPS_FIELD)
-        # The open chunk and the one being written swap at each handoff (see '_start_chunk_write')
         self._chunks_frames = np.empty((2, self._options.chunk_size, self._frame_size), dtype=np.uint8)
         self._i_open_chunk = 0
         self._n_chunk_frames = 0
@@ -275,9 +273,7 @@ class TrajectoryFileWriter(BaseFileWriter):
         self._n_chunk_frames += 1
 
     def _start_chunk_write(self):
-        """Hand the open chunk to a writer thread, once the write of the previous chunk has ended, and open the buffer
-        that write held.
-        """
+        """Hand the open chunk to a writer thread, once the write of the previous chunk has ended."""
         if self._writer is not None:
             self._writer.join()
             self._writer = None
