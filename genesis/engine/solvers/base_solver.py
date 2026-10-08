@@ -13,6 +13,7 @@ import genesis as gs
 import genesis.utils.array_class as array_class
 from genesis.engine.entities.base_entity import Entity
 from genesis.engine.materials.base import Material
+from genesis.engine.solver_data import SolverData, SolverDescription
 from genesis.engine.states import QueriedStates, SolverCheckpoint
 from genesis.repr_base import RBC
 from genesis.utils.misc import (
@@ -320,6 +321,8 @@ class Solver(RBC):
         self._sim = sim
         self._scene = scene
         self._options = options
+        self._data_description: SolverDescription | None = None
+        self._solver_data: SolverData | None = None
         self._entities: list[Entity] = gs.List()
 
         # Queue of solver-level states queried during the current backward window. Solvers that surface solver-state
@@ -355,6 +358,16 @@ class Solver(RBC):
                 sanitize_index(subscriber.links_filter, -1, self.n_links, 0, "links_filter")
             )
         self._subscribers.add(subscriber)
+
+    def describe(self) -> SolverDescription | None:
+        self._B = self._sim._B
+        return None
+
+    def register_data(self):
+        pass
+
+    def bind(self):
+        pass
 
     def build(self):
         self._B = self._sim._B

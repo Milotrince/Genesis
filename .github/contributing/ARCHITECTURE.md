@@ -107,6 +107,20 @@ Location: `genesis/engine/materials/`
 
 Location: `genesis/engine/solvers/`
 
+### Solver data lifecycle
+
+`Simulator` owns an internal `SolverDataArray`. Each record has a concrete type, an owning solver and an owner-local index. Solvers and couplers resolve records during build and retain references for runtime access. Public entity APIs return safe tensors and route writes through solver setters.
+
+The build phases are:
+
+1. `describe()` resolves entity ranges and static configuration, then returns the dimensions and inputs for shared allocation.
+2. The simulator allocates every description into its data collection.
+3. `register_data()` stores native references and registers geometry and joint records with their ranges.
+4. The collection closes registration, then every solver runs `bind()` to resolve peers.
+5. `build()` initializes state and private workspaces.
+
+Rigid and kinematic solvers use `ArticulatedDescription` for their shared native arrays. `LinksData`, `JointsData` and `VisualGeomData` identify ranges within those arrays. The articulated record also owns joint configuration, rest configuration, gravity, and mean inertia; `RigidInfo` references those allocations for native kernels. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly. Checkpoint iteration includes each shared allocation once; range records hold references to it. Scratch and adjoint workspaces remain owned by the solver's data manager.
+
 ## Key Files Reference
 
 | File | Purpose |

@@ -817,6 +817,10 @@ def test_setters(show_viewer, tol):
     assert_allclose(ghost_box.get_vAABB()[0], ((-0.20, -0.05, -0.10), (0.20, 0.05, 0.1)), tol=tol)
     assert_allclose(ghost_box.get_vAABB()[1], ((-0.05, -0.10, -0.2), (0.05, 0.10, 0.2)), tol=tol)
 
+    snapshot = ghost_box.get_pos()
+    snapshot[:] = 99.0
+    assert_allclose(ghost_box.get_pos(), 0.0, atol=tol)
+
     n_dofs = ghost_robot.n_dofs
     dofs_idx_cases = (
         (-1, (n_dofs - 1,)),
