@@ -359,10 +359,8 @@ class Solver(RBC):
             )
         self._subscribers.add(subscriber)
 
-    def prepare(self):
-        self._B = self._sim._B
-
     def describe(self) -> SolverDescription | None:
+        self._B = self._sim._B
         return None
 
     def register_data(self):

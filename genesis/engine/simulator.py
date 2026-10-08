@@ -221,7 +221,6 @@ class Simulator(RBC):
         self._steps = torch.zeros((self._B,), dtype=gs.tc_int, device=gs.device)
 
         for solver in self._solvers:
-            solver.prepare()
             solver._data_description = solver.describe()
         for solver in self._solvers:
             if solver._data_description is not None:

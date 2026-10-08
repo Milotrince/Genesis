@@ -231,8 +231,8 @@ class KinematicSolver(Solver):
     # ------------------------------------ build -----------------------------------------
     # ------------------------------------------------------------------------------------
 
-    def prepare(self):
-        super().prepare()
+    def describe(self) -> ArticulatedDescription:
+        super().describe()
 
         self.n_envs = self.sim.n_envs
         self._B = self.sim._B
@@ -376,7 +376,6 @@ class KinematicSolver(Solver):
 
         self._build_static_config()
 
-    def describe(self) -> ArticulatedDescription:
         return ArticulatedDescription(
             n_envs=self._B,
             n_dofs_=self.n_dofs_,

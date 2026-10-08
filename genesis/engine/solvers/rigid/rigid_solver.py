@@ -310,7 +310,7 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
     def init_ckpt(self):
         pass
 
-    def prepare(self):
+    def describe(self):
         self._n_geoms = self.n_geoms
         self._n_cells = self.n_cells
         self._n_verts = self.n_verts
@@ -341,9 +341,6 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
             if not self._enable_mujoco_compatibility:
                 self._options.tolerance *= 0.1
 
-        super().prepare()
-
-    def describe(self):
         return replace(
             super().describe(),
             n_geoms_=self.n_geoms_,
