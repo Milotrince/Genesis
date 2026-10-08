@@ -380,6 +380,7 @@ class KinematicSolver(Solver):
         return ArticulatedDescription(
             n_envs=self._B,
             n_dofs_=self.n_dofs_,
+            n_qs_=self.n_qs_,
             n_links_=self.n_links_,
             n_joints_=self.n_joints_,
             n_entities_=self.n_entities_,
@@ -387,22 +388,14 @@ class KinematicSolver(Solver):
             n_custom_vverts_=self.n_custom_vverts_,
             n_vfaces_=self.n_vfaces_,
             n_vgeoms_=self.n_vgeoms_,
-            n_geoms_=1,
-            n_verts_=1,
-            n_faces_=1,
-            n_edges_=1,
-            n_free_verts_=1,
-            n_fixed_verts_=1,
-            n_candidate_equalities_=1,
             n_joints_per_link=max((link.n_joints for link in self.links), default=0),
-            is_dynamic=False,
             has_grad=self._requires_grad,
             is_batch_links_info=self.rigid_config.batch_links_info,
             is_batch_dofs_info=self.rigid_config.batch_dofs_info,
             is_batch_joints_info=self.rigid_config.batch_joints_info,
         )
 
-    def bind(self):
+    def register_data(self):
         assert isinstance(self._solver_data, ArticulatedData)
         self.dyn_info = self._solver_data.info
         self.dyn_state = self._solver_data.state
@@ -427,6 +420,8 @@ class KinematicSolver(Solver):
                     state=self.dyn_state.joints,
                     dofs_info=self.dyn_info.dofs,
                     dofs_state=self.dyn_state.dofs,
+                    qpos=self._solver_data.qpos,
+                    qpos0=self._solver_data.qpos0,
                     joint_start=entity.joint_start,
                     joint_end=entity.joint_end,
                     dof_start=entity.dof_start,

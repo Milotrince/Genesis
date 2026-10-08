@@ -227,8 +227,10 @@ class Simulator(RBC):
             if solver._data_description is not None:
                 solver._solver_data = self._solver_data.allocate(solver, solver._data_description)
         for solver in self._solvers:
-            solver.bind()
+            solver.register_data()
         self._solver_data.build()
+        for solver in self._solvers:
+            solver.bind()
 
         # solvers
         # IPCCoupler needs full substep flow for pre/post coupling phases

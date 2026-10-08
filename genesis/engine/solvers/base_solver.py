@@ -365,6 +365,9 @@ class Solver(RBC):
     def describe(self) -> SolverDescription | None:
         return None
 
+    def register_data(self):
+        pass
+
     def bind(self):
         pass
 

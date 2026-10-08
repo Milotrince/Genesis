@@ -116,10 +116,11 @@ The build phases are:
 1. `prepare()` resolves entity ranges and static configuration.
 2. `describe()` returns the dimensions and inputs for shared allocation.
 3. The simulator allocates every description into its data collection.
-4. `bind()` stores native buffer references and registers geometry and joint records with their ranges.
-5. The collection closes registration, and `build()` initializes state and private workspaces.
+4. `register_data()` stores native references and registers geometry and joint records with their ranges.
+5. The collection closes registration, then every solver runs `bind()` to resolve peers.
+6. `build()` initializes state and private workspaces.
 
-Rigid and kinematic solvers use `ArticulatedDescription` for their shared native arrays. `LinksData`, `JointsData` and `VisualGeomData` identify ranges within those arrays. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly. Checkpoint iteration includes each shared allocation once; range records hold references to it. Scratch and adjoint workspaces remain owned by the solver's data manager.
+Rigid and kinematic solvers use `ArticulatedDescription` for their shared native arrays. `LinksData`, `JointsData` and `VisualGeomData` identify ranges within those arrays. The articulated record also owns joint configuration, rest configuration, gravity, and mean inertia; `RigidInfo` references those allocations for native kernels. A visual geometry pose is refreshed by `update_vgeoms()` before reading its state directly. Checkpoint iteration includes each shared allocation once; range records hold references to it. Scratch and adjoint workspaces remain owned by the solver's data manager.
 
 ## Key Files Reference
 
