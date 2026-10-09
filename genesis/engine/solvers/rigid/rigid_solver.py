@@ -3374,10 +3374,19 @@ class RigidSolver(GravityMixin, TimeBasedMixin, KinematicSolver):
         kernel_set_geoms_friction_rolling(geoms_idx, friction_rolling, self.dyn_info, self.rigid_config)
 
     def add_weld_constraint(self, link1_idx, link2_idx, envs_idx=None):
-        return self.constraint_solver.add_weld_constraint(link1_idx, link2_idx, envs_idx)
+        # The only type-specific entry is the torque scale of the rotation rows.
+        self.constraint_solver.add_dynamic_constraint(
+            gs.EQUALITY_TYPE.WELD,
+            link1_idx,
+            link2_idx,
+            anchor_link_idx=link1_idx,
+            anchor_pos=np.zeros(3, dtype=gs.np_float),
+            eq_data_tail=(1.0,),
+            envs_idx=envs_idx,
+        )
 
     def delete_weld_constraint(self, link1_idx, link2_idx, envs_idx=None):
-        return self.constraint_solver.delete_weld_constraint(link1_idx, link2_idx, envs_idx)
+        self.constraint_solver.delete_dynamic_constraint(gs.EQUALITY_TYPE.WELD, link1_idx, link2_idx, envs_idx)
 
     def get_weld_constraints(self, as_tensor: bool = True, to_torch: bool = True):
         return self.constraint_solver.get_weld_constraints(as_tensor, to_torch)
